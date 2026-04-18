@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-nomad-surface"
+version = "0.1.0"
+description = "A small Streamlit app for remotely operating a host-side Codex App Server from a mobile browser."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "streamlit>=1.33",
+    "websockets>=15.0",
+]
+
+[tool.setuptools]
+py-modules = [
+    "app",
+    "chat_store",
+    "codex_client",
+    "settings",
+    "skins",
+]
+
+[tool.ruff]
+target-version = "py312"
