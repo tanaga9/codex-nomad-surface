@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import atexit
 import hmac
+import shutil
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -24,6 +29,9 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
+
+
+APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 
 
 def init_state() -> None:
@@ -183,6 +191,81 @@ def connection_card(
         st.warning(message)
 
 
+def app_server_url_host(url: str) -> str:
+    try:
+        return urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+
+
+def can_start_local_app_server(settings: AppSettings, status: ConnectionStatus) -> bool:
+    return (
+        status.label == "Disconnected"
+        and app_server_url_host(settings.app_server_url) == "127.0.0.1"
+    )
+
+
+def terminate_process_at_exit(process: subprocess.Popen[bytes]) -> None:
+    def cleanup() -> None:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+    atexit.register(cleanup)
+
+
+def start_local_app_server(
+    settings: AppSettings,
+) -> tuple[bool, str, subprocess.Popen[bytes] | None]:
+    command = ["codex", "app-server", "--listen", settings.app_server_url]
+    if shutil.which(command[0]) is None:
+        return False, "`codex` command was not found on this host.", None
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return False, f"Could not start Codex App Server: {exc}", None
+    terminate_process_at_exit(process)
+    return True, "Starting Codex App Server...", process
+
+
+@st.dialog("Codex App Server launch status", width="large")
+def app_server_launch_status_dialog(returncode: int | None) -> None:
+    if returncode is None:
+        st.success("Codex App Server is still running after startup.")
+        st.caption("stdout and stderr are being written to this web server's logs.")
+    else:
+        st.error(f"Codex App Server exited during startup with code {returncode}.")
+        st.caption("Check this web server's logs for stdout and stderr output.")
+    if st.button("OK", type="primary"):
+        st.rerun()
+
+
+def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -> None:
+    if not can_start_local_app_server(settings, status):
+        return
+
+    st.caption("The configured App Server URL points to local host 127.0.0.1.")
+    if st.button("Start Codex App Server (WebSockets)", type="primary"):
+        ok, message, process = start_local_app_server(settings)
+        if not ok:
+            st.error(message)
+            return
+        st.success(message)
+        time.sleep(APP_SERVER_STARTUP_CHECK_SECONDS)
+        app_server_launch_status_dialog(process.poll() if process else -1)
+    st.caption(
+        "If this web server is force-killed, the launched Codex App Server process may remain running."
+    )
+
+
 def connection_gate_screen(
     settings: AppSettings, client: CodexClient, status: ConnectionStatus
 ) -> None:
@@ -194,6 +277,7 @@ def connection_gate_screen(
     st.caption("Chat cannot start until the connection is available.")
 
     settings_screen(settings)
+    local_app_server_launcher(settings, status)
 
 
 def project_selector(
@@ -690,6 +774,9 @@ def settings_screen(settings: AppSettings, heading: bool = True) -> None:
         settings.app_server_url = url.strip()
         persist()
         st.success("Settings saved.")
+        saved_client = CodexClient(settings.app_server_url)
+        saved_client.status()
+        st.rerun()
 
 
 def main_screen() -> None:

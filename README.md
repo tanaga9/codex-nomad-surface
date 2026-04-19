@@ -41,16 +41,18 @@ pip install -e .
 
 ## Run
 
-Start Codex App Server first.
-
-```bash
-codex app-server --listen ws://127.0.0.1:8080
-```
-
-Start the Streamlit app in another terminal.
+Start the Streamlit app.
 
 ```bash
 NOMAD_AUTH_SECRET='your-secret' streamlit run app.py
+```
+
+If the configured Codex App Server URL points to `127.0.0.1` and the app cannot connect, the connection screen can start Codex App Server for you.
+
+You can also start Codex App Server manually.
+
+```bash
+codex app-server --listen ws://127.0.0.1:8080
 ```
 
 Set `NOMAD_AUTH_SECRET` to a real local secret before exposing the app on a network. If it is omitted, the app uses the development default `dev-secret`.
@@ -73,5 +75,9 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 ## Notes
 
 Communication with Codex App Server supports WebSocket RPC only. The Settings URL must use `ws://` or `wss://`.
+
+When Codex Nomad Surface starts Codex App Server, it checks shortly after launch whether the process is still running. If the process exits during startup, the launch status dialog shows the exit code. Codex App Server stdout and stderr are written to the web server logs.
+
+Codex App Server processes started from the connection screen are stopped when this web server exits normally. If this web server is force-killed, the launched Codex App Server process may remain running.
 
 When Codex updates this app's source files through the app itself, a browser reload is usually enough for Streamlit to rerun with the updated code. Restart the Streamlit process when dependencies, environment variables, or launch options change.
