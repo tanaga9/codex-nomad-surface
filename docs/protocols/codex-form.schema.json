@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-nomad-surface.local/docs/protocols/codex-form.schema.json",
+  "title": "codex-form",
+  "description": "Assistant-to-UI protocol for embedded response forms in Codex Nomad Surface.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["template", "fields"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "UI heading for the rendered form."
+    },
+    "description": {
+      "type": "string",
+      "description": "Short explanatory text shown with the form."
+    },
+    "submit_label": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Label for the form submission button."
+    },
+    "append_spacing": {
+      "type": "string",
+      "enum": ["none", "line", "paragraph"],
+      "description": "Controls how generated text is appended to the current draft."
+    },
+    "template": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Plain-text template used to generate the inserted draft text. Use {field_id} placeholders."
+    },
+    "fields": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/field"
+      },
+      "description": "List of field definitions."
+    }
+  },
+  "$defs": {
+    "optionString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "optionObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "label"],
+      "properties": {
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "option": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/optionString"
+        },
+        {
+          "$ref": "#/$defs/optionObject"
+        }
+      ]
+    },
+    "fieldBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "placeholder": {
+          "type": "string"
+        },
+        "help": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "radioField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fieldBase"
+        },
+        {
+          "type": "object",
+          "required": ["options"],
+          "properties": {
+            "type": {
+              "const": "radio"
+            },
+            "default": {
+              "type": "string"
+            },
+            "options": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/option"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "selectField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fieldBase"
+        },
+        {
+          "type": "object",
+          "required": ["options"],
+          "properties": {
+            "type": {
+              "const": "select"
+            },
+            "default": {
+              "type": "string"
+            },
+            "options": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/option"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "textField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fieldBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "text"
+            },
+            "default": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "textareaField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fieldBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "textarea"
+            },
+            "default": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "checkboxField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fieldBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "checkbox"
+            },
+            "default": {
+              "type": "boolean"
+            },
+            "checked_value": {
+              "type": "string"
+            },
+            "unchecked_value": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "field": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/radioField"
+        },
+        {
+          "$ref": "#/$defs/selectField"
+        },
+        {
+          "$ref": "#/$defs/textField"
+        },
+        {
+          "$ref": "#/$defs/textareaField"
+        },
+        {
+          "$ref": "#/$defs/checkboxField"
+        }
+      ]
+    }
+  }
+}

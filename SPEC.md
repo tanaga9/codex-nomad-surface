@@ -143,6 +143,34 @@ Codex may optimize the screen structure and UI details during implementation.
 
 ---
 
+## Assistant-Provided Micro UI
+
+Codex Nomad Surface may render small structured UI fragments proposed by the
+assistant inside the chat flow.
+
+This is distinct from the higher-level `Skin` concept.
+
+The intended layering is:
+
+- **Skin**: the overall task-specific operation surface
+- **Assistant-provided micro UI**: localized structured affordances embedded in a
+  response, such as a choice form for the next user message
+
+The initial policy for assistant-provided micro UI is:
+
+- It should be declarative and text-based.
+- It should fail safely when the UI does not understand the payload.
+- It should assist user input rather than bypass user confirmation.
+- It should preserve the chat system's text-first nature.
+- It should remain extensible so additional field types and interaction patterns
+  can be added later.
+
+An initial example of this policy is the embedded response form mechanism, where
+the assistant emits a structured block and the Web UI renders a form that
+generates editable draft text for the user.
+
+---
+
 ## Non-Goals
 
 The following are not required:

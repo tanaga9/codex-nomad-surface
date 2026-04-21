@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import atexit
+import html
 import hmac
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -34,6 +36,10 @@ st.set_page_config(
 
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
+CODEX_FORM_BLOCK_PATTERN = re.compile(
+    r"```codex-form\s*\n(.*?)\n```",
+    re.DOTALL,
+)
 
 
 def init_state() -> None:
@@ -601,9 +607,429 @@ def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> Non
         if skip_latest_user and chat.messages and chat.messages[-1].role == "user"
         else chat.messages
     )
-    for message in messages:
+    for index, message in enumerate(messages):
         with st.chat_message(message.role):
-            st.markdown(message.content)
+            content = message.content
+            embedded_forms: list[dict] = []
+            if message.role == "assistant":
+                content, embedded_forms = extract_embedded_forms(content)
+            if content:
+                st.markdown(content)
+            for form_index, form_schema in enumerate(embedded_forms):
+                render_embedded_form(
+                    form_schema,
+                    instance_key=f"{chat.id if chat else 'chat'}-{index}-{form_index}",
+                )
+
+
+def normalize_embedded_form_option(option: object) -> dict:
+    if isinstance(option, str):
+        return {"value": option, "label": option}
+    if not isinstance(option, dict):
+        raise ValueError("Form options must be strings or objects.")
+
+    value = str(option.get("value") or "").strip()
+    label = str(option.get("label") or value).strip()
+    if not value or not label:
+        raise ValueError("Form options must have value and label.")
+    return {"value": value, "label": label}
+
+
+def normalize_embedded_form_field(field: object) -> dict:
+    if not isinstance(field, dict):
+        raise ValueError("Form fields must be objects.")
+
+    field_id = str(field.get("id") or "").strip()
+    field_type = str(field.get("type") or "").strip().lower()
+    if not field_id:
+        raise ValueError("Form fields must have an id.")
+    if field_type not in {"radio", "select", "text", "textarea", "checkbox"}:
+        raise ValueError(f"Unsupported form field type: {field_type}")
+
+    normalized = {
+        "id": field_id,
+        "type": field_type,
+        "label": str(field.get("label") or field_id).strip(),
+        "placeholder": str(field.get("placeholder") or "").strip(),
+        "help": str(field.get("help") or "").strip(),
+        "required": bool(field.get("required", False)),
+        "default": str(field.get("default") or "").strip(),
+    }
+
+    if field_type in {"radio", "select"}:
+        options = [
+            normalize_embedded_form_option(option)
+            for option in field.get("options", [])
+        ]
+        if not options:
+            raise ValueError(f"{field_type} fields must provide at least one option.")
+        normalized["options"] = options
+        if not normalized["default"]:
+            normalized["default"] = options[0]["value"]
+    elif field_type == "checkbox":
+        normalized["default"] = bool(field.get("default", False))
+        normalized["checked_value"] = str(field.get("checked_value") or "true")
+        normalized["unchecked_value"] = str(field.get("unchecked_value") or "false")
+
+    return normalized
+
+
+def normalize_embedded_form(form: object) -> dict:
+    if not isinstance(form, dict):
+        raise ValueError("Embedded form must be a JSON object.")
+
+    template = str(
+        form.get("template")
+        or form.get("prompt_template")
+        or form.get("text_template")
+        or ""
+    ).strip()
+    if not template:
+        raise ValueError("Embedded form must define a template.")
+
+    fields = [normalize_embedded_form_field(field) for field in form.get("fields", [])]
+    if not fields:
+        raise ValueError("Embedded form must define at least one field.")
+
+    append_spacing = str(form.get("append_spacing") or "paragraph").strip().lower()
+    if append_spacing not in {"none", "line", "paragraph"}:
+        append_spacing = "paragraph"
+
+    return {
+        "title": str(form.get("title") or "Choose an option").strip()
+        or "Choose an option",
+        "description": str(form.get("description") or "").strip(),
+        "submit_label": str(form.get("submit_label") or "Add to chat input").strip()
+        or "Add to chat input",
+        "template": template,
+        "append_spacing": append_spacing,
+        "fields": fields,
+    }
+
+
+def extract_embedded_forms(content: str) -> tuple[str, list[dict]]:
+    forms: list[dict] = []
+
+    def replace(match: re.Match[str]) -> str:
+        raw_json = match.group(1).strip()
+        try:
+            forms.append(normalize_embedded_form(json.loads(raw_json)))
+            return ""
+        except (json.JSONDecodeError, ValueError):
+            return match.group(0)
+
+    stripped = CODEX_FORM_BLOCK_PATTERN.sub(replace, content).strip()
+    return stripped, forms
+
+
+def render_embedded_form_field(field: dict, group_name: str) -> str:
+    field_id = html.escape(field["id"], quote=True)
+    label = html.escape(field["label"])
+    help_text = html.escape(field.get("help", ""))
+    placeholder = html.escape(field.get("placeholder", ""), quote=True)
+    required_attr = "required" if field.get("required") else ""
+    help_html = f'<div class="codex-form-help">{help_text}</div>' if help_text else ""
+
+    if field["type"] == "textarea":
+        default_value = html.escape(str(field.get("default") or ""))
+        return f"""
+        <label class="codex-form-field">
+          <span class="codex-form-label">{label}</span>
+          <textarea data-codex-field="{field_id}" placeholder="{placeholder}" {required_attr}>{default_value}</textarea>
+          {help_html}
+        </label>
+        """
+
+    if field["type"] == "text":
+        default_value = html.escape(str(field.get("default") or ""), quote=True)
+        return f"""
+        <label class="codex-form-field">
+          <span class="codex-form-label">{label}</span>
+          <input type="text" value="{default_value}" data-codex-field="{field_id}" placeholder="{placeholder}" {required_attr}>
+          {help_html}
+        </label>
+        """
+
+    if field["type"] == "checkbox":
+        checked_attr = "checked" if field.get("default") else ""
+        return f"""
+        <label class="codex-form-checkbox">
+          <input
+            type="checkbox"
+            data-codex-field="{field_id}"
+            data-checked-value="{html.escape(field['checked_value'], quote=True)}"
+            data-unchecked-value="{html.escape(field['unchecked_value'], quote=True)}"
+            {checked_attr}
+          >
+          <span>{label}</span>
+        </label>
+        {help_html}
+        """
+
+    if field["type"] == "select":
+        options_html = "".join(
+            f'<option value="{html.escape(option["value"], quote=True)}"'
+            + (" selected" if option["value"] == field.get("default") else "")
+            + f'>{html.escape(option["label"])}</option>'
+            for option in field["options"]
+        )
+        return f"""
+        <label class="codex-form-field">
+          <span class="codex-form-label">{label}</span>
+          <select data-codex-field="{field_id}">
+            {options_html}
+          </select>
+          {help_html}
+        </label>
+        """
+
+    options_html = "".join(
+        f"""
+        <label class="codex-form-option">
+          <input
+            type="radio"
+            name="{html.escape(group_name, quote=True)}"
+            value="{html.escape(option['value'], quote=True)}"
+            data-codex-field="{field_id}"
+            {'checked' if option['value'] == field.get('default') else ''}
+          >
+          <span>{html.escape(option["label"])}</span>
+        </label>
+        """
+        for option in field["options"]
+    )
+    return f"""
+    <fieldset class="codex-form-fieldset">
+      <legend class="codex-form-label">{label}</legend>
+      <div class="codex-form-options">{options_html}</div>
+      {help_html}
+    </fieldset>
+    """
+
+
+def render_embedded_form(form: dict, instance_key: str) -> None:
+    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", f"codex-form-{instance_key}")
+    fields_html = "".join(
+        render_embedded_form_field(field, group_name=f"{dom_id}-{field['id']}")
+        for field in form["fields"]
+    )
+    schema_json = json.dumps(form)
+    st.html(
+        f"""
+        <div id="{html.escape(dom_id, quote=True)}" class="codex-form-root">
+          <style>
+            #{dom_id}.codex-form-root {{
+              margin-top: 0.75rem;
+              padding: 0.9rem;
+              border: 1px solid rgba(128, 128, 128, 0.25);
+              border-radius: 0.75rem;
+            }}
+            #{dom_id} .codex-form-title {{
+              font-weight: 600;
+              margin-bottom: 0.35rem;
+            }}
+            #{dom_id} .codex-form-description {{
+              margin-bottom: 0.75rem;
+              opacity: 0.85;
+            }}
+            #{dom_id} .codex-form-field,
+            #{dom_id} .codex-form-fieldset {{
+              display: flex;
+              flex-direction: column;
+              gap: 0.35rem;
+              margin: 0 0 0.85rem;
+              border: 0;
+              padding: 0;
+              min-width: 0;
+            }}
+            #{dom_id} .codex-form-label {{
+              font-size: 0.92rem;
+              font-weight: 600;
+            }}
+            #{dom_id} .codex-form-help {{
+              font-size: 0.82rem;
+              opacity: 0.75;
+            }}
+            #{dom_id} input[type="text"],
+            #{dom_id} textarea,
+            #{dom_id} select {{
+              width: 100%;
+              box-sizing: border-box;
+              padding: 0.55rem 0.7rem;
+              border-radius: 0.5rem;
+              border: 1px solid rgba(128, 128, 128, 0.35);
+              background: transparent;
+              color: inherit;
+              font: inherit;
+            }}
+            #{dom_id} textarea {{
+              min-height: 7rem;
+              resize: vertical;
+            }}
+            #{dom_id} .codex-form-options {{
+              display: flex;
+              flex-direction: column;
+              gap: 0.45rem;
+            }}
+            #{dom_id} .codex-form-option,
+            #{dom_id} .codex-form-checkbox {{
+              display: flex;
+              align-items: flex-start;
+              gap: 0.55rem;
+            }}
+            #{dom_id} .codex-form-actions {{
+              display: flex;
+              align-items: center;
+              gap: 0.75rem;
+              margin-top: 0.25rem;
+            }}
+            #{dom_id} .codex-form-submit {{
+              min-height: 2.5rem;
+              padding: 0.45rem 0.9rem;
+              border-radius: 0.5rem;
+              border: 1px solid rgba(128, 128, 128, 0.35);
+              background: transparent;
+              color: inherit;
+              font: inherit;
+              cursor: pointer;
+            }}
+            #{dom_id} .codex-form-status {{
+              font-size: 0.85rem;
+              opacity: 0.8;
+            }}
+          </style>
+          <div class="codex-form-title">{html.escape(form["title"])}</div>
+          {f'<div class="codex-form-description">{html.escape(form["description"])}</div>' if form["description"] else ''}
+          {fields_html}
+          <div class="codex-form-actions">
+            <button type="button" class="codex-form-submit" data-codex-form-submit="true">
+              {html.escape(form["submit_label"])}
+            </button>
+            <span class="codex-form-status" data-codex-form-status="true"></span>
+          </div>
+        </div>
+        <script>
+        (() => {{
+          const root = document.getElementById({json.dumps(dom_id)});
+          if (!(root instanceof HTMLElement) || root.dataset.codexFormBound === "true") {{
+            return;
+          }}
+          root.dataset.codexFormBound = "true";
+
+          const schema = {schema_json};
+          const submitButton = root.querySelector("[data-codex-form-submit='true']");
+          const statusNode = root.querySelector("[data-codex-form-status='true']");
+
+          const getFieldValue = (field) => {{
+            if (field.type === "radio") {{
+              const selected = root.querySelector(
+                `[data-codex-field="${{field.id}}"]:checked`,
+              );
+              return selected instanceof HTMLInputElement ? selected.value : "";
+            }}
+
+            if (field.type === "checkbox") {{
+              const input = root.querySelector(`[data-codex-field="${{field.id}}"]`);
+              if (!(input instanceof HTMLInputElement)) {{
+                return "";
+              }}
+              return input.checked
+                ? input.dataset.checkedValue || "true"
+                : input.dataset.uncheckedValue || "false";
+            }}
+
+            const element = root.querySelector(`[data-codex-field="${{field.id}}"]`);
+            if (
+              element instanceof HTMLInputElement ||
+              element instanceof HTMLTextAreaElement ||
+              element instanceof HTMLSelectElement
+            ) {{
+              return element.value;
+            }}
+            return "";
+          }};
+
+          const interpolateTemplate = (template, values) =>
+            template.replace(/\\{{([a-zA-Z0-9_-]+)\\}}/g, (match, key) => values[key] ?? "");
+
+          const appendToChatInputFallback = (addition, options = {{}}) => {{
+            const textarea = document.querySelector('[data-testid="stChatInputTextArea"]');
+            if (!(textarea instanceof HTMLTextAreaElement) || !addition) {{
+              return false;
+            }}
+
+            const spacing = options.spacing || "paragraph";
+            const current = textarea.value ?? "";
+            let separator = "";
+            if (spacing === "line" && current) {{
+              separator = "\\n";
+            }} else if (spacing === "paragraph" && current) {{
+              separator = current.endsWith("\\n\\n")
+                ? ""
+                : current.endsWith("\\n")
+                  ? "\\n"
+                  : "\\n\\n";
+            }}
+
+            const next = `${{current}}${{separator}}${{addition}}`;
+            const valueSetter = Object.getOwnPropertyDescriptor(
+              HTMLTextAreaElement.prototype,
+              "value",
+            )?.set;
+            valueSetter?.call(textarea, next);
+            textarea.dispatchEvent(new Event("input", {{ bubbles: true }}));
+            textarea.focus();
+            textarea.setSelectionRange(next.length, next.length);
+            return true;
+          }};
+
+          const setStatus = (message) => {{
+            if (statusNode instanceof HTMLElement) {{
+              statusNode.textContent = message;
+            }}
+          }};
+
+          if (!(submitButton instanceof HTMLButtonElement)) {{
+            return;
+          }}
+
+          submitButton.onclick = (event) => {{
+            event.preventDefault();
+
+            const values = {{}};
+            const missingLabels = [];
+            for (const field of schema.fields) {{
+              const value = getFieldValue(field);
+              values[field.id] = value;
+              if (field.required && !String(value ?? "").trim()) {{
+                missingLabels.push(field.label || field.id);
+              }}
+            }}
+
+            if (missingLabels.length > 0) {{
+              setStatus(`Please fill: ${{missingLabels.join(", ")}}`);
+              return;
+            }}
+
+            const text = interpolateTemplate(schema.template, values).trim();
+            if (!text) {{
+              setStatus("Nothing to insert.");
+              return;
+            }}
+
+            const appendToChatInput =
+              window.codexNomadSurface?.appendToChatInput || appendToChatInputFallback;
+            const appended = appendToChatInput(
+              text,
+              {{ spacing: schema.append_spacing || "paragraph" }},
+            );
+            setStatus(appended ? "Added to chat input." : "Chat input was not found.");
+          }};
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
 
 
 def inject_chat_input_ime_guard() -> None:
@@ -690,6 +1116,57 @@ def inject_chat_input_ime_guard() -> None:
     )
 
 
+def inject_chat_input_bridge() -> None:
+    # Expose a tiny helper so custom UI can append text into the current
+    # chat input without changing the IME guard logic.
+    st.html(
+        """
+        <div id="chat-input-bridge" style="display:none"></div>
+        <script>
+        (() => {
+          const getChatInput = () =>
+            document.querySelector('[data-testid="stChatInputTextArea"]');
+
+          const appendToChatInput = (addition, options = {}) => {
+            const textarea = getChatInput();
+            if (!(textarea instanceof HTMLTextAreaElement) || !addition) {
+              return false;
+            }
+
+            const spacing = options.spacing || "paragraph";
+            const current = textarea.value ?? "";
+            let separator = "";
+            if (spacing === "line" && current) {
+              separator = "\\n";
+            } else if (spacing === "paragraph" && current) {
+              separator = current.endsWith("\\n\\n")
+                ? ""
+                : current.endsWith("\\n")
+                  ? "\\n"
+                  : "\\n\\n";
+            }
+
+            const next = `${current}${separator}${addition}`;
+            const valueSetter = Object.getOwnPropertyDescriptor(
+              HTMLTextAreaElement.prototype,
+              "value",
+            )?.set;
+            valueSetter?.call(textarea, next);
+            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            textarea.focus();
+            textarea.setSelectionRange(next.length, next.length);
+            return true;
+          };
+
+          window.codexNomadSurface = window.codexNomadSurface || {};
+          window.codexNomadSurface.appendToChatInput = appendToChatInput;
+        })();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
 def render_add_starter_button(starter: str, disabled: bool) -> None:
     starter = starter.strip()
     disabled_attr = "disabled" if disabled else ""
@@ -718,7 +1195,6 @@ def render_add_starter_button(starter: str, disabled: bool) -> None:
           }}
 
           const starter = {starter_json};
-          const textareaSelector = '[data-testid="stChatInputTextArea"]';
           const referenceButtonSelectors = [
             '[data-testid="stBaseButton-secondary"]:not([data-codex-add-starter="true"])',
             '.stButton > button:not([data-codex-add-starter="true"])',
@@ -795,23 +1271,26 @@ def render_add_starter_button(starter: str, disabled: bool) -> None:
             }});
           }};
 
-          const appendStarter = () => {{
-            const textarea = document.querySelector(textareaSelector);
-            if (!(textarea instanceof HTMLTextAreaElement) || !starter) {{
-              return;
+          const appendStarterFallback = (addition, options = {{}}) => {{
+            const textarea = document.querySelector('[data-testid="stChatInputTextArea"]');
+            if (!(textarea instanceof HTMLTextAreaElement) || !addition) {{
+              return false;
             }}
 
+            const spacing = options.spacing || "paragraph";
             const current = textarea.value ?? "";
             let separator = "";
-            if (current) {{
+            if (spacing === "line" && current) {{
+              separator = "\\n";
+            }} else if (spacing === "paragraph" && current) {{
               separator = current.endsWith("\\n\\n")
                 ? ""
                 : current.endsWith("\\n")
                   ? "\\n"
                   : "\\n\\n";
             }}
-            const next = `${{current}}${{separator}}${{starter}}`;
 
+            const next = `${{current}}${{separator}}${{addition}}`;
             const valueSetter = Object.getOwnPropertyDescriptor(
               HTMLTextAreaElement.prototype,
               "value",
@@ -820,6 +1299,7 @@ def render_add_starter_button(starter: str, disabled: bool) -> None:
             textarea.dispatchEvent(new Event("input", {{ bubbles: true }}));
             textarea.focus();
             textarea.setSelectionRange(next.length, next.length);
+            return true;
           }};
 
           syncButtonTheme();
@@ -829,7 +1309,12 @@ def render_add_starter_button(starter: str, disabled: bool) -> None:
               return;
             }}
             event.preventDefault();
-            appendStarter();
+            const appendToChatInput =
+              window.codexNomadSurface?.appendToChatInput || appendStarterFallback;
+            appendToChatInput(
+              starter,
+              {{ spacing: "paragraph" }},
+            );
           }};
         }})();
         </script>
@@ -1040,8 +1525,9 @@ def chat_workspace(
     skin,
     field_values: dict[str, str],
 ) -> None:
-    # Keep the native st.chat_input UI, but install the IME-specific Enter guard
-    # before rendering the composer.
+    # Keep the native st.chat_input UI, while separating the append bridge
+    # from the IME-specific Enter guard.
+    inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     chat_history_panel(client, project, chat)
     chat_composer(project, chat, skin, field_values)
