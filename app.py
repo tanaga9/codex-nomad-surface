@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import hmac
+import json
 import shutil
 import subprocess
 import time
@@ -689,6 +690,154 @@ def inject_chat_input_ime_guard() -> None:
     )
 
 
+def render_add_starter_button(starter: str, disabled: bool) -> None:
+    starter = starter.strip()
+    disabled_attr = "disabled" if disabled else ""
+    starter_json = json.dumps(starter)
+    st.html(
+        f"""
+        <button
+          type="button"
+          data-codex-add-starter="true"
+          {disabled_attr}
+          style="
+            width: 100%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+          "
+        >
+          Add starter
+        </button>
+        <script>
+        (() => {{
+          const button = document.currentScript.previousElementSibling;
+          if (!(button instanceof HTMLButtonElement)) {{
+            return;
+          }}
+
+          const starter = {starter_json};
+          const textareaSelector = '[data-testid="stChatInputTextArea"]';
+          const referenceButtonSelectors = [
+            '[data-testid="stBaseButton-secondary"]:not([data-codex-add-starter="true"])',
+            '.stButton > button:not([data-codex-add-starter="true"])',
+            'button[kind="secondary"]:not([data-codex-add-starter="true"])',
+          ];
+          const themeSyncObservers = [];
+
+          const syncButtonTheme = () => {{
+            const referenceButton = referenceButtonSelectors
+              .map((selector) => document.querySelector(selector))
+              .find((candidate) => candidate instanceof HTMLButtonElement);
+
+            if (!(referenceButton instanceof HTMLButtonElement)) {{
+              return;
+            }}
+
+            const computed = window.getComputedStyle(referenceButton);
+            const copiedProperties = [
+              "background",
+              "backgroundColor",
+              "border",
+              "borderColor",
+              "borderRadius",
+              "boxShadow",
+              "color",
+              "fontFamily",
+              "fontSize",
+              "fontWeight",
+              "lineHeight",
+              "minHeight",
+              "padding",
+              "transition",
+            ];
+
+            copiedProperties.forEach((property) => {{
+              button.style[property] = computed[property];
+            }});
+            button.style.width = "100%";
+            button.style.display = "inline-flex";
+            button.style.alignItems = "center";
+            button.style.justifyContent = "center";
+            button.style.boxSizing = "border-box";
+
+            if (button.disabled) {{
+              button.style.cursor = "not-allowed";
+              button.style.opacity = "0.55";
+            }} else {{
+              button.style.cursor = computed.cursor || "pointer";
+              button.style.opacity = "1";
+            }}
+          }};
+
+          const observeThemeChanges = () => {{
+            const observerTargets = [
+              document.documentElement,
+              document.body,
+              ...referenceButtonSelectors
+                .map((selector) => document.querySelector(selector))
+                .filter((candidate) => candidate instanceof HTMLElement),
+            ];
+
+            observerTargets.forEach((target) => {{
+              if (!(target instanceof HTMLElement)) {{
+                return;
+              }}
+              const observer = new MutationObserver(() => {{
+                window.requestAnimationFrame(syncButtonTheme);
+              }});
+              observer.observe(target, {{
+                attributes: true,
+                attributeFilter: ["class", "style", "data-theme"],
+              }});
+              themeSyncObservers.push(observer);
+            }});
+          }};
+
+          const appendStarter = () => {{
+            const textarea = document.querySelector(textareaSelector);
+            if (!(textarea instanceof HTMLTextAreaElement) || !starter) {{
+              return;
+            }}
+
+            const current = textarea.value ?? "";
+            let separator = "";
+            if (current) {{
+              separator = current.endsWith("\\n\\n")
+                ? ""
+                : current.endsWith("\\n")
+                  ? "\\n"
+                  : "\\n\\n";
+            }}
+            const next = `${{current}}${{separator}}${{starter}}`;
+
+            const valueSetter = Object.getOwnPropertyDescriptor(
+              HTMLTextAreaElement.prototype,
+              "value",
+            )?.set;
+            valueSetter?.call(textarea, next);
+            textarea.dispatchEvent(new Event("input", {{ bubbles: true }}));
+            textarea.focus();
+            textarea.setSelectionRange(next.length, next.length);
+          }};
+
+          syncButtonTheme();
+          observeThemeChanges();
+          button.onclick = (event) => {{
+            if (button.disabled) {{
+              return;
+            }}
+            event.preventDefault();
+            appendStarter();
+          }};
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
 def chat_history_panel(
     client: CodexClient, project: Project | None, chat: ChatSession | None
 ) -> None:
@@ -833,16 +982,6 @@ def queue_user_turn(
     st.rerun()
 
 
-def apply_starter_to_prompt(starter: str) -> None:
-    starter = starter.strip()
-    if not starter:
-        return
-    draft = str(st.session_state.get("chat_prompt_input") or "").rstrip()
-    st.session_state.chat_prompt_input = (
-        f"{draft}\n\n{starter}" if draft else starter
-    )
-
-
 def input_assist_panel():
     skins = load_skins()
     if not skins:
@@ -869,13 +1008,7 @@ def input_assist_panel():
                 )
         if skin.quick_prompts:
             can_add_quick = bool(quick and not st.session_state.get("pending_turn"))
-            st.button(
-                "Add starter",
-                key="chat_add_quick",
-                disabled=not can_add_quick,
-                on_click=apply_starter_to_prompt,
-                args=(quick,),
-            )
+            render_add_starter_button(quick, disabled=not can_add_quick)
     return skin, field_values
 
 
