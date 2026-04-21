@@ -32,6 +32,7 @@ st.set_page_config(
 
 
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
+DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 
 
 def init_state() -> None:
@@ -46,6 +47,10 @@ def init_state() -> None:
     st.session_state.setdefault("thread_history_cursors", {})
     st.session_state.setdefault("thread_history_has_older", {})
     st.session_state.setdefault("approval_action_in_progress", "")
+    st.session_state.setdefault("app_server_launch_in_progress", False)
+    st.session_state.setdefault("app_server_launch_failure_returncode", None)
+    st.session_state.setdefault("managed_app_server_process", None)
+    st.session_state.setdefault("chat_history_autoscroll", False)
 
 
 def auth_required() -> bool:
@@ -164,7 +169,11 @@ def auth_screen() -> None:
 
     with st.form("auth_form"):
         secret = st.text_input(
-            "Authentication", type="password", placeholder="Enter the local secret"
+            "Authentication",
+            type="password",
+            placeholder="Enter the local secret",
+            key="password_input",
+            autocomplete="current-password",
         )
         submitted = st.form_submit_button("Unlock")
     if submitted:
@@ -189,6 +198,15 @@ def connection_card(
         st.success(message)
     else:
         st.warning(message)
+
+
+@st.fragment(run_every=DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS)
+def disconnected_connection_status(app_server_url: str) -> None:
+    client = CodexClient(app_server_url)
+    status = client.status()
+    connection_card(client, status)
+    if status.ok:
+        st.rerun()
 
 
 def app_server_url_host(url: str) -> str:
@@ -219,6 +237,30 @@ def terminate_process_at_exit(process: subprocess.Popen[bytes]) -> None:
     atexit.register(cleanup)
 
 
+def managed_app_server_process() -> subprocess.Popen[bytes] | None:
+    process = st.session_state.managed_app_server_process
+    if process is None:
+        return None
+    if process.poll() is not None:
+        st.session_state.managed_app_server_process = None
+        return None
+    return process
+
+
+def stop_managed_app_server() -> tuple[bool, str]:
+    process = managed_app_server_process()
+    if process is None:
+        return False, "No Codex App Server started by this app is running."
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    st.session_state.managed_app_server_process = None
+    return True, "Stopped the Codex App Server started by this app."
+
+
 def start_local_app_server(
     settings: AppSettings,
 ) -> tuple[bool, str, subprocess.Popen[bytes] | None]:
@@ -238,39 +280,58 @@ def start_local_app_server(
 
 @st.dialog("Codex App Server launch status", width="large")
 def app_server_launch_status_dialog(returncode: int | None) -> None:
-    if returncode is None:
-        st.success("Codex App Server is still running after startup.")
-        st.caption("stdout and stderr are being written to this web server's logs.")
-    else:
-        st.error(f"Codex App Server exited during startup with code {returncode}.")
-        st.caption("Check this web server's logs for stdout and stderr output.")
+    st.error(f"Codex App Server exited during startup with code {returncode}.")
+    st.caption("Check this web server's logs for stdout and stderr output.")
     if st.button("OK", type="primary"):
+        st.session_state.app_server_launch_failure_returncode = None
         st.rerun()
 
 
 def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -> None:
     if not can_start_local_app_server(settings, status):
+        st.session_state.app_server_launch_in_progress = False
+        st.session_state.app_server_launch_failure_returncode = None
         return
 
     st.caption("The configured App Server URL points to local host 127.0.0.1.")
-    if st.button("Start Codex App Server (WebSockets)", type="primary"):
+    if st.session_state.app_server_launch_in_progress:
+        st.info("Starting Codex App Server...")
+    if st.button(
+        "Start Codex App Server (WebSockets)",
+        type="primary",
+        disabled=st.session_state.app_server_launch_in_progress,
+    ):
+        st.session_state.app_server_launch_in_progress = True
+        st.rerun()
+
+    if st.session_state.app_server_launch_in_progress:
         ok, message, process = start_local_app_server(settings)
         if not ok:
+            st.session_state.app_server_launch_in_progress = False
             st.error(message)
             return
-        st.success(message)
         time.sleep(APP_SERVER_STARTUP_CHECK_SECONDS)
-        app_server_launch_status_dialog(process.poll() if process else -1)
+        st.session_state.app_server_launch_in_progress = False
+        returncode = process.poll() if process else -1
+        if returncode is None:
+            st.session_state.managed_app_server_process = process
+        else:
+            st.session_state.managed_app_server_process = None
+            st.session_state.app_server_launch_failure_returncode = returncode
+        st.rerun()
+
+    if st.session_state.app_server_launch_failure_returncode is not None:
+        app_server_launch_status_dialog(
+            st.session_state.app_server_launch_failure_returncode
+        )
     st.caption(
         "If this web server is force-killed, the launched Codex App Server process may remain running."
     )
 
 
-def connection_gate_screen(
-    settings: AppSettings, client: CodexClient, status: ConnectionStatus
-) -> None:
+def connection_gate_screen(settings: AppSettings, status: ConnectionStatus) -> None:
     st.title("Codex Nomad Surface")
-    connection_card(client, status)
+    disconnected_connection_status(settings.app_server_url)
     st.warning(
         "Codex is not connected, so the operation screen is unavailable. Start App Server and confirm the connection URL."
     )
@@ -460,6 +521,7 @@ def select_chat(
     if selected_id != st.session_state.selected_chat_id:
         st.session_state.selected_chat_id = selected_id
         set_query_chat_id(selected_id)
+        st.session_state.chat_history_autoscroll = True
         st.rerun()
     if not selected_id:
         return None
@@ -498,6 +560,7 @@ def hydrate_thread_chat(client: CodexClient, chat: ChatSession | None) -> None:
     chat.messages = messages
     if chat.messages:
         chat.touch()
+        st.session_state.chat_history_autoscroll = True
 
 
 def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
@@ -516,6 +579,7 @@ def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
         if messages:
             chat.messages = messages + chat.messages
             chat.touch()
+        st.session_state.chat_history_autoscroll = False
         st.rerun()
 
 
@@ -545,9 +609,15 @@ def chat_history_panel(
     client: CodexClient, project: Project | None, chat: ChatSession | None
 ) -> None:
     load_older_history(client, chat)
-    render_chat(chat, skip_latest_user=bool(st.session_state.get("pending_turn")))
-    if project and chat:
-        render_pending_turn(client, project, chat)
+    autoscroll = bool(st.session_state.chat_history_autoscroll)
+    with st.container(
+        height="stretch", autoscroll=autoscroll, key="chat-history-panel"
+    ):
+        render_chat(chat, skip_latest_user=bool(st.session_state.get("pending_turn")))
+        if project and chat:
+            render_pending_turn(client, project, chat)
+    if autoscroll:
+        st.session_state.chat_history_autoscroll = False
 
 
 def render_pending_turn(
@@ -568,7 +638,7 @@ def render_pending_turn(
                 pending["output"] = output
                 output_placeholder.markdown(output.strip() or " ")
 
-            with st.spinner("Sending to Codex..."):
+            with st.spinner("Sending to Codex...", show_time=True):
                 result = client.start_chat_turn(
                     project.path,
                     pending["text"],
@@ -613,14 +683,14 @@ def render_inline_approval(
     )
     if st.button("Approve", key=f"inline-approve-{key}", disabled=in_progress):
         st.session_state.approval_action_in_progress = key
-        with st.spinner("Approving and continuing..."):
+        with st.spinner("Approving and continuing...", show_time=True):
             result = client.respond_chat_turn(
                 pending["runtime"], approval, "approve", output_callback=update_stream
             )
         handle_turn_result(chat, pending, result)
     if st.button("Reject", key=f"inline-reject-{key}", disabled=in_progress):
         st.session_state.approval_action_in_progress = key
-        with st.spinner("Rejecting and continuing..."):
+        with st.spinner("Rejecting and continuing...", show_time=True):
             result = client.respond_chat_turn(
                 pending["runtime"], approval, "reject", output_callback=update_stream
             )
@@ -636,12 +706,14 @@ def handle_turn_result(chat: ChatSession, pending: dict, result: dict) -> None:
         pending["approval"] = result["approval"]
         pending["output"] = str(result.get("output") or "").strip()
         st.session_state.approval_action_in_progress = ""
+        st.session_state.chat_history_autoscroll = True
         st.rerun()
 
     response_text = str(result.get("output") or "").strip() or "The response was empty."
     chat.add_message("assistant", response_text)
     st.session_state.pending_turn = None
     st.session_state.approval_action_in_progress = ""
+    st.session_state.chat_history_autoscroll = True
     st.rerun()
 
 
@@ -673,10 +745,21 @@ def queue_user_turn(
         "skin_id": skin_id,
         "fields": field_values,
     }
+    st.session_state.chat_history_autoscroll = True
     st.rerun()
 
 
-def input_assist_panel(project: Project | None, chat: ChatSession | None):
+def apply_starter_to_prompt(starter: str) -> None:
+    starter = starter.strip()
+    if not starter:
+        return
+    draft = str(st.session_state.get("chat_prompt_input") or "").rstrip()
+    st.session_state.chat_prompt_input = (
+        f"{draft}\n\n{starter}" if draft else starter
+    )
+
+
+def input_assist_panel():
     skins = load_skins()
     if not skins:
         st.error("No Skins found. Add `skins/*.json` files.")
@@ -701,16 +784,14 @@ def input_assist_panel(project: Project | None, chat: ChatSession | None):
                     key=f'chat_field_{field["id"]}',
                 )
         if skin.quick_prompts:
-            can_send_quick = bool(
-                project and quick and not st.session_state.get("pending_turn")
+            can_add_quick = bool(quick and not st.session_state.get("pending_turn"))
+            st.button(
+                "Add starter",
+                key="chat_add_quick",
+                disabled=not can_add_quick,
+                on_click=apply_starter_to_prompt,
+                args=(quick,),
             )
-            if st.button(
-                "Send starter", key="chat_send_quick", disabled=not can_send_quick
-            ):
-                if project and quick:
-                    queue_user_turn(
-                        chat or create_chat(project), quick, skin.id, field_values
-                    )
     return skin, field_values
 
 
@@ -755,7 +836,7 @@ def surface_sidebar(
             settings_dialog(settings)
         project = project_selector(server_threads, "sidebar")
         chat = select_chat(project, server_threads)
-        skin, field_values = input_assist_panel(project, chat)
+        skin, field_values = input_assist_panel()
     return project, chat, skin, field_values
 
 
@@ -772,11 +853,23 @@ def settings_screen(settings: AppSettings, heading: bool = True) -> None:
         submitted = st.form_submit_button("Save")
     if submitted:
         settings.app_server_url = url.strip()
+        st.session_state.app_server_launch_in_progress = False
+        st.session_state.app_server_launch_failure_returncode = None
         persist()
         st.success("Settings saved.")
         saved_client = CodexClient(settings.app_server_url)
         saved_client.status()
         st.rerun()
+    process = managed_app_server_process()
+    if process is not None:
+        st.caption(f"This app started Codex App Server on PID {process.pid}.")
+        if st.button("Stop Codex App Server", type="secondary"):
+            ok, message = stop_managed_app_server()
+            if ok:
+                st.success(message)
+            else:
+                st.error(message)
+            st.rerun()
 
 
 def main_screen() -> None:
@@ -785,7 +878,7 @@ def main_screen() -> None:
     status = client.status()
 
     if not status.ok:
-        connection_gate_screen(settings, client, status)
+        connection_gate_screen(settings, status)
         return
 
     server_threads = server_threads_state(client)

@@ -4,3 +4,4 @@ __pycache__/
 *.py[cod]
 .streamlit/secrets.toml
 .nomad_surface/
+codex_nomad_surface.egg-info/
