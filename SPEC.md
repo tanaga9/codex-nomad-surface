@@ -35,7 +35,7 @@ For example, when using a scheduling-oriented Skill, it should be possible to us
 - Skills and Skins do not need a strict one-to-one relationship, but compatible combinations should be easy to support.
 - Skin definitions should be text based and declarative.
 - Skin expression may refer to ideas from Generative UI Specs such as A2UI or Open-JSON-UI.
-- Full compliance with any specific external spec is not required for the initial version.
+- Full compliance with any specific external spec is not required in the current scope.
 - Codex may decide the details of the Skin structure and switching behavior during implementation.
 
 ---
@@ -55,11 +55,11 @@ The relationship is:
 
 In other words, a Skin is a higher-level concept that can include input UI, output UI, transitions, confirmations, and context. A2UI and Open-JSON-UI are candidate technologies for implementing Skins.
 
-The initial version uses the following policy:
+The current policy is:
 
 - Skins should be expressible as JSON or similar declarative text.
 - The internal representation may resemble A2UI / Open-JSON-UI.
-- The initial version may use a small project-specific Skin schema.
+- This project may use a small project-specific Skin schema.
 - The design should leave room for future integration with A2UI / Open-JSON-UI / AG-UI.
 
 ---
@@ -169,6 +169,30 @@ An initial example of this policy is the embedded response form mechanism, where
 the assistant emits a structured block and the Web UI renders a form that
 generates editable draft text for the user.
 
+### Chat Draft Integration Policy
+
+For assistant-provided micro UI that helps compose the next prompt, the app
+should keep `st.chat_input` as the primary draft input.
+
+The long-lived policy is:
+
+- Prefer keeping `st.chat_input` rather than replacing it with a custom chat
+  composer.
+- Prefer appending helper-generated text to the end of the current unsent draft
+  instead of overwriting the draft.
+- Treat custom code as a thin assist layer around Streamlit's standard chat
+  input, not as a replacement for it.
+
+The reasons are:
+
+- In a personal, small-scale project, starting to rebuild a custom
+  `st.chat_input`-equivalent main chat composer in custom code would create an
+  ongoing maintenance burden that is hard to keep up with.
+- Streamlit should remain responsible for the main chat-input behavior, while
+  this project maintains only the auxiliary assist behavior around it.
+- Appending to the current unsent draft is better for user convenience because
+  it preserves in-progress text rather than discarding it.
+
 ---
 
 ## Non-Goals
@@ -182,7 +206,7 @@ The following are not required:
 - Large-scale plugin framework
 - Native iPhone app packaging
 - Enterprise-scale IAM or complex authentication infrastructure
-- Full A2UI / Open-JSON-UI compatibility in the initial version
+- Full A2UI / Open-JSON-UI compatibility in the current scope
 
 ---
 

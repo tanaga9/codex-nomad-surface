@@ -39,6 +39,10 @@ python3 -m venv .venv
 pip install -e .
 ```
 
+The embedded `codex-form` UI is assembled at runtime by the `ui_components`
+package, which loads its static CSS/JS assets and injects them into the
+Streamlit app.
+
 ## Run
 
 Start the Streamlit app.
@@ -67,6 +71,7 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 ## Structure
 
 - `app.py`: Streamlit UI.
+- `ui_components/`: reusable UI helpers and static assets for embedded forms and custom chat-input integrations.
 - `codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval responses.
 - `settings.py`: storage in `.nomad_surface/settings.json`.
 - `skins/*.json`: Skin definitions for task-specific UI.

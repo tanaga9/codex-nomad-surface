@@ -8,7 +8,8 @@ the same guidance from its own `AGENTS.md`.
 
 ## Purpose
 
-This repository supports an assistant-to-UI protocol named `codex-form`.
+`codex-form` is an assistant-to-UI protocol for collecting structured input
+inside a normal assistant response.
 Use it when a form would make user choice or short value entry easier than
 free-form text alone.
 
@@ -27,8 +28,7 @@ but the next user prompt is plain text, not hidden structured state.
 - Provide `fields`.
 - `template` means the plain-text reply template for the next user message.
 - Use `{field_id}` placeholders inside `template`.
-- Use only structures supported by the current schema for this repository
-  version.
+- Use only structures supported by the current schema version.
 - Format the JSON with normal indentation.
 
 ## Authoring Guidance

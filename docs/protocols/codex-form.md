@@ -28,6 +28,12 @@ That means the form is an input aid, not a separate side channel.
 6. The user may still edit the text before sending.
 7. The next user prompt contains the text the form produced.
 
+Implementation note:
+
+- In the current app, the preferred behavior is to keep `st.chat_input` as the
+  primary draft widget and append generated form text to the end of the current
+  unsent draft when possible, rather than replacing the draft wholesale.
+
 ## When To Use It
 
 Use `codex-form` when:
@@ -146,4 +152,4 @@ value:
 
 - `docs/protocols/codex-form.schema.json` is the machine-readable JSON Schema
   for the current protocol version.
-- `AGENTS.md` is the short operational instruction for agents in this repository.
+- `AGENTS.md` contains project-specific operating instructions for agents.
