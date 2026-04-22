@@ -16,6 +16,11 @@
       "type": "string",
       "description": "Short explanatory text shown with the form."
     },
+    "response_example": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Recommended example of the plain-text reply the user can send after filling the form."
+    },
     "submit_label": {
       "type": "string",
       "minLength": 1,
@@ -29,7 +34,7 @@
     "template": {
       "type": "string",
       "minLength": 1,
-      "description": "Plain-text template used to generate the inserted draft text. Use {field_id} placeholders."
+      "description": "Plain-text reply template used to generate the next draft text. Use {field_id} placeholders."
     },
     "fields": {
       "type": "array",
@@ -42,17 +47,15 @@
   },
   "$defs": {
     "optionString": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "optionObject": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["value", "label"],
+      "required": ["value"],
       "properties": {
         "value": {
-          "type": "string",
-          "minLength": 1
+          "type": "string"
         },
         "label": {
           "type": "string",
@@ -83,7 +86,8 @@
           "type": "string"
         },
         "label": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "placeholder": {
           "type": "string"
@@ -109,7 +113,8 @@
               "const": "radio"
             },
             "default": {
-              "type": "string"
+              "type": "string",
+              "description": "Initially selected option value. When omitted, the first option is selected."
             },
             "options": {
               "type": "array",
@@ -135,7 +140,8 @@
               "const": "select"
             },
             "default": {
-              "type": "string"
+              "type": "string",
+              "description": "Initially selected option value. When omitted, the first option is selected."
             },
             "options": {
               "type": "array",

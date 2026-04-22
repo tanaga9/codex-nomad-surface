@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
@@ -36,9 +37,14 @@ st.set_page_config(
 
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
+CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 CODEX_FORM_BLOCK_PATTERN = re.compile(
-    r"```codex-form\s*\n(.*?)\n```",
-    re.DOTALL,
+    r"""
+    ^[ \t]*```codex-form[ \t]*\r?\n
+    (?P<body>.*?)
+    ^[ \t]*```[ \t]*$
+    """,
+    re.DOTALL | re.MULTILINE | re.VERBOSE,
 )
 
 
@@ -96,6 +102,76 @@ def server_threads_state(client: CodexClient) -> list[CodexThread]:
         return []
 
 
+@st.cache_data(show_spinner=False, ttl=60)
+def archived_project_paths(session_root: str) -> list[str]:
+    root = Path(session_root).expanduser()
+    if not root.is_dir():
+        return []
+
+    projects: dict[str, float] = {}
+    for session_path in root.rglob("*.jsonl"):
+        cwd = archived_project_path_from_session(session_path)
+        if not cwd:
+            continue
+        try:
+            modified_at = session_path.stat().st_mtime
+        except OSError:
+            modified_at = 0.0
+        previous = projects.get(cwd)
+        if previous is None or modified_at > previous:
+            projects[cwd] = modified_at
+
+    return [
+        path
+        for path, _ in sorted(
+            projects.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
+
+
+def archived_project_path_from_session(session_path: Path) -> str:
+    try:
+        with session_path.open(encoding="utf-8") as handle:
+            first_line = handle.readline()
+    except OSError:
+        return ""
+
+    if not first_line:
+        return ""
+
+    try:
+        record = json.loads(first_line)
+    except json.JSONDecodeError:
+        return ""
+
+    payload = record.get("payload") if isinstance(record, dict) else None
+    if not isinstance(payload, dict):
+        return ""
+    cwd = payload.get("cwd")
+    return str(cwd).strip() if cwd else ""
+
+
+def available_project_paths(server_threads: list[CodexThread]) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    for thread in server_threads:
+        if not thread.cwd or thread.cwd in seen:
+            continue
+        paths.append(thread.cwd)
+        seen.add(thread.cwd)
+
+    for path in archived_project_paths(str(CODEX_SESSIONS_DIR)):
+        if path in seen:
+            continue
+        paths.append(path)
+        seen.add(path)
+
+    return paths
+
+
 def unique_project_name(path: str, used_names: set[str]) -> str:
     base_name = Path(path).name or path
     if base_name not in used_names:
@@ -112,14 +188,10 @@ def unique_project_name(path: str, used_names: set[str]) -> str:
 
 def project_options(server_threads: list[CodexThread]) -> list[Project]:
     projects: list[Project] = []
-    paths: set[str] = set()
     names: set[str] = set()
-    for thread in server_threads:
-        if not thread.cwd or thread.cwd in paths:
-            continue
-        name = unique_project_name(thread.cwd, names)
-        projects.append(Project(name=name, path=thread.cwd))
-        paths.add(thread.cwd)
+    for path in available_project_paths(server_threads):
+        name = unique_project_name(path, names)
+        projects.append(Project(name=name, path=path))
         names.add(name)
     return projects
 
@@ -611,8 +683,11 @@ def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> Non
         with st.chat_message(message.role):
             content = message.content
             embedded_forms: list[dict] = []
+            embedded_form_errors: list[str] = []
             if message.role == "assistant":
-                content, embedded_forms = extract_embedded_forms(content)
+                content, embedded_forms, embedded_form_errors = extract_embedded_forms(
+                    content
+                )
             if content:
                 st.markdown(content)
             for form_index, form_schema in enumerate(embedded_forms):
@@ -620,6 +695,8 @@ def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> Non
                     form_schema,
                     instance_key=f"{chat.id if chat else 'chat'}-{index}-{form_index}",
                 )
+            for error in embedded_form_errors:
+                st.warning(f"codex-form parse error: {error}", icon="⚠️")
 
 
 def normalize_embedded_form_option(option: object) -> dict:
@@ -628,10 +705,10 @@ def normalize_embedded_form_option(option: object) -> dict:
     if not isinstance(option, dict):
         raise ValueError("Form options must be strings or objects.")
 
-    value = str(option.get("value") or "").strip()
+    if "value" not in option:
+        raise ValueError("Form option objects must define a value.")
+    value = str(option.get("value") or "")
     label = str(option.get("label") or value).strip()
-    if not value or not label:
-        raise ValueError("Form options must have value and label.")
     return {"value": value, "label": label}
 
 
@@ -641,6 +718,7 @@ def normalize_embedded_form_field(field: object) -> dict:
 
     field_id = str(field.get("id") or "").strip()
     field_type = str(field.get("type") or "").strip().lower()
+    field_label = str(field.get("label") or "").strip()
     if not field_id:
         raise ValueError("Form fields must have an id.")
     if field_type not in {"radio", "select", "text", "textarea", "checkbox"}:
@@ -649,7 +727,7 @@ def normalize_embedded_form_field(field: object) -> dict:
     normalized = {
         "id": field_id,
         "type": field_type,
-        "label": str(field.get("label") or field_id).strip(),
+        "label": field_label or field_id.replace("_", " ").replace("-", " ").title(),
         "placeholder": str(field.get("placeholder") or "").strip(),
         "help": str(field.get("help") or "").strip(),
         "required": bool(field.get("required", False)),
@@ -678,12 +756,7 @@ def normalize_embedded_form(form: object) -> dict:
     if not isinstance(form, dict):
         raise ValueError("Embedded form must be a JSON object.")
 
-    template = str(
-        form.get("template")
-        or form.get("prompt_template")
-        or form.get("text_template")
-        or ""
-    ).strip()
+    template = str(form.get("template") or "").strip()
     if not template:
         raise ValueError("Embedded form must define a template.")
 
@@ -699,6 +772,7 @@ def normalize_embedded_form(form: object) -> dict:
         "title": str(form.get("title") or "Choose an option").strip()
         or "Choose an option",
         "description": str(form.get("description") or "").strip(),
+        "response_example": str(form.get("response_example") or "").strip(),
         "submit_label": str(form.get("submit_label") or "Add to chat input").strip()
         or "Add to chat input",
         "template": template,
@@ -707,19 +781,24 @@ def normalize_embedded_form(form: object) -> dict:
     }
 
 
-def extract_embedded_forms(content: str) -> tuple[str, list[dict]]:
+def extract_embedded_forms(content: str) -> tuple[str, list[dict], list[str]]:
     forms: list[dict] = []
+    errors: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
-        raw_json = match.group(1).strip()
+        raw_json = textwrap.dedent(match.group("body")).strip()
         try:
             forms.append(normalize_embedded_form(json.loads(raw_json)))
             return ""
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError as exc:
+            errors.append(f"invalid JSON at line {exc.lineno}, column {exc.colno}")
+            return match.group(0)
+        except ValueError as exc:
+            errors.append(str(exc))
             return match.group(0)
 
     stripped = CODEX_FORM_BLOCK_PATTERN.sub(replace, content).strip()
-    return stripped, forms
+    return stripped, forms, errors
 
 
 def render_embedded_form_field(field: dict, group_name: str) -> str:
@@ -832,6 +911,14 @@ def render_embedded_form(form: dict, instance_key: str) -> None:
               margin-bottom: 0.75rem;
               opacity: 0.85;
             }}
+            #{dom_id} .codex-form-example {{
+              margin-bottom: 0.75rem;
+              padding: 0.55rem 0.7rem;
+              border: 1px dashed rgba(128, 128, 128, 0.35);
+              border-radius: 0.5rem;
+              font-size: 0.86rem;
+              opacity: 0.9;
+            }}
             #{dom_id} .codex-form-field,
             #{dom_id} .codex-form-fieldset {{
               display: flex;
@@ -900,6 +987,7 @@ def render_embedded_form(form: dict, instance_key: str) -> None:
           </style>
           <div class="codex-form-title">{html.escape(form["title"])}</div>
           {f'<div class="codex-form-description">{html.escape(form["description"])}</div>' if form["description"] else ''}
+          {f'<div class="codex-form-example">Example reply: {html.escape(form["response_example"])}</div>' if form["response_example"] else ''}
           {fields_html}
           <div class="codex-form-actions">
             <button type="button" class="codex-form-submit" data-codex-form-submit="true">

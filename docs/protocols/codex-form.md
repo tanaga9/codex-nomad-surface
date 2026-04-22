@@ -46,15 +46,101 @@ Do not use it when:
 ## Agent-Facing Constraints
 
 - Keep the human-readable explanation outside the fenced block.
+- The explanation outside the block should still tell the user what to do if
+  the client does not render the form.
+- `template` is the plain-text reply template used to build the next user
+  prompt from the chosen values.
 - The generated result should read naturally as part of the next user prompt.
 - Prefer short, editable output text.
 - Expect the next turn to contain only the produced text, not hidden metadata.
 - Use only structures supported by the current JSON Schema.
+- Use `template`; do not use alternate field names for the output template.
+- Prefer including `response_example` so the intended reply shape is obvious in
+  plain-text logs and non-rendering clients.
 - Prefer choice-oriented fields over free-text fields.
+- Prefer string options when the stored value and displayed text are the same.
+- Use option objects only when you need a different `label` from `value`.
+- For `radio` and `select`, set `default` to the recommended option value when
+  the agent has a clear recommendation.
+- `default` may point to any option, not only the first one.
 - Treat `text` and `textarea` as low-priority tools.
 - Use free-text fields only when a short supplemental value is useful.
+- `label` is optional; omit it when the `id` is already readable enough.
+- For option objects, `label` is optional; omit it when the `value` is already
+  readable enough.
+- Empty-string option values are allowed when they mean "no extra text" in the
+  generated reply.
+- Match user-facing text to the user's language when practical. This includes
+  prose outside the block and fields such as `title`, `description`,
+  `submit_label`, field `label`, and option `label`. Keep `id` stable and ASCII
+  when practical.
+- Format the JSON with normal indentation so it remains readable as text.
 - If the user needs to provide substantial prose, ask for it in the normal chat
   flow instead of relying on a form field.
+
+## Minimal Shape
+
+This is a good default when the form is simple:
+
+```json
+{
+  "template": "{task} for {project}",
+  "response_example": "setup for my-app",
+  "fields": [
+    {
+      "id": "task",
+      "type": "select",
+      "options": ["setup", "migration"]
+    },
+    {
+      "id": "project",
+      "type": "text"
+    }
+  ]
+}
+```
+
+Add `label`, `description`, `help`, or other fields only when they materially
+improve the user interaction.
+
+When the agent recommends a non-first option, set `default` explicitly:
+
+```json
+{
+  "template": "{mode}",
+  "fields": [
+    {
+      "id": "mode",
+      "type": "radio",
+      "default": "3",
+      "options": ["1", "2", "3", "4", "5"]
+    }
+  ]
+}
+```
+
+Use option objects only when the displayed text needs to differ from the stored
+value:
+
+```json
+{
+  "template": "{policy}",
+  "fields": [
+    {
+      "id": "policy",
+      "type": "radio",
+      "default": "recommended",
+      "options": [
+        "minimal",
+        {
+          "value": "recommended",
+          "label": "Recommended default"
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## Relationship To Other Documents
 
