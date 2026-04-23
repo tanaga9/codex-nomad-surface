@@ -39,10 +39,6 @@ python3 -m venv .venv
 pip install -e .
 ```
 
-The embedded `codex-form` UI is assembled at runtime by the `ui_components`
-package, which loads its static CSS/JS assets and injects them into the
-Streamlit app.
-
 ## Run
 
 Start the Streamlit app.
@@ -77,9 +73,18 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 - `skins/*.json`: Skin definitions for task-specific UI.
 - `pyproject.toml`: Python project metadata and runtime dependencies.
 
+The embedded `codex-form` UI is assembled at runtime by the `ui_components`
+package, which loads its static CSS/JS assets and injects them into the
+Streamlit app.
+
 ## Notes
 
 Communication with Codex App Server supports WebSocket RPC only. The Settings URL must use `ws://` or `wss://`.
+
+`codex-form` availability depends on the current Codex client rather than on a
+repository by itself. Codex Nomad Surface supports it, so other repositories
+can also rely on the same guidance when Codex is being used through this
+client.
 
 When Codex Nomad Surface starts Codex App Server, it checks shortly after launch whether the process is still running. If the process exits during startup, the launch status dialog shows the exit code. Codex App Server stdout and stderr are written to the web server logs.
 

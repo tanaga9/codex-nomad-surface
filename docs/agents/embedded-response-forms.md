@@ -8,10 +8,18 @@ the same guidance from its own `AGENTS.md`.
 
 ## Purpose
 
-`codex-form` is an assistant-to-UI protocol for collecting structured input
-inside a normal assistant response.
-Use it when a form would make user choice or short value entry easier than
-free-form text alone.
+`codex-form` is a structured input protocol for embedded response forms inside
+an assistant response.
+Its availability depends on the current Codex client. Codex Nomad Surface is
+one client that supports it.
+Use it after first checking whether an existing interaction or generative UI
+protocol is the better fit.
+If no such protocol fits, use `codex-form` when the current client supports it
+and the agent needs input that fits a defined response shape.
+Use it when a structured UI would make it easier for the user to provide that
+input than free-form text alone.
+The current UI renders embedded forms, but the decision to use `codex-form`
+should be based on the shape of the input needed, not on any one widget type.
 
 The result still comes back as normal chat text. The UI may render the form,
 but the next user prompt is plain text, not hidden structured state.
@@ -33,6 +41,11 @@ but the next user prompt is plain text, not hidden structured state.
 
 ## Authoring Guidance
 
+- Treat `codex-form` as the preferred fallback when no better-fit existing
+  interaction or generative UI protocol applies and the interaction still
+  benefits from structured input.
+- Think in terms of the response shape the agent needs, not the specific input
+  widget currently available.
 - Emit one form when one form is enough.
 - Prefer concise plain-text templates that the user may still edit before
   sending.

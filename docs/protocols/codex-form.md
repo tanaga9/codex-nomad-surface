@@ -3,10 +3,13 @@
 ## What Agents Need To Know
 
 `codex-form` lets an agent ask the user for structured input inside a normal
-assistant response.
+assistant response when the current Codex client supports it. Codex Nomad
+Surface is one such client.
 
-Use it when free-form prose would work, but a form would make the user's choice
-or input easier.
+Use it when free-form prose would work, but a structured UI would make the
+user's input easier.
+If a better-fit existing interaction or generative UI protocol is available,
+prefer that first.
 
 From the agent's point of view:
 
@@ -16,12 +19,13 @@ From the agent's point of view:
 - you do not receive separate structured state back from the UI
 - you infer the user's choice from the text that appears in the next prompt
 
-That means the form is an input aid, not a separate side channel.
+That means the rendered UI is an input aid, not a separate side channel.
 
 ## Expected Interaction Model
 
 1. The agent writes normal prose.
-2. If structured input would help, the agent appends a `codex-form` block.
+2. If the current client supports `codex-form` and structured input would help,
+   the agent appends a `codex-form` block.
 3. The UI renders that block as a form.
 4. The user fills or selects values.
 5. The UI converts the result into plain text and appends it to the chat input.
@@ -38,13 +42,15 @@ Implementation note:
 
 Use `codex-form` when:
 
-- the agent wants the user to choose from options
-- the agent wants the user to fill a few specific values
+- the current client supports `codex-form`
+- the agent wants input that fits a defined response shape
+- the agent wants the user to provide a few specific values
 - the agent wants to reduce ambiguity in the next prompt
 - the agent still wants the final result to remain editable text
 
 Do not use it when:
 
+- the current client does not support `codex-form`
 - plain prose is simpler
 - the result should trigger an immediate action without user review
 - the UI-specific structure is unnecessary
@@ -61,6 +67,8 @@ Do not use it when:
 - Expect the next turn to contain only the produced text, not hidden metadata.
 - Use only structures supported by the current JSON Schema.
 - Use `template`; do not use alternate field names for the output template.
+- Think about the shape of the desired response, not only today's rendered
+  control types.
 - Prefer including `response_example` so the intended reply shape is obvious in
   plain-text logs and non-rendering clients.
 - Prefer choice-oriented fields over free-text fields.

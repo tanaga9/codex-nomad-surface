@@ -165,9 +165,15 @@ The initial policy for assistant-provided micro UI is:
 - It should remain extensible so additional field types and interaction patterns
   can be added later.
 
-An initial example of this policy is the embedded response form mechanism, where
-the assistant emits a structured block and the Web UI renders a form that
-generates editable draft text for the user.
+The current mechanism supported by Codex Nomad Surface for this is
+`codex-form`, where the assistant emits a structured block and the Web UI
+renders an embedded response form that generates editable draft text for the
+user.
+
+This should be treated as a pragmatic fallback mechanism, not as the project's
+only long-term structured UI direction. If a better-fit existing interaction or
+generative UI protocol is available for a given use case, that protocol may be
+preferred.
 
 ### Chat Draft Integration Policy
 

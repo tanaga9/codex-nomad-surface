@@ -13,7 +13,7 @@ This directory is organized by document role rather than by feature chronology.
 ## Protocols
 
 - [protocols/codex-form.md](protocols/codex-form.md)
-  - Agent-facing behavior notes for `codex-form`.
+  - Agent-facing behavior notes for `codex-form`, an embedded structured-input fallback available in supporting clients such as Codex Nomad Surface.
 
 - [protocols/codex-form.schema.json](protocols/codex-form.schema.json)
   - Machine-readable schema for the current `codex-form` protocol.
