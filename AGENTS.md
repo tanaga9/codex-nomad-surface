@@ -1,6 +1,12 @@
 
 # Embedded Response Forms
 
+When work involves OpenAI APIs, Codex, ChatGPT Apps SDK, model capabilities,
+or related OpenAI developer documentation, use the OpenAI developer
+documentation MCP server first. This repository declares the expected
+project-local MCP reference in `.codex/config.toml` as `openaiDeveloperDocs`
+at `https://developers.openai.com/mcp`.
+
 `promptform` availability depends on the current Codex client, not on the repository alone. It is available when the current client supports it, such as when Codex is being used through Codex Nomad Surface.
 
 Prompt Form is a protocol embedded in the assistant response body. It is
