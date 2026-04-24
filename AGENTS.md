@@ -26,4 +26,11 @@ When deciding how to ask the user for input, use this order:
 2. Otherwise, if the current client supports `promptform` and the interaction needs shaped or structured input, use `promptform`.
 3. Otherwise, ask in normal prose, especially when the user should answer freely.
 
-If you may use `promptform`, read [embedded-response-forms.md](docs/agents/embedded-response-forms.md) first and follow it as the canonical guidance for deciding when and how to use Prompt Form.
+If you may use `promptform`, read `embedded-response-forms.md` first and follow it as the canonical guidance for deciding when and how to use Prompt Form.
+
+Look for `embedded-response-forms.md` at either of these paths:
+
+- `docs/agents/embedded-response-forms.md`
+- `/path/to/codex-nomad-surface/docs/agents/embedded-response-forms.md`
+
+If it does not exist at either path, briefly tell the user that the Prompt Form guidance file could not be found.
