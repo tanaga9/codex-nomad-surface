@@ -57,6 +57,7 @@ PROMPTFORM_BLOCK_PATTERN = re.compile(
 def init_state() -> None:
     st.session_state.setdefault("authenticated", False)
     st.session_state.setdefault("selected_chat_id", "")
+    st.session_state.setdefault("draft_chat", None)
     st.session_state.setdefault("selected_project_key", "")
     st.session_state.setdefault("last_query_chat_id", None)
     st.session_state.setdefault("chat_select_version", 0)
@@ -89,6 +90,23 @@ def chats_state() -> list[ChatSession]:
     if "chats" not in st.session_state:
         st.session_state.chats = []
     return st.session_state.chats
+
+
+def draft_chat_for_project(project: Project | None) -> ChatSession | None:
+    draft = st.session_state.get("draft_chat")
+    if not project or not isinstance(draft, ChatSession):
+        return None
+    if draft.project_name != project.name:
+        return None
+    return draft
+
+
+def clear_draft_chat(chat: ChatSession | None = None) -> None:
+    draft = st.session_state.get("draft_chat")
+    if not isinstance(draft, ChatSession):
+        return
+    if chat is None or draft.id == chat.id:
+        st.session_state.draft_chat = None
 
 
 def format_thread_time(value: int) -> str:
@@ -549,6 +567,41 @@ def create_chat(project: Project) -> ChatSession:
     return chat
 
 
+def draft_chat(project: Project) -> ChatSession:
+    chat = draft_chat_for_project(project)
+    if chat:
+        return chat
+    chat = ChatSession.new(project.name)
+    st.session_state.draft_chat = chat
+    return chat
+
+
+def materialize_chat(project: Project, chat: ChatSession | None) -> ChatSession:
+    if chat is None:
+        clear_draft_chat()
+        return create_chat(project)
+
+    known_chat_ids = {item.id for item in chats_state()}
+    if chat.id in known_chat_ids:
+        clear_draft_chat(chat)
+        return chat
+
+    if chat.project_name != project.name:
+        clear_draft_chat(chat)
+        return create_chat(project)
+
+    chats_state().insert(0, chat)
+    clear_draft_chat(chat)
+    st.session_state.selected_chat_id = chat.id
+    set_query_chat_id(chat.id)
+    st.session_state.chat_select_version += 1
+    return chat
+
+
+def draft_or_selected_chat(project: Project, chat: ChatSession | None) -> ChatSession:
+    return chat or draft_chat(project)
+
+
 def select_chat(
     project: Project | None, server_threads: list[CodexThread]
 ) -> ChatSession | None:
@@ -919,12 +972,11 @@ def cancel_pending_turn_if_needed(
     st.session_state.approval_action_in_progress = ""
 
 
-def queue_user_turn(
-    chat: ChatSession, user_text: str
-) -> None:
+def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) -> None:
     pending = st.session_state.get("pending_turn")
     if pending and pending.get("runtime"):
         return
+    chat = materialize_chat(project, chat)
     chat.add_message("user", user_text)
     st.session_state.pending_turn = {
         "chat_id": chat.id,
@@ -942,23 +994,31 @@ def load_available_promptform_defs() -> list[PromptFormDef]:
     return defs
 
 
-def add_promptform_picker_message(chat: ChatSession) -> None:
-    chat.add_message(
-        "promptform_picker",
-        "",
-        metadata={
-            "picker_id": str(uuid.uuid4()),
-            "selected_def_id": "",
-        },
-    )
+def add_draftable_chat_message(
+    project: Project,
+    chat: ChatSession | None,
+    role: str,
+    content: str = "",
+    metadata: dict | None = None,
+) -> ChatSession:
+    target_chat = draft_or_selected_chat(project, chat)
+    target_chat.add_message(role, content, metadata)
+    st.session_state.chat_history_autoscroll = True
+    return target_chat
 
 
 def sidebar_promptform_actions(project: Project | None, chat: ChatSession | None) -> None:
     disabled = not project or bool(st.session_state.get("pending_turn"))
     if st.button("Add Prompt Form", disabled=disabled, use_container_width=True):
-        target_chat = chat or create_chat(project)
-        add_promptform_picker_message(target_chat)
-        st.session_state.chat_history_autoscroll = True
+        add_draftable_chat_message(
+            project,
+            chat,
+            "promptform_picker",
+            metadata={
+                "picker_id": str(uuid.uuid4()),
+                "selected_def_id": "",
+            },
+        )
         st.rerun()
     st.caption("Adds a Prompt Form chooser to the chat.")
 
@@ -1012,7 +1072,7 @@ def chat_composer(
     if prompt and project:
         user_text = prompt.strip()
         if user_text:
-            queue_user_turn(chat or create_chat(project), user_text)
+            queue_user_turn(project, chat, user_text)
 
     if not project:
         st.caption("Select a project and enter a message before sending.")
@@ -1090,6 +1150,7 @@ def main_screen() -> None:
     server_threads = server_threads_state(client)
     sync_chat_selection_from_url(server_threads)
     project, chat = surface_sidebar(settings, server_threads)
+    chat = chat or draft_chat_for_project(project)
     cancel_pending_turn_if_needed(client, chat)
     hydrate_thread_chat(client, chat)
     if chat and chat.id != st.session_state.last_rendered_chat_id:

@@ -180,6 +180,13 @@ preferred.
 For assistant-provided micro UI that helps compose the next prompt, the app
 should keep `st.chat_input` as the primary draft input.
 
+Pre-send composition state should not create a chat or Codex App Server thread.
+Actions such as adding a Prompt Form, Skill picker, or File Path picker prepare
+the next user turn; they should remain local composer draft state until the app
+is about to submit the first turn to Codex. The current implementation may use
+a temporary draft `ChatSession` as a bridge, but the cleaner long-term model is
+to represent this state separately from persisted chats.
+
 The long-lived policy is:
 
 - Prefer keeping `st.chat_input` rather than replacing it with a custom chat
