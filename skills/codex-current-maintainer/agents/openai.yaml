@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Current Maintainer"
+  short_description: "Maintain this app against current Codex docs."
+  default_prompt: "Use $codex-current-maintainer to audit this repository against current OpenAI Codex docs and propose the smallest needed maintenance changes."
