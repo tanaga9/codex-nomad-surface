@@ -49,7 +49,7 @@
     template.replace(/\{{1,2}([a-zA-Z0-9_-]+)\}{1,2}/g, (_, key) => values[key] ?? "");
 
   const getFieldNodes = (root, fieldId) =>
-    Array.from(root.querySelectorAll(`[data-codex-form-field="${fieldId}"]`));
+    Array.from(root.querySelectorAll(`[data-promptform-field="${fieldId}"]`));
 
   const readFieldValue = (root, field) => {
     const nodes = getFieldNodes(root, field.id);
@@ -84,7 +84,7 @@
   };
 
   const setStatus = (root, message) => {
-    const node = root.querySelector("[data-codex-form-status]");
+    const node = root.querySelector("[data-promptform-status]");
     if (node instanceof HTMLElement) {
       node.textContent = message;
     }
@@ -96,7 +96,7 @@
     }
     mountedRoots.add(root);
 
-    const form = root.querySelector("[data-codex-form-root]");
+    const form = root.querySelector("[data-promptform-root]");
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
@@ -136,6 +136,6 @@
     });
   };
 
-  window.CodexEmbeddedForm = window.CodexEmbeddedForm || {};
-  window.CodexEmbeddedForm.mount = mount;
+  window.PromptForm = window.PromptForm || {};
+  window.PromptForm.mount = mount;
 })();

@@ -165,8 +165,8 @@ The initial policy for assistant-provided micro UI is:
 - It should remain extensible so additional field types and interaction patterns
   can be added later.
 
-The current mechanism supported by Codex Nomad Surface for this is
-`codex-form`, where the assistant emits a structured block and the Web UI
+The current mechanism supported by Codex Nomad Surface for this is Prompt Form,
+where the assistant emits a structured `promptform` block and the Web UI
 renders an embedded response form that generates editable draft text for the
 user.
 

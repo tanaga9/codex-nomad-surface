@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codex-nomad-surface.local/docs/protocols/codex-form.schema.json",
-  "title": "codex-form",
-  "description": "Assistant-to-UI protocol for embedded response forms in Codex Nomad Surface.",
+  "$id": "https://codex-nomad-surface.local/docs/protocols/promptform.schema.json",
+  "title": "promptform",
+  "description": "Assistant-to-UI Prompt Form protocol for embedded response forms in Codex Nomad Surface.",
   "type": "object",
   "additionalProperties": false,
   "required": ["template", "fields"],

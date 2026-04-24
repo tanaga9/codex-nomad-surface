@@ -1,6 +1,6 @@
 # Agent Instructions For Embedded Response Forms
 
-This document defines shared agent instructions for the `codex-form`
+This document defines shared agent instructions for the Prompt Form
 assistant-to-UI protocol.
 
 Use this file as the canonical reference when another project wants to reuse
@@ -8,17 +8,17 @@ the same guidance from its own `AGENTS.md`.
 
 ## Purpose
 
-`codex-form` is a structured input protocol for embedded response forms inside
+Prompt Form is a structured input protocol for embedded response forms inside
 an assistant response.
 Its availability depends on the current Codex client. Codex Nomad Surface is
 one client that supports it.
 Use it after first checking whether an existing interaction or generative UI
 protocol is the better fit.
-If no such protocol fits, use `codex-form` when the current client supports it
+If no such protocol fits, use `promptform` when the current client supports it
 and the agent needs input that fits a defined response shape.
 Use it when a structured UI would make it easier for the user to provide that
 input than free-form text alone.
-The current UI renders embedded forms, but the decision to use `codex-form`
+The current UI renders embedded forms, but the decision to use Prompt Form
 should be based on the shape of the input needed, not on any one widget type.
 
 The result still comes back as normal chat text. The UI may render the form,
@@ -29,7 +29,7 @@ but the next user prompt is plain text, not hidden structured state.
 - Keep normal human-readable explanation outside the fenced block.
 - That explanation should still tell the user what to do if the client does not
   render the form.
-- Emit the structured payload inside a `codex-form` fenced block.
+- Emit the structured payload inside a `promptform` fenced block.
 - The fenced block must contain valid JSON.
 - Provide `template`.
 - Do not use alternate names for `template`.
@@ -41,7 +41,7 @@ but the next user prompt is plain text, not hidden structured state.
 
 ## Authoring Guidance
 
-- Treat `codex-form` as the preferred fallback when no better-fit existing
+- Treat Prompt Form as the preferred fallback when no better-fit existing
   interaction or generative UI protocol applies and the interaction still
   benefits from structured input.
 - Think in terms of the response shape the agent needs, not the specific input
@@ -75,6 +75,6 @@ but the next user prompt is plain text, not hidden structured state.
 
 ## Reference
 
-- Agent-facing protocol notes: [../protocols/codex-form.md](../protocols/codex-form.md)
+- Agent-facing protocol notes: [../protocols/promptform.md](../protocols/promptform.md)
 - JSON Schema:
-  [../protocols/codex-form.schema.json](../protocols/codex-form.schema.json)
+  [../protocols/promptform.schema.json](../protocols/promptform.schema.json)

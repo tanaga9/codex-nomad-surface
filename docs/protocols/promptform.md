@@ -1,8 +1,8 @@
-# `codex-form` Protocol
+# Prompt Form Protocol
 
 ## What Agents Need To Know
 
-`codex-form` lets an agent ask the user for structured input inside a normal
+Prompt Form lets an agent ask the user for structured input inside a normal
 assistant response when the current Codex client supports it. Codex Nomad
 Surface is one such client.
 
@@ -24,8 +24,8 @@ That means the rendered UI is an input aid, not a separate side channel.
 ## Expected Interaction Model
 
 1. The agent writes normal prose.
-2. If the current client supports `codex-form` and structured input would help,
-   the agent appends a `codex-form` block.
+2. If the current client supports `promptform` and structured input would help,
+   the agent appends a `promptform` block.
 3. The UI renders that block as a form.
 4. The user fills or selects values.
 5. The UI converts the result into plain text and appends it to the chat input.
@@ -40,9 +40,9 @@ Implementation note:
 
 ## When To Use It
 
-Use `codex-form` when:
+Use Prompt Form when:
 
-- the current client supports `codex-form`
+- the current client supports `promptform`
 - the agent wants input that fits a defined response shape
 - the agent wants the user to provide a few specific values
 - the agent wants to reduce ambiguity in the next prompt
@@ -50,7 +50,7 @@ Use `codex-form` when:
 
 Do not use it when:
 
-- the current client does not support `codex-form`
+- the current client does not support `promptform`
 - plain prose is simpler
 - the result should trigger an immediate action without user review
 - the UI-specific structure is unnecessary
@@ -158,6 +158,6 @@ value:
 
 ## Relationship To Other Documents
 
-- `docs/protocols/codex-form.schema.json` is the machine-readable JSON Schema
+- `docs/protocols/promptform.schema.json` is the machine-readable JSON Schema
   for the current protocol version.
 - `AGENTS.md` contains project-specific operating instructions for agents.

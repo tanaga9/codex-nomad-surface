@@ -28,7 +28,7 @@ from ui_components import (
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
     render_add_starter_button,
-    render_embedded_form,
+    render_promptform,
 )
 
 
@@ -43,9 +43,9 @@ st.set_page_config(
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
-CODEX_FORM_BLOCK_PATTERN = re.compile(
+PROMPTFORM_BLOCK_PATTERN = re.compile(
     r"""
-    ^[ \t]*```codex-form[ \t]*\r?\n
+    ^[ \t]*```promptform[ \t]*\r?\n
     (?P<body>.*?)
     ^[ \t]*```[ \t]*$
     """,
@@ -690,18 +690,18 @@ def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> Non
             embedded_forms: list[dict] = []
             embedded_form_errors: list[str] = []
             if message.role == "assistant":
-                content, embedded_forms, embedded_form_errors = extract_embedded_forms(
+                content, embedded_forms, embedded_form_errors = extract_promptforms(
                     content
                 )
             if content:
                 st.markdown(content)
             for form_index, form_schema in enumerate(embedded_forms):
-                render_embedded_form(
+                render_promptform(
                     form_schema,
                     instance_key=f"{chat.id if chat else 'chat'}-{index}-{form_index}",
                 )
             for error in embedded_form_errors:
-                st.warning(f"codex-form parse error: {error}", icon="⚠️")
+                st.warning(f"Prompt Form parse error: {error}", icon="⚠️")
 
 
 def normalize_embedded_form_option(option: object) -> dict:
@@ -757,17 +757,17 @@ def normalize_embedded_form_field(field: object) -> dict:
     return normalized
 
 
-def normalize_embedded_form(form: object) -> dict:
+def normalize_promptform(form: object) -> dict:
     if not isinstance(form, dict):
-        raise ValueError("Embedded form must be a JSON object.")
+        raise ValueError("Prompt Form must be a JSON object.")
 
     template = str(form.get("template") or "").strip()
     if not template:
-        raise ValueError("Embedded form must define a template.")
+        raise ValueError("Prompt Form must define a template.")
 
     fields = [normalize_embedded_form_field(field) for field in form.get("fields", [])]
     if not fields:
-        raise ValueError("Embedded form must define at least one field.")
+        raise ValueError("Prompt Form must define at least one field.")
 
     append_spacing = str(form.get("append_spacing") or "paragraph").strip().lower()
     if append_spacing not in {"none", "line", "paragraph"}:
@@ -786,14 +786,14 @@ def normalize_embedded_form(form: object) -> dict:
     }
 
 
-def extract_embedded_forms(content: str) -> tuple[str, list[dict], list[str]]:
+def extract_promptforms(content: str) -> tuple[str, list[dict], list[str]]:
     forms: list[dict] = []
     errors: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
         raw_json = textwrap.dedent(match.group("body")).strip()
         try:
-            forms.append(normalize_embedded_form(json.loads(raw_json)))
+            forms.append(normalize_promptform(json.loads(raw_json)))
             return ""
         except json.JSONDecodeError as exc:
             errors.append(f"invalid JSON at line {exc.lineno}, column {exc.colno}")
@@ -802,7 +802,7 @@ def extract_embedded_forms(content: str) -> tuple[str, list[dict], list[str]]:
             errors.append(str(exc))
             return match.group(0)
 
-    stripped = CODEX_FORM_BLOCK_PATTERN.sub(replace, content).strip()
+    stripped = PROMPTFORM_BLOCK_PATTERN.sub(replace, content).strip()
     return stripped, forms, errors
 
 
