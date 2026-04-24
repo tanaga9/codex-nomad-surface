@@ -28,6 +28,7 @@ from settings import (
 from ui_components import (
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
+    inject_selectbox_mobile_guard,
     render_promptform,
 )
 
@@ -1024,6 +1025,7 @@ def chat_workspace(
 ) -> None:
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
+    inject_selectbox_mobile_guard()
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     chat_history_panel(client, project, chat)
