@@ -30,6 +30,7 @@ The system is intended for personal use and includes:
 - Inline approval request display and response
 - Reusable Prompt Form defs loaded from JSON files
 - User-triggered Prompt Form insertion from the sidebar
+- User-triggered Skill picker insertion from the sidebar
 - A minimal settings screen
 
 There is no CLI fallback. Prompt submission is disabled when Codex App Server is not running.
@@ -66,7 +67,7 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 
 ## Layout
 
-- Left sidebar: project / chat selection, Prompt Form insertion, and the Settings dialog.
+- Left sidebar: project / chat selection, Prompt Form and Skill insertion, and the Settings dialog.
 - Main area: chat history, inline approvals, and the bottom chat input.
 
 ## Structure
@@ -77,6 +78,7 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 - `settings.py`: storage in `.nomad_surface/settings.json`.
 - `promptform-defs/*.json`: reusable Prompt Form definitions.
 - `promptform_defs.py`: loader for Prompt Form definition files.
+- `skill_defs.py`: loader for Codex Skill definition files.
 - `pyproject.toml`: Python project metadata and runtime dependencies.
 
 The embedded Prompt Form UI is assembled at runtime by the `ui_components`

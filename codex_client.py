@@ -205,6 +205,65 @@ class CodexClient:
             self._read_thread_messages_ws(thread_id, limit, before_offset)
         )
 
+    def list_skills(self, cwd: str, force_reload: bool = False) -> list[dict[str, Any]]:
+        if not cwd or not self.base_url.startswith(("ws://", "wss://")):
+            return []
+        return asyncio.run(self._list_skills_ws(cwd, force_reload))
+
+    async def _list_skills_ws(
+        self, cwd: str, force_reload: bool
+    ) -> list[dict[str, Any]]:
+        try:
+            import websockets
+        except ModuleNotFoundError:
+            return []
+
+        try:
+            async with self._connect_ws(websockets) as websocket:
+                output: list[str] = []
+                approvals: list[dict[str, Any]] = []
+                await self._rpc_call(
+                    websocket,
+                    "initialize",
+                    {
+                        "clientInfo": {
+                            "name": "codex-nomad-surface",
+                            "title": "Codex Nomad Surface",
+                            "version": "0.1.0",
+                        },
+                        "capabilities": {"experimentalApi": True},
+                    },
+                    output,
+                    approvals,
+                )
+                raw = await self._rpc_call(
+                    websocket,
+                    "skills/list",
+                    {"cwds": [cwd], "forceReload": force_reload},
+                    output,
+                    approvals,
+                )
+                return self._parse_skills_list_result(raw, cwd)
+        except Exception:
+            return []
+
+    def _parse_skills_list_result(
+        self, raw: Any, cwd: str
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return []
+        data = raw.get("data")
+        if not isinstance(data, list):
+            return []
+
+        for item in data:
+            if not isinstance(item, dict) or str(item.get("cwd") or "") != cwd:
+                continue
+            skills = item.get("skills")
+            if isinstance(skills, list):
+                return [skill for skill in skills if isinstance(skill, dict)]
+        return []
+
     async def _list_threads_ws(self) -> list[CodexThread]:
         try:
             import websockets

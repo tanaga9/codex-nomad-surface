@@ -25,10 +25,14 @@ from settings import (
     load_settings,
     save_settings,
 )
+from skill_defs import (
+    SkillDef,
+    skill_def_by_id,
+    skill_defs_from_app_server,
+)
 from ui_components import (
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
-    inject_selectbox_mobile_guard,
     render_promptform,
 )
 
@@ -633,19 +637,22 @@ def select_chat(
         set_query_chat_id("")
         st.session_state.chat_select_version += 1
 
-    labels = [""] + [
-        f"{chat.title} · {chat.updated_at or chat.created_at} · {chat.id[:6]}"
-        for chat in chats
-    ]
     ids = [""] + [chat.id for chat in chats]
+    label_by_id = {
+        "": "",
+        **{
+            chat.id: f"{chat.title} · {chat.updated_at or chat.created_at} · {chat.id[:6]}"
+            for chat in chats
+        },
+    }
     selected_index = ids.index(selected_id)
-    choice = st.selectbox(
+    selected_id = st.selectbox(
         "Chat",
-        labels,
+        ids,
         index=selected_index,
         key=f"chat_list_{st.session_state.chat_select_version}",
+        format_func=lambda chat_id: label_by_id[chat_id],
     )
-    selected_id = ids[labels.index(choice)]
     if selected_id != st.session_state.selected_chat_id:
         st.session_state.selected_chat_id = selected_id
         set_query_chat_id(selected_id)
@@ -711,10 +718,18 @@ def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
         st.rerun()
 
 
-def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> None:
+def render_chat(
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession | None,
+    skip_latest_user: bool = False,
+) -> None:
     if not chat:
         return
     promptform_defs = load_available_promptform_defs()
+    skill_defs = load_available_skill_defs(
+        client.base_url, project.path if project else ""
+    )
     if not chat.messages:
         if chat.thread_id:
             st.caption(
@@ -736,6 +751,16 @@ def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> Non
                 render_promptform_picker_message(
                     message,
                     promptform_defs,
+                    message_key=f"{chat.id}-{picker_id}",
+                )
+            continue
+
+        if message.role == "skill_picker":
+            picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
+            with st.chat_message("skill-picker", avatar=":material/extension:"):
+                render_skill_picker_message(
+                    message,
+                    skill_defs,
                     message_key=f"{chat.id}-{picker_id}",
                 )
             continue
@@ -829,8 +854,7 @@ def normalize_promptform(form: object) -> dict:
         append_spacing = "paragraph"
 
     return {
-        "title": str(form.get("title") or "Prompt Form").strip()
-        or "Prompt Form",
+        "title": str(form.get("title") or "Prompt Form").strip() or "Prompt Form",
         "purpose": str(form.get("purpose") or "").strip(),
         "usage": str(form.get("usage") or "").strip(),
         "response_example": str(form.get("response_example") or "").strip(),
@@ -870,7 +894,12 @@ def chat_history_panel(
     with st.container(
         height="stretch", autoscroll=autoscroll, key="chat-history-panel"
     ):
-        render_chat(chat, skip_latest_user=bool(st.session_state.get("pending_turn")))
+        render_chat(
+            client,
+            project,
+            chat,
+            skip_latest_user=bool(st.session_state.get("pending_turn")),
+        )
         if project and chat:
             render_pending_turn(client, project, chat)
     if autoscroll:
@@ -1004,9 +1033,18 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
 def load_available_promptform_defs() -> list[PromptFormDef]:
     defs = load_promptform_defs()
     if not defs:
-        st.error("No Prompt Form definitions found. Add JSON files under `promptform-defs/`.")
+        st.error(
+            "No Prompt Form definitions found. Add JSON files under `promptform-defs/`."
+        )
         st.stop()
     return defs
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def load_available_skill_defs(base_url: str, project_path: str = "") -> list[SkillDef]:
+    if not project_path:
+        return []
+    return skill_defs_from_app_server(CodexClient(base_url).list_skills(project_path))
 
 
 def add_draftable_chat_message(
@@ -1022,7 +1060,9 @@ def add_draftable_chat_message(
     return target_chat
 
 
-def sidebar_promptform_actions(project: Project | None, chat: ChatSession | None) -> None:
+def sidebar_promptform_actions(
+    project: Project | None, chat: ChatSession | None
+) -> None:
     disabled = not project or bool(st.session_state.get("pending_turn"))
     if st.button("Add Prompt Form", disabled=disabled, use_container_width=True):
         add_draftable_chat_message(
@@ -1035,32 +1075,46 @@ def sidebar_promptform_actions(project: Project | None, chat: ChatSession | None
             },
         )
         st.rerun()
-    st.caption("Adds a Prompt Form chooser to the chat.")
+
+
+def sidebar_skill_actions(project: Project | None, chat: ChatSession | None) -> None:
+    disabled = not project or bool(st.session_state.get("pending_turn"))
+    if st.button("Use Skill", disabled=disabled, use_container_width=True):
+        add_draftable_chat_message(
+            project,
+            chat,
+            "skill_picker",
+            metadata={
+                "picker_id": str(uuid.uuid4()),
+                "selected_skill_id": "",
+            },
+        )
+        st.rerun()
 
 
 def render_promptform_picker_message(
     message: ChatMessage, defs: list[PromptFormDef], message_key: str
 ) -> None:
     selected_def_id = str(message.metadata.get("selected_def_id") or "")
-    options = [""] + [item.id for item in defs]
+    options = [item.id for item in defs]
     label_by_id = {
-        "": "Choose a prompt form",
-        **{
-            item.id: (
-                f"{item.form.get('title', item.id)} - {item.form.get('purpose', '').strip()}"
-                if str(item.form.get("purpose") or "").strip()
-                else str(item.form.get("title") or item.id)
-            )
-            for item in defs
-        },
+        item.id: (
+            f"{item.form.get('title', item.id)} - {item.form.get('purpose', '').strip()}"
+            if str(item.form.get("purpose") or "").strip()
+            else str(item.form.get("title") or item.id)
+        )
+        for item in defs
     }
-    selected_index = options.index(selected_def_id) if selected_def_id in options else 0
+    selected_index = (
+        options.index(selected_def_id) if selected_def_id in options else None
+    )
     selected_def_id = st.selectbox(
         "Prompt Form",
         options,
         index=selected_index,
         key=f"promptform_picker_{message_key}",
         format_func=lambda item_id: label_by_id[item_id],
+        placeholder="Choose a prompt form",
         label_visibility="collapsed",
     )
     message.metadata["selected_def_id"] = selected_def_id
@@ -1073,6 +1127,73 @@ def render_promptform_picker_message(
     render_promptform(
         normalize_promptform(selected_def.form),
         instance_key=f"{message_key}-{selected_def.id}",
+    )
+
+
+def render_skill_picker_message(
+    message: ChatMessage, defs: list[SkillDef], message_key: str
+) -> None:
+    selected_skill_id = str(message.metadata.get("selected_skill_id") or "")
+    options = [item.id for item in defs]
+    label_by_id = {
+        item.id: f"{item.id} - {item.description}" if item.description else item.id
+        for item in defs
+    }
+    selected_index = (
+        options.index(selected_skill_id) if selected_skill_id in options else None
+    )
+    selected_skill_id = st.selectbox(
+        "Skill",
+        options,
+        index=selected_index,
+        key=f"skill_picker_{message_key}",
+        format_func=lambda item_id: label_by_id[item_id],
+        placeholder="Choose a skill",
+        label_visibility="collapsed",
+    )
+    message.metadata["selected_skill_id"] = selected_skill_id
+    if not selected_skill_id:
+        return
+    selected_skill = skill_def_by_id(defs, selected_skill_id)
+    if selected_skill is None:
+        st.warning("The selected Skill was not found.", icon="⚠️")
+        return
+    if selected_skill.description:
+        st.caption(selected_skill.description)
+    if st.button("Add to prompt", key=f"skill_append_{message_key}"):
+        st.session_state[f"pending_skill_append_{message_key}"] = {
+            "marker": f"${selected_skill.name}",
+            "nonce": str(uuid.uuid4()),
+        }
+        st.rerun()
+    append_pending_skill_to_chat_input(message_key)
+
+
+def append_pending_skill_to_chat_input(message_key: str) -> None:
+    pending_key = f"pending_skill_append_{message_key}"
+    pending = st.session_state.pop(pending_key, None)
+    if not isinstance(pending, dict):
+        return
+    marker = str(pending.get("marker") or "")
+    if not marker:
+        return
+    nonce = str(pending.get("nonce") or uuid.uuid4())
+    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", f"skill-append-{message_key}-{nonce}")
+    st.html(
+        f"""
+        <span id="{dom_id}"></span>
+        <script>
+        (() => {{
+          const marker = {json.dumps(marker)};
+          const appendToChatInput = window.codexNomadSurface?.appendToChatInput;
+          if (typeof appendToChatInput !== "function") {{
+            return;
+          }}
+          appendToChatInput(marker, {{ spacing: "line" }});
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
     )
 
 
@@ -1100,7 +1221,6 @@ def chat_workspace(
 ) -> None:
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
-    inject_selectbox_mobile_guard()
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     chat_history_panel(client, project, chat)
@@ -1129,6 +1249,7 @@ def surface_sidebar(
         chat = select_chat(project, server_threads)
         st.divider()
         sidebar_promptform_actions(project, chat)
+        sidebar_skill_actions(project, chat)
     return project, chat
 
 

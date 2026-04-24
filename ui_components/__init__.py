@@ -209,16 +209,6 @@ def inject_chat_input_bridge() -> None:
     )
 
 
-def inject_selectbox_mobile_guard() -> None:
-    st.html(
-        f"""
-        <div id="selectbox-mobile-guard" style="display:none"></div>
-        <script>{load_asset_text("selectbox_mobile_guard.js")}</script>
-        """,
-        unsafe_allow_javascript=True,
-    )
-
-
 def render_add_starter_button(starter: str, disabled: bool) -> None:
     starter = starter.strip()
     disabled_attr = "disabled" if disabled else ""
