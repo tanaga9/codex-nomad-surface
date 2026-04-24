@@ -57,8 +57,6 @@ OutputCallback = Callable[[str], None]
 
 
 class CodexClient:
-    # APPROVAL_POLICY = "untrusted"
-    APPROVAL_POLICY = "on-request"
     WS_MAX_SIZE = 16 * 1024 * 1024
 
     def __init__(self, base_url: str, timeout: float = 5.0) -> None:
@@ -128,6 +126,8 @@ class CodexClient:
         project_path: str,
         prompt: str,
         thread_id: str | None,
+        turn_overrides: dict[str, Any] | None = None,
+        approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
     ) -> dict[str, Any]:
         if not self.base_url.startswith(("ws://", "wss://")):
@@ -143,6 +143,8 @@ class CodexClient:
                     project_path,
                     prompt,
                     thread_id,
+                    turn_overrides,
+                    approval_policy,
                     output_callback,
                 )
             )
@@ -209,6 +211,91 @@ class CodexClient:
         if not cwd or not self.base_url.startswith(("ws://", "wss://")):
             return []
         return asyncio.run(self._list_skills_ws(cwd, force_reload))
+
+    def read_config(self) -> dict[str, Any]:
+        if not self.base_url.startswith(("ws://", "wss://")):
+            return {}
+        return asyncio.run(self._read_config_ws())
+
+    async def _read_config_ws(self) -> dict[str, Any]:
+        try:
+            import websockets
+        except ModuleNotFoundError:
+            return {}
+
+        try:
+            async with self._connect_ws(websockets) as websocket:
+                output: list[str] = []
+                approvals: list[dict[str, Any]] = []
+                await self._rpc_call(
+                    websocket,
+                    "initialize",
+                    {
+                        "clientInfo": {
+                            "name": "codex-nomad-surface",
+                            "title": "Codex Nomad Surface",
+                            "version": "0.1.0",
+                        },
+                        "capabilities": {"experimentalApi": True},
+                    },
+                    output,
+                    approvals,
+                )
+                raw = await self._rpc_call(
+                    websocket, "config/read", {}, output, approvals
+                )
+                config = raw.get("config") if isinstance(raw, dict) else None
+                return config if isinstance(config, dict) else {}
+        except Exception:
+            return {}
+
+    def list_models(self, include_hidden: bool = False) -> list[dict[str, Any]]:
+        if not self.base_url.startswith(("ws://", "wss://")):
+            return []
+        return asyncio.run(self._list_models_ws(include_hidden))
+
+    async def _list_models_ws(self, include_hidden: bool) -> list[dict[str, Any]]:
+        try:
+            import websockets
+        except ModuleNotFoundError:
+            return []
+
+        try:
+            async with self._connect_ws(websockets) as websocket:
+                output: list[str] = []
+                approvals: list[dict[str, Any]] = []
+                await self._rpc_call(
+                    websocket,
+                    "initialize",
+                    {
+                        "clientInfo": {
+                            "name": "codex-nomad-surface",
+                            "title": "Codex Nomad Surface",
+                            "version": "0.1.0",
+                        },
+                        "capabilities": {"experimentalApi": True},
+                    },
+                    output,
+                    approvals,
+                )
+                raw = await self._rpc_call(
+                    websocket,
+                    "model/list",
+                    {"includeHidden": include_hidden},
+                    output,
+                    approvals,
+                )
+                return self._parse_models(raw)
+        except Exception:
+            return []
+
+    def _parse_models(self, raw: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return []
+        candidates = raw.get("models") or raw.get("data") or raw.get("items")
+        if not isinstance(candidates, list):
+            return []
+        return [item for item in candidates if isinstance(item, dict)]
 
     async def _list_skills_ws(
         self, cwd: str, force_reload: bool
@@ -367,6 +454,8 @@ class CodexClient:
         project_path: str,
         prompt: str,
         thread_id: str | None,
+        turn_overrides: dict[str, Any] | None = None,
+        approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
     ) -> dict[str, Any]:
         try:
@@ -385,6 +474,7 @@ class CodexClient:
             "thread_id": thread_id,
             "output_callback": output_callback,
         }
+        turn_overrides = turn_overrides or {}
         try:
             websocket = await self._connect_ws(websockets)
             runtime["websocket"] = websocket
@@ -412,32 +502,36 @@ class CodexClient:
                     output_callback,
                 )
                 if thread_id:
+                    resume_params: dict[str, Any] = {
+                        "threadId": thread_id,
+                        "cwd": project_path,
+                        "persistExtendedHistory": True,
+                    }
+                    if approval_policy:
+                        resume_params["approvalPolicy"] = approval_policy
                     thread_result = await self._rpc_call(
                         websocket,
                         "thread/resume",
-                        {
-                            "threadId": thread_id,
-                            "cwd": project_path,
-                            "approvalPolicy": self.APPROVAL_POLICY,
-                            "persistExtendedHistory": True,
-                        },
+                        resume_params,
                         output,
                         approvals,
                         output_callback,
                         handle_approval_message,
                     )
                 else:
+                    start_params: dict[str, Any] = {
+                        "cwd": project_path,
+                        "ephemeral": False,
+                        "sessionStartSource": "startup",
+                        "experimentalRawEvents": False,
+                        "persistExtendedHistory": True,
+                    }
+                    if approval_policy:
+                        start_params["approvalPolicy"] = approval_policy
                     thread_result = await self._rpc_call(
                         websocket,
                         "thread/start",
-                        {
-                            "cwd": project_path,
-                            "approvalPolicy": self.APPROVAL_POLICY,
-                            "ephemeral": False,
-                            "sessionStartSource": "startup",
-                            "experimentalRawEvents": False,
-                            "persistExtendedHistory": True,
-                        },
+                        start_params,
                         output,
                         approvals,
                         output_callback,
@@ -445,21 +539,23 @@ class CodexClient:
                     )
                 thread_id = thread_result["thread"]["id"]
                 runtime["thread_id"] = thread_id
+                turn_params: dict[str, Any] = {
+                    "threadId": thread_id,
+                    "cwd": project_path,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": prompt,
+                            "text_elements": [],
+                        }
+                    ],
+                }
+                if approval_policy:
+                    turn_params["approvalPolicy"] = approval_policy
                 await self._rpc_call(
                     websocket,
                     "turn/start",
-                    {
-                        "threadId": thread_id,
-                        "cwd": project_path,
-                        "approvalPolicy": self.APPROVAL_POLICY,
-                        "input": [
-                            {
-                                "type": "text",
-                                "text": prompt,
-                                "text_elements": [],
-                            }
-                        ],
-                    },
+                    turn_params | turn_overrides,
                     output,
                     approvals,
                     output_callback,

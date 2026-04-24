@@ -75,6 +75,7 @@ def init_state() -> None:
     st.session_state.setdefault("app_server_launch_failure_returncode", None)
     st.session_state.setdefault("managed_app_server_process", None)
     st.session_state.setdefault("chat_history_autoscroll", False)
+    st.session_state.setdefault("codex_run_controls_by_chat", {})
 
 
 def auth_required() -> bool:
@@ -929,6 +930,8 @@ def render_pending_turn(
                     project.path,
                     pending["text"],
                     chat.thread_id,
+                    turn_overrides=pending.get("turn_overrides"),
+                    approval_policy=pending.get("approval_policy"),
                     output_callback=update_stream,
                 )
         elif pending.get("approval"):
@@ -1022,9 +1025,12 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
         return
     chat = materialize_chat(project, chat)
     chat.add_message("user", user_text)
+    controls = chat_run_controls(chat)
     st.session_state.pending_turn = {
         "chat_id": chat.id,
         "text": user_text,
+        "turn_overrides": build_turn_overrides(controls),
+        "approval_policy": controls.get("approval_policy", "").strip() or None,
     }
     st.session_state.chat_history_autoscroll = True
     st.rerun()
@@ -1045,6 +1051,115 @@ def load_available_skill_defs(base_url: str, project_path: str = "") -> list[Ski
     if not project_path:
         return []
     return skill_defs_from_app_server(CodexClient(base_url).list_skills(project_path))
+
+
+@st.cache_data(show_spinner=False, ttl=15)
+def load_codex_config(base_url: str) -> dict:
+    return CodexClient(base_url).read_config()
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_codex_models(base_url: str) -> list[dict]:
+    return CodexClient(base_url).list_models()
+
+
+def codex_model_id(model: dict) -> str:
+    return str(model.get("id") or model.get("model") or model.get("name") or "")
+
+
+def codex_model_label(model: dict) -> str:
+    model_id = codex_model_id(model)
+    display_name = str(model.get("displayName") or model_id)
+    description = str(model.get("description") or "").strip()
+    return f"{display_name} - {description}" if description else display_name
+
+
+def option_index(options: list[str], value: str) -> int:
+    return options.index(value) if value in options else 0
+
+
+def config_string(config: dict, key: str) -> str:
+    value = config.get(key)
+    return "" if value is None else str(value)
+
+
+def selected_model_efforts(models: list[dict], selected_model: str) -> list[str]:
+    for model in models:
+        if codex_model_id(model) != selected_model:
+            continue
+        efforts = model.get("supportedReasoningEfforts")
+        if not isinstance(efforts, list):
+            return []
+        values = []
+        for effort in efforts:
+            if not isinstance(effort, dict):
+                continue
+            value = str(effort.get("reasoningEffort") or "")
+            if value:
+                values.append(value)
+        return values
+    return []
+
+
+def model_effort_options(
+    models: list[dict], selected_model: str, current: str
+) -> list[str]:
+    options = [""] + selected_model_efforts(models, selected_model)
+    if current and current not in options:
+        options.insert(0, current)
+    return options
+
+
+def run_controls_state() -> dict[str, dict[str, str]]:
+    controls = st.session_state.setdefault("codex_run_controls_by_chat", {})
+    return controls if isinstance(controls, dict) else {}
+
+
+def chat_run_controls(chat: ChatSession | None) -> dict[str, str]:
+    if not chat:
+        return {}
+    controls = run_controls_state().get(chat.id)
+    return controls.copy() if isinstance(controls, dict) else {}
+
+
+def save_chat_run_controls(chat: ChatSession, controls: dict[str, str]) -> None:
+    if controls:
+        run_controls_state()[chat.id] = controls
+    else:
+        run_controls_state().pop(chat.id, None)
+
+
+def build_turn_overrides(controls: dict[str, str]) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    mapping = {
+        "model": "model",
+        "reasoning_effort": "effort",
+        "reasoning_summary": "summary",
+        "verbosity": "verbosity",
+    }
+    for source, target in mapping.items():
+        value = controls.get(source, "").strip()
+        if value:
+            overrides[target] = value
+    sandbox_policy = controls.get("sandbox_policy_json", "").strip()
+    if sandbox_policy:
+        try:
+            parsed = json.loads(sandbox_policy)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            overrides["sandboxPolicy"] = parsed
+    return overrides
+
+
+def valid_json_object_or_empty(value: str) -> bool:
+    if not value.strip():
+        return True
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict)
 
 
 def add_draftable_chat_message(
@@ -1247,6 +1362,14 @@ def surface_sidebar(
             settings_dialog(settings)
         project = project_selector(server_threads, "sidebar")
         chat = select_chat(project, server_threads)
+        if st.button(
+            "Run Overrides",
+            key="open_run_overrides_dialog",
+            disabled=not project,
+            use_container_width=True,
+        ):
+            target_chat = draft_or_selected_chat(project, chat)
+            codex_run_overrides_dialog(settings.app_server_url, target_chat)
         st.divider()
         sidebar_promptform_actions(project, chat)
         sidebar_skill_actions(project, chat)
@@ -1256,6 +1379,118 @@ def surface_sidebar(
 @st.dialog("Settings", width="large")
 def settings_dialog(settings: AppSettings) -> None:
     settings_screen(settings, heading=False)
+
+
+@st.dialog("Run Overrides", width="large")
+def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
+    config = load_codex_config(app_server_url)
+    models = load_codex_models(app_server_url)
+
+    if not config:
+        st.warning("Could not read Codex config from App Server.")
+        return
+
+    current_model = str(config.get("model") or "")
+    model_options = [codex_model_id(model) for model in models if codex_model_id(model)]
+    if current_model and current_model not in model_options:
+        model_options.insert(0, current_model)
+
+    st.info(
+        "Stored only in this Nomad Surface session and sent as overrides on this chat's future turns. Codex config.toml is not modified."
+    )
+    summary_cols = st.columns(2)
+    summary_cols[0].metric("Codex default model", current_model or "Codex default")
+    summary_cols[1].metric(
+        "Codex default effort",
+        config_string(config, "model_reasoning_effort") or "Codex default",
+    )
+
+    controls = chat_run_controls(chat)
+    selected_model = controls.get("model", "")
+    if selected_model and selected_model not in model_options:
+        model_options.insert(0, selected_model)
+    current_effort = controls.get("reasoning_effort", "")
+    effort_source_model = selected_model or current_model
+    effort_options = model_effort_options(models, effort_source_model, current_effort)
+
+    if model_options:
+        displayed_model_options = [""] + model_options
+        model = st.selectbox(
+            "Model",
+            displayed_model_options,
+            index=option_index(displayed_model_options, selected_model),
+            key=f"run_override_model_{chat.id}",
+            format_func=lambda value: next(
+                (
+                    codex_model_label(item)
+                    for item in models
+                    if codex_model_id(item) == value
+                ),
+                value or "Codex default",
+            ),
+        )
+    else:
+        model = st.text_input(
+            "Model",
+            value=selected_model,
+            key=f"run_override_model_text_{chat.id}",
+            placeholder=current_model or "Codex default",
+        ).strip()
+
+    reasoning_effort = st.selectbox(
+        "Reasoning effort",
+        effort_options,
+        index=option_index(effort_options, current_effort),
+        key=f"run_override_reasoning_effort_{chat.id}",
+        format_func=lambda value: value or "Model/Codex default",
+    )
+    reasoning_summary = st.text_input(
+        "Reasoning summary",
+        value=controls.get("reasoning_summary", ""),
+        key=f"run_override_reasoning_summary_{chat.id}",
+        placeholder=config_string(config, "model_reasoning_summary") or "Codex default",
+    )
+    verbosity = st.text_input(
+        "Verbosity",
+        value=controls.get("verbosity", ""),
+        key=f"run_override_verbosity_{chat.id}",
+        placeholder=config_string(config, "model_verbosity") or "Codex default",
+    )
+    approval_policy = st.text_input(
+        "Approval policy",
+        value=controls.get("approval_policy", ""),
+        key=f"run_override_approval_policy_{chat.id}",
+        placeholder=config_string(config, "approval_policy") or "Codex default",
+    )
+    sandbox_policy_json = st.text_area(
+        "Sandbox policy JSON",
+        value=controls.get("sandbox_policy_json", ""),
+        key=f"run_override_sandbox_policy_json_{chat.id}",
+        placeholder='{"type":"workspaceWrite","networkAccess":false}',
+        height=90,
+    ).strip()
+    updates: dict[str, str] = {}
+    if model:
+        updates["model"] = model
+    if reasoning_effort:
+        updates["reasoning_effort"] = reasoning_effort
+    if approval_policy:
+        updates["approval_policy"] = approval_policy
+    if reasoning_summary:
+        updates["reasoning_summary"] = reasoning_summary
+    if verbosity:
+        updates["verbosity"] = verbosity
+    if sandbox_policy_json:
+        if valid_json_object_or_empty(sandbox_policy_json):
+            updates["sandbox_policy_json"] = sandbox_policy_json
+        else:
+            st.error("Sandbox policy JSON must be a JSON object.")
+    if valid_json_object_or_empty(sandbox_policy_json):
+        save_chat_run_controls(chat, updates)
+    st.caption("Changes apply automatically to this chat's future turns.")
+    if st.button("Clear this chat overrides", key=f"clear_run_overrides_{chat.id}"):
+        save_chat_run_controls(chat, {})
+        st.rerun()
 
 
 def settings_screen(settings: AppSettings, heading: bool = True) -> None:
