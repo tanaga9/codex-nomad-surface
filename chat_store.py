@@ -3,12 +3,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass
 class ChatMessage:
     role: str
     content: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -35,8 +37,12 @@ class ChatSession:
     def touch(self) -> None:
         self.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def add_message(self, role: str, content: str) -> None:
-        self.messages.append(ChatMessage(role=role, content=content))
+    def add_message(
+        self, role: str, content: str, metadata: dict[str, Any] | None = None
+    ) -> None:
+        self.messages.append(
+            ChatMessage(role=role, content=content, metadata=metadata or {})
+        )
         if self.title == "New Chat" and role == "user":
             self.title = content.strip().splitlines()[0][:48] or "New Chat"
         self.touch()

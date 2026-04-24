@@ -135,9 +135,14 @@ def render_promptform(form: dict, instance_key: str) -> None:
     fields_html = "".join(
         _render_field(field, instance_key) for field in form.get("fields", [])
     )
-    description_html = (
-        f'<div class="promptform-description">{_escape_text(form["description"])}</div>'
-        if form.get("description")
+    purpose_html = (
+        f'<div class="promptform-description">{_escape_text(form["purpose"])}</div>'
+        if form.get("purpose")
+        else ""
+    )
+    usage_html = (
+        f'<div class="promptform-help">{_escape_text(form["usage"])}</div>'
+        if form.get("usage")
         else ""
     )
     example_html = (
@@ -157,12 +162,13 @@ def render_promptform(form: dict, instance_key: str) -> None:
           <style>{css}</style>
           <form class="promptform-root" data-promptform-root>
             <div class="promptform-title">{_escape_text(form.get("title") or "Prompt Form")}</div>
-            {description_html}
+            {purpose_html}
+            {usage_html}
             {example_html}
             {fields_html}
             <div class="promptform-actions">
               <button type="submit" class="promptform-submit">
-                {_escape_text(form.get("submit_label") or "Add to chat input")}
+                {_escape_text(form.get("submit_label") or "Insert into chat")}
               </button>
               <span class="promptform-status" data-promptform-status></span>
             </div>

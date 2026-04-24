@@ -12,9 +12,13 @@
       "minLength": 1,
       "description": "UI heading for the rendered form."
     },
-    "description": {
+    "purpose": {
       "type": "string",
-      "description": "Short explanatory text shown with the form."
+      "description": "Short statement of what the Prompt Form is for."
+    },
+    "usage": {
+      "type": "string",
+      "description": "Optional guidance on how the user should use the Prompt Form."
     },
     "response_example": {
       "type": "string",

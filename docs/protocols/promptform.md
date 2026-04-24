@@ -71,6 +71,14 @@ Do not use it when:
   control types.
 - Prefer including `response_example` so the intended reply shape is obvious in
   plain-text logs and non-rendering clients.
+- Prefer `purpose` to say what the Prompt Form is for.
+- Keep `purpose` short and selection-friendly.
+- Write `purpose` as a dense noun phrase or short purpose phrase, not as a full
+  instructional sentence when that sentence adds no differentiating
+  information.
+- Avoid repeated prefixes such as "Use this Prompt Form..." in `purpose`; those
+  words add little value in a picker or compact UI.
+- Use `usage` only when a short instruction materially helps the user.
 - Prefer choice-oriented fields over free-text fields.
 - Prefer string options when the stored value and displayed text are the same.
 - Use option objects only when you need a different `label` from `value`.
@@ -85,7 +93,7 @@ Do not use it when:
 - Empty-string option values are allowed when they mean "no extra text" in the
   generated reply.
 - Match user-facing text to the user's language when practical. This includes
-  prose outside the block and fields such as `title`, `description`,
+  prose outside the block and fields such as `title`, `purpose`, `usage`,
   `submit_label`, field `label`, and option `label`. Keep `id` stable and ASCII
   when practical.
 - Format the JSON with normal indentation so it remains readable as text.
@@ -98,6 +106,9 @@ This is a good default when the form is simple:
 
 ```json
 {
+  "title": "Setup Request",
+  "purpose": "Setup and migration requests",
+  "usage": "Choose the task, then fill the project name.",
   "template": "{task} for {project}",
   "response_example": "setup for my-app",
   "fields": [
@@ -114,13 +125,15 @@ This is a good default when the form is simple:
 }
 ```
 
-Add `label`, `description`, `help`, or other fields only when they materially
+Add `purpose`, optional `usage`, `label`, `help`, or other fields only when they materially
 improve the user interaction.
 
 When the agent recommends a non-first option, set `default` explicitly:
 
 ```json
 {
+  "title": "Mode Choice",
+  "purpose": "Operating mode selection",
   "template": "{mode}",
   "fields": [
     {
@@ -138,6 +151,8 @@ value:
 
 ```json
 {
+  "title": "Policy Choice",
+  "purpose": "Policy selection",
   "template": "{policy}",
   "fields": [
     {

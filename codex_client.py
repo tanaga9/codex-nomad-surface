@@ -127,8 +127,6 @@ class CodexClient:
         self,
         project_path: str,
         prompt: str,
-        skin_id: str,
-        fields: dict[str, str],
         thread_id: str | None,
         output_callback: OutputCallback | None = None,
     ) -> dict[str, Any]:
@@ -144,8 +142,6 @@ class CodexClient:
                 self._start_chat_turn_ws(
                     project_path,
                     prompt,
-                    skin_id,
-                    fields,
                     thread_id,
                     output_callback,
                 )
@@ -311,8 +307,6 @@ class CodexClient:
         self,
         project_path: str,
         prompt: str,
-        skin_id: str,
-        fields: dict[str, str],
         thread_id: str | None,
         output_callback: OutputCallback | None = None,
     ) -> dict[str, Any]:
@@ -402,7 +396,7 @@ class CodexClient:
                         "input": [
                             {
                                 "type": "text",
-                                "text": self._compose_prompt(prompt, skin_id, fields),
+                                "text": prompt,
                                 "text_elements": [],
                             }
                         ],
@@ -708,15 +702,6 @@ class CodexClient:
             "title": method,
             "detail": json.dumps(params, ensure_ascii=False, indent=2),
         }
-
-    def _compose_prompt(self, prompt: str, skin_id: str, fields: dict[str, str]) -> str:
-        extras = [f"Skin: {skin_id}"]
-        for key, value in fields.items():
-            if value.strip():
-                extras.append(f"{key}: {value.strip()}")
-        if len(extras) == 1:
-            return prompt
-        return f"{prompt}\n\n" + "\n".join(extras)
 
     async def _rpc_call(
         self,

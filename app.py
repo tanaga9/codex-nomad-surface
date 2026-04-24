@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import textwrap
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,6 +17,7 @@ import streamlit as st
 
 from chat_store import ChatMessage, ChatSession
 from codex_client import CodexClient, CodexThread, CodexThreadMessages, ConnectionStatus
+from promptform_defs import PromptFormDef, load_promptform_defs, promptform_def_by_id
 from settings import (
     AppSettings,
     Project,
@@ -23,11 +25,9 @@ from settings import (
     load_settings,
     save_settings,
 )
-from skins import load_skins, skin_by_id
 from ui_components import (
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
-    render_add_starter_button,
     render_promptform,
 )
 
@@ -57,7 +57,6 @@ def init_state() -> None:
     st.session_state.setdefault("authenticated", False)
     st.session_state.setdefault("selected_chat_id", "")
     st.session_state.setdefault("selected_project_key", "")
-    st.session_state.setdefault("selected_skin_id", "quick_prompt")
     st.session_state.setdefault("last_query_chat_id", None)
     st.session_state.setdefault("chat_select_version", 0)
     st.session_state.setdefault("last_rendered_chat_id", "")
@@ -227,14 +226,6 @@ def selected_project_key() -> str:
 
 def set_selected_project_key(value: str) -> None:
     st.session_state.selected_project_key = value
-
-
-def selected_skin_id() -> str:
-    return str(st.session_state.get("selected_skin_id") or "quick_prompt")
-
-
-def set_selected_skin_id(value: str) -> None:
-    st.session_state.selected_skin_id = value
 
 
 def auth_screen() -> None:
@@ -457,22 +448,6 @@ def project_selector(
     return None
 
 
-def skin_selector(key_prefix: str):
-    skins = load_skins()
-    if not skins:
-        st.error("No Skins found. Add `skins/*.json` files.")
-        st.stop()
-    selected = skin_by_id(skins, selected_skin_id())
-    labels = [f"{skin.name} - {skin.description}" for skin in skins]
-    ids = [skin.id for skin in skins]
-    index = ids.index(selected.id)
-    choice = st.selectbox("Skin", labels, index=index, key=f"{key_prefix}_skin")
-    new_skin = skins[labels.index(choice)]
-    if new_skin.id != selected_skin_id():
-        set_selected_skin_id(new_skin.id)
-    return new_skin
-
-
 def approval_key(approval: dict, fallback: str = "") -> str:
     return str(
         approval.get("id")
@@ -670,13 +645,14 @@ def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
 def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> None:
     if not chat:
         return
+    promptform_defs = load_available_promptform_defs()
     if not chat.messages:
         if chat.thread_id:
             st.caption(
                 "An App Server thread is selected. Previous messages have not been loaded yet. The next submission will continue this thread."
             )
             return
-        st.caption("No messages yet. Use Input Assist or type a request for Codex.")
+        st.caption("No messages yet. Add a prompt form or type a request for Codex.")
         return
 
     messages = (
@@ -685,6 +661,16 @@ def render_chat(chat: ChatSession | None, skip_latest_user: bool = False) -> Non
         else chat.messages
     )
     for index, message in enumerate(messages):
+        if message.role == "promptform_picker":
+            picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
+            with st.chat_message("promptform-picker", avatar="🧩"):
+                render_promptform_picker_message(
+                    message,
+                    promptform_defs,
+                    message_key=f"{chat.id}-{picker_id}",
+                )
+            continue
+
         with st.chat_message(message.role):
             content = message.content
             embedded_forms: list[dict] = []
@@ -774,12 +760,13 @@ def normalize_promptform(form: object) -> dict:
         append_spacing = "paragraph"
 
     return {
-        "title": str(form.get("title") or "Choose an option").strip()
-        or "Choose an option",
-        "description": str(form.get("description") or "").strip(),
+        "title": str(form.get("title") or "Prompt Form").strip()
+        or "Prompt Form",
+        "purpose": str(form.get("purpose") or "").strip(),
+        "usage": str(form.get("usage") or "").strip(),
         "response_example": str(form.get("response_example") or "").strip(),
-        "submit_label": str(form.get("submit_label") or "Add to chat input").strip()
-        or "Add to chat input",
+        "submit_label": str(form.get("submit_label") or "Insert into chat").strip()
+        or "Insert into chat",
         "template": template,
         "append_spacing": append_spacing,
         "fields": fields,
@@ -843,8 +830,6 @@ def render_pending_turn(
                 result = client.start_chat_turn(
                     project.path,
                     pending["text"],
-                    pending["skin_id"],
-                    pending["fields"],
                     chat.thread_id,
                     output_callback=update_stream,
                 )
@@ -934,7 +919,7 @@ def cancel_pending_turn_if_needed(
 
 
 def queue_user_turn(
-    chat: ChatSession, user_text: str, skin_id: str, field_values: dict[str, str]
+    chat: ChatSession, user_text: str
 ) -> None:
     pending = st.session_state.get("pending_turn")
     if pending and pending.get("runtime"):
@@ -943,59 +928,90 @@ def queue_user_turn(
     st.session_state.pending_turn = {
         "chat_id": chat.id,
         "text": user_text,
-        "skin_id": skin_id,
-        "fields": field_values,
     }
     st.session_state.chat_history_autoscroll = True
     st.rerun()
 
 
-def input_assist_panel():
-    skins = load_skins()
-    if not skins:
-        st.error("No Skins found. Add `skins/*.json` files.")
+def load_available_promptform_defs() -> list[PromptFormDef]:
+    defs = load_promptform_defs()
+    if not defs:
+        st.error("No Prompt Form definitions found. Add JSON files under `promptform-defs/`.")
         st.stop()
+    return defs
 
-    field_values: dict[str, str] = {}
-    skin = skin_by_id(skins, selected_skin_id())
-    with st.expander("Input Assist", expanded=False):
-        skin = skin_selector("chat")
-        st.caption(skin.description)
-        if skin.quick_prompts:
-            quick = st.selectbox(
-                "Starter prompts", [""] + skin.quick_prompts, key="chat_quick_prompt"
+
+def add_promptform_picker_message(chat: ChatSession) -> None:
+    chat.add_message(
+        "promptform_picker",
+        "",
+        metadata={
+            "picker_id": str(uuid.uuid4()),
+            "selected_def_id": "",
+        },
+    )
+
+
+def sidebar_promptform_actions(project: Project | None, chat: ChatSession | None) -> None:
+    disabled = not project or bool(st.session_state.get("pending_turn"))
+    if st.button("Add Prompt Form", disabled=disabled, use_container_width=True):
+        target_chat = chat or create_chat(project)
+        add_promptform_picker_message(target_chat)
+        st.session_state.chat_history_autoscroll = True
+        st.rerun()
+    st.caption("Adds a Prompt Form chooser to the chat.")
+
+
+def render_promptform_picker_message(
+    message: ChatMessage, defs: list[PromptFormDef], message_key: str
+) -> None:
+    selected_def_id = str(message.metadata.get("selected_def_id") or "")
+    options = [""] + [item.id for item in defs]
+    label_by_id = {
+        "": "Choose a prompt form",
+        **{
+            item.id: (
+                f"{item.form.get('title', item.id)} - {item.form.get('purpose', '').strip()}"
+                if str(item.form.get("purpose") or "").strip()
+                else str(item.form.get("title") or item.id)
             )
-        else:
-            quick = ""
-        if skin.fields:
-            for field in skin.fields:
-                field_values[field["id"]] = st.text_input(
-                    field["label"],
-                    placeholder=field.get("placeholder", ""),
-                    key=f'chat_field_{field["id"]}',
-                )
-        if skin.quick_prompts:
-            can_add_quick = bool(quick and not st.session_state.get("pending_turn"))
-            render_add_starter_button(quick, disabled=not can_add_quick)
-    return skin, field_values
+            for item in defs
+        },
+    }
+    selected_index = options.index(selected_def_id) if selected_def_id in options else 0
+    selected_def_id = st.selectbox(
+        "Prompt Form",
+        options,
+        index=selected_index,
+        key=f"promptform_picker_{message_key}",
+        format_func=lambda item_id: label_by_id[item_id],
+        label_visibility="collapsed",
+    )
+    message.metadata["selected_def_id"] = selected_def_id
+    if not selected_def_id:
+        return
+    selected_def = promptform_def_by_id(defs, selected_def_id)
+    if selected_def is None:
+        st.warning("The selected Prompt Form was not found.", icon="⚠️")
+        return
+    render_promptform(
+        normalize_promptform(selected_def.form),
+        instance_key=f"{message_key}-{selected_def.id}",
+    )
 
 
 def chat_composer(
     project: Project | None,
     chat: ChatSession | None,
-    skin,
-    field_values: dict[str, str],
 ) -> None:
     prompt_disabled = not project or bool(st.session_state.get("pending_turn"))
     prompt = st.chat_input(
-        skin.placeholder, key="chat_prompt_input", disabled=prompt_disabled
+        "Message Codex", key="chat_prompt_input", disabled=prompt_disabled
     )
     if prompt and project:
         user_text = prompt.strip()
         if user_text:
-            queue_user_turn(
-                chat or create_chat(project), user_text, skin.id, field_values
-            )
+            queue_user_turn(chat or create_chat(project), user_text)
 
     if not project:
         st.caption("Select a project and enter a message before sending.")
@@ -1005,28 +1021,27 @@ def chat_workspace(
     client: CodexClient,
     project: Project | None,
     chat: ChatSession | None,
-    skin,
-    field_values: dict[str, str],
 ) -> None:
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     chat_history_panel(client, project, chat)
-    chat_composer(project, chat, skin, field_values)
+    chat_composer(project, chat)
 
 
 def surface_sidebar(
     settings: AppSettings, server_threads: list[CodexThread]
-) -> tuple[Project | None, ChatSession | None, object, dict[str, str]]:
+) -> tuple[Project | None, ChatSession | None]:
     with st.sidebar:
         st.markdown("**Codex Nomad Surface**")
         if st.button("Settings", key="open_settings_dialog"):
             settings_dialog(settings)
         project = project_selector(server_threads, "sidebar")
         chat = select_chat(project, server_threads)
-        skin, field_values = input_assist_panel()
-    return project, chat, skin, field_values
+        st.divider()
+        sidebar_promptform_actions(project, chat)
+    return project, chat
 
 
 @st.dialog("Settings", width="large")
@@ -1072,13 +1087,13 @@ def main_screen() -> None:
 
     server_threads = server_threads_state(client)
     sync_chat_selection_from_url(server_threads)
-    project, chat, skin, field_values = surface_sidebar(settings, server_threads)
+    project, chat = surface_sidebar(settings, server_threads)
     cancel_pending_turn_if_needed(client, chat)
     hydrate_thread_chat(client, chat)
     if chat and chat.id != st.session_state.last_rendered_chat_id:
         st.session_state.last_rendered_chat_id = chat.id
 
-    chat_workspace(client, project, chat, skin, field_values)
+    chat_workspace(client, project, chat)
 
 
 def main() -> None:

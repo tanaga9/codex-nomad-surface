@@ -1,0 +1,43 @@
+{
+  "title": "Quick Prompt",
+  "purpose": "Short mobile requests",
+  "usage": "Choose an action, fill any missing target detail, then edit the generated draft if needed.",
+  "response_example": "Please summarize the current work status for the chat workflow.",
+  "submit_label": "Insert into chat",
+  "template": "Please {action} {target}{detail}.",
+  "fields": [
+    {
+      "id": "action",
+      "type": "select",
+      "label": "Action",
+      "default": "summarize",
+      "options": [
+        {
+          "value": "summarize",
+          "label": "summarize"
+        },
+        {
+          "value": "review",
+          "label": "review"
+        },
+        {
+          "value": "implement",
+          "label": "implement"
+        }
+      ]
+    },
+    {
+      "id": "target",
+      "type": "text",
+      "label": "Target",
+      "placeholder": "the current work status"
+    },
+    {
+      "id": "detail",
+      "type": "text",
+      "label": "Extra detail",
+      "default": "",
+      "placeholder": "for the chat workflow"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "title": "Project Work",
+  "purpose": "Implementation, review, and verification requests",
+  "usage": "Fill the main request shape, then edit the generated draft if needed.",
+  "response_example": "Implement the missing feature in app.py. Scope: chat rendering. Done when: the new picker switches forms correctly.",
+  "submit_label": "Insert into chat",
+  "template": "{task}. Scope: {scope}. Done when: {done_when}.",
+  "fields": [
+    {
+      "id": "task",
+      "type": "textarea",
+      "label": "Task",
+      "placeholder": "Implement the missing feature in app.py"
+    },
+    {
+      "id": "scope",
+      "type": "text",
+      "label": "Scope",
+      "placeholder": "chat rendering"
+    },
+    {
+      "id": "done_when",
+      "type": "text",
+      "label": "Done when",
+      "placeholder": "the new picker switches forms correctly"
+    }
+  ]
+}

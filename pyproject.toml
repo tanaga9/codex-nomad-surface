@@ -19,8 +19,8 @@ py-modules = [
     "app",
     "chat_store",
     "codex_client",
+    "promptform_defs",
     "settings",
-    "skins",
 ]
 packages = ["ui_components"]
 

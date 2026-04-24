@@ -8,11 +8,15 @@ Codex Nomad Surface is not intended to replace the official Codex interface. It 
 
 Codex is moving from a coding-focused agent toward a broader general-purpose agent, while many interfaces still resemble a traditional chat or coding surface. That mismatch creates repeated input work: task shape, context, constraints, and expected output have to be described again and again. This is not only a mobile problem, but it becomes especially visible on mobile.
 
-## Skin Philosophy
+## Prompt Form Defs
 
-Skins are task-specific input surfaces for reducing repetitive input. A Skin can expose quick prompts and small fields for a particular kind of work, then fold those values into the request sent to Codex.
+Reusable Prompt Form definitions are stored in `promptform-defs/*.json`.
+They are intended to be reused and refined over time for recurring work shapes.
 
-Skins are not just visual themes, and they do not need to map one-to-one with Skills. A Skin is the user-facing operation shape; a Skill is agent-side procedure or knowledge. The initial implementation keeps Skins small and JSON based, while leaving room for richer declarative UI formats later.
+The app supports two paths:
+
+- Assistant-triggered Prompt Forms: normal `promptform` blocks embedded in assistant responses.
+- User-triggered Prompt Forms: the sidebar button inserts a selector message into the chat history, then the selected definition is rendered below it.
 
 ## Features
 
@@ -24,7 +28,8 @@ The system is intended for personal use and includes:
 - Prompt submission
 - Result display
 - Inline approval request display and response
-- Input Assist with switchable JSON-based Skins
+- Reusable Prompt Form defs loaded from JSON files
+- User-triggered Prompt Form insertion from the sidebar
 - A minimal settings screen
 
 There is no CLI fallback. Prompt submission is disabled when Codex App Server is not running.
@@ -61,7 +66,7 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 
 ## Layout
 
-- Left sidebar: project / chat selection, Input Assist, and the Settings dialog.
+- Left sidebar: project / chat selection, Prompt Form insertion, and the Settings dialog.
 - Main area: chat history, inline approvals, and the bottom chat input.
 
 ## Structure
@@ -70,7 +75,8 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 - `ui_components/`: reusable UI helpers and static assets for embedded forms and custom chat-input integrations.
 - `codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval responses.
 - `settings.py`: storage in `.nomad_surface/settings.json`.
-- `skins/*.json`: Skin definitions for task-specific UI.
+- `promptform-defs/*.json`: reusable Prompt Form definitions.
+- `promptform_defs.py`: loader for Prompt Form definition files.
 - `pyproject.toml`: Python project metadata and runtime dependencies.
 
 The embedded Prompt Form UI is assembled at runtime by the `ui_components`

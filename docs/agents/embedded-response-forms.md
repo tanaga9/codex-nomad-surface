@@ -55,6 +55,11 @@ but the next user prompt is plain text, not hidden structured state.
   helpful.
 - Prefer including `response_example` so the intended reply shape is obvious in
   plain text.
+- Prefer `purpose` for what the Prompt Form is for.
+- Keep `purpose` short and selection-friendly.
+- Prefer dense purpose phrases over repeated full-sentence prefixes such as
+  "Use this Prompt Form...".
+- Use `usage` only when a short instruction materially helps the user.
 - Prefer string options when display text and stored value are the same.
 - Use option objects only when `label` needs to differ from `value`.
 - Empty-string option values are allowed when they intentionally mean "no extra
@@ -66,7 +71,7 @@ but the next user prompt is plain text, not hidden structured state.
 - For non-English users, keep `id` stable and ASCII when practical, and put the
   localized wording in user-facing fields.
 - Match user-facing text to the user's language when practical. This includes
-  prose outside the block, `title`, `description`, `submit_label`, field
+  prose outside the block, `title`, `purpose`, `usage`, `submit_label`, field
   `label`, and option `label`.
 - When a standard purpose-built protocol exists for the interaction, prefer
   using that protocol instead of using the form as a substitute.
