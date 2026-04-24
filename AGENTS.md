@@ -1,3 +1,12 @@
+# Project Preferences
+
+When working in this repository, preserve these user preferences unless the user explicitly overrides them:
+
+- Do not run git operations that modify repository state unless the user explicitly asks for them. Read-only git inspection such as `git status` and `git diff` is allowed.
+- Follow `SPEC.md` for product design constraints.
+- Keep documentation concise and avoid overfitting it to recent events.
+- Use generic placeholder paths in documentation, such as `/path/to/...`, instead of real local usernames or machine-specific paths when the path is only illustrative.
+
 
 # Embedded Response Forms
 

@@ -140,6 +140,20 @@ Codex may optimize the screen structure and UI details during implementation.
 - Keep the configuration minimal to reduce maintenance cost.
 - Personal use is acceptable.
 - Clearly separate available screens and operations before and after authentication.
+- Treat Codex Nomad Surface as an outer operation layer around Codex rather
+  than as a replacement for the official Codex interface.
+- Keep persistent app settings minimal. `settings.json` should be limited to
+  stable app-level configuration such as connection settings, not temporary UI
+  state or per-run behavior.
+- Runtime controls for Codex execution, such as model, reasoning effort,
+  reasoning summary, verbosity, approval policy, and sandbox policy, should
+  prefer chat/session/turn scoped overrides over modifying Codex config files.
+- Avoid hardcoding fast-changing Codex choices, especially model IDs and option
+  lists. Prefer discovering available values from Codex App Server or Codex API,
+  with a manual free-text fallback only when discovery is unavailable.
+- Avoid UI that only restates implementation details. Redundant tabs, disabled
+  fields, and explanatory rows should be removed when a short inline note
+  communicates the same thing more clearly.
 
 ---
 
