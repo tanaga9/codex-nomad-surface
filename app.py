@@ -44,6 +44,7 @@ st.set_page_config(
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+LOGO_PATH = Path(__file__).parent / "ui_components" / "assets" / "logo.svg"
 PROMPTFORM_BLOCK_PATTERN = re.compile(
     r"""
     ^[ \t]*```promptform[ \t]*\r?\n
@@ -90,6 +91,10 @@ def chats_state() -> list[ChatSession]:
     if "chats" not in st.session_state:
         st.session_state.chats = []
     return st.session_state.chats
+
+
+def render_surface_logo() -> None:
+    st.logo(str(LOGO_PATH), size="large")
 
 
 def draft_chat_for_project(project: Project | None) -> ChatSession | None:
@@ -490,6 +495,16 @@ def set_query_chat_id(chat_id: str) -> None:
     elif "chat" in st.query_params:
         del st.query_params["chat"]
     st.session_state.last_query_chat_id = chat_id
+
+
+def reset_home_view() -> None:
+    st.session_state.selected_chat_id = ""
+    st.session_state.draft_chat = None
+    st.session_state.last_rendered_chat_id = ""
+    st.session_state.chat_history_autoscroll = False
+    st.session_state.chat_select_version += 1
+    st.query_params.clear()
+    st.session_state.last_query_chat_id = ""
 
 
 def sync_chat_selection_from_url(server_threads: list[CodexThread]) -> None:
@@ -1092,11 +1107,22 @@ def chat_workspace(
     chat_composer(project, chat)
 
 
+def render_sidebar_home_title() -> None:
+    with st.container(key="sidebar-home-title"):
+        st.button(
+            "Codex Nomad Surface",
+            key="reset_home_view",
+            on_click=reset_home_view,
+            type="tertiary",
+            width="content",
+        )
+
+
 def surface_sidebar(
     settings: AppSettings, server_threads: list[CodexThread]
 ) -> tuple[Project | None, ChatSession | None]:
     with st.sidebar:
-        st.markdown("**Codex Nomad Surface**")
+        render_sidebar_home_title()
         if st.button("Settings", key="open_settings_dialog"):
             settings_dialog(settings)
         project = project_selector(server_threads, "sidebar")
@@ -1161,6 +1187,7 @@ def main_screen() -> None:
 
 def main() -> None:
     init_state()
+    render_surface_logo()
     if not auth_required():
         st.session_state.authenticated = True
     if not st.session_state.authenticated:

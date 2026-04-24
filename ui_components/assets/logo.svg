@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-labelledby="title">
+  <title id="title">Codex Nomad Surface</title>
+  <style>
+    .mark-bg { fill: #111827; }
+    .mark-fg { fill: #f9fafb; }
+    @media (prefers-color-scheme: dark) {
+      .mark-bg { fill: #f9fafb; }
+      .mark-fg { fill: #111827; }
+    }
+  </style>
+  <rect class="mark-bg" x="3" y="3" width="26" height="26" rx="6" />
+  <path class="mark-fg" d="M10 10h12v3h-9v6h9v3H10z" />
+  <path class="mark-fg" d="M16 14.5h7v3h-7z" />
+</svg>
