@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import hmac
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -11,7 +12,10 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import streamlit as st
 
@@ -766,6 +770,11 @@ def render_chat(
                 )
             continue
 
+        if message.role == "server_thread_info":
+            with st.chat_message("server-thread-info", avatar=":material/info:"):
+                st.markdown(message.content)
+            continue
+
         with st.chat_message(message.role):
             content = message.content
             embedded_forms: list[dict] = []
@@ -930,6 +939,7 @@ def render_pending_turn(
                     project.path,
                     pending["text"],
                     chat.thread_id,
+                    thread_overrides=pending.get("thread_overrides"),
                     turn_overrides=pending.get("turn_overrides"),
                     approval_policy=pending.get("approval_policy"),
                     output_callback=update_stream,
@@ -1029,6 +1039,7 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
     st.session_state.pending_turn = {
         "chat_id": chat.id,
         "text": user_text,
+        "thread_overrides": build_thread_overrides(controls),
         "turn_overrides": build_turn_overrides(controls),
         "approval_policy": controls.get("approval_policy", "").strip() or None,
     }
@@ -1061,6 +1072,39 @@ def load_codex_config(base_url: str) -> dict:
 @st.cache_data(show_spinner=False, ttl=60)
 def load_codex_models(base_url: str) -> list[dict]:
     return CodexClient(base_url).list_models()
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def load_provider_models(provider_key: str, provider: dict) -> list[dict]:
+    base_url = str(provider.get("base_url") or "").strip()
+    if not provider_key or not base_url:
+        return []
+
+    models_url = f"{base_url.rstrip('/')}/models"
+    headers: dict[str, str] = {}
+    env_key = str(
+        provider.get("env_key")
+        or provider.get("envKey")
+        or provider.get("api_key_env_var")
+        or provider.get("apiKeyEnvVar")
+        or ""
+    ).strip()
+    if env_key:
+        api_key = os.environ.get(env_key, "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+    request = Request(models_url, headers=headers)
+    try:
+        with urlopen(request, timeout=3) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return []
+
+    data = raw.get("data") if isinstance(raw, dict) else None
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
 
 
 def codex_model_id(model: dict) -> str:
@@ -1110,6 +1154,40 @@ def model_effort_options(
     return options
 
 
+def model_provider_options(config: dict, selected: str, current: str) -> list[str]:
+    options = ["", "openai"]
+    providers = config.get("model_providers")
+    if isinstance(providers, dict):
+        options.extend(str(name) for name in providers if str(name).strip())
+    for value in (current, selected):
+        if value and value not in options:
+            options.insert(1, value)
+    return list(dict.fromkeys(options))
+
+
+def model_provider_label(config: dict, value: str) -> str:
+    if not value:
+        return "Codex default"
+    providers = config.get("model_providers")
+    if not isinstance(providers, dict):
+        return value
+    provider = providers.get(value)
+    if not isinstance(provider, dict):
+        return value
+    name = str(provider.get("name") or "").strip()
+    base_url = str(provider.get("base_url") or "").strip()
+    details = " - ".join(part for part in (name, base_url) if part)
+    return f"{value} ({details})" if details else value
+
+
+def configured_model_provider(config: dict, value: str) -> dict:
+    providers = config.get("model_providers")
+    if not isinstance(providers, dict):
+        return {}
+    provider = providers.get(value)
+    return provider if isinstance(provider, dict) else {}
+
+
 def run_controls_state() -> dict[str, dict[str, str]]:
     controls = st.session_state.setdefault("codex_run_controls_by_chat", {})
     return controls if isinstance(controls, dict) else {}
@@ -1150,6 +1228,110 @@ def build_turn_overrides(controls: dict[str, str]) -> dict[str, Any]:
         if isinstance(parsed, dict):
             overrides["sandboxPolicy"] = parsed
     return overrides
+
+
+def build_thread_overrides(controls: dict[str, str]) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    model_provider = controls.get("model_provider", "").strip()
+    service_tier = controls.get("service_tier", "").strip()
+    if model_provider:
+        overrides["modelProvider"] = model_provider
+    if service_tier:
+        overrides["serviceTier"] = service_tier
+    return overrides
+
+
+def nested_thread_value(raw: Any, keys: set[str]) -> Any:
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if key in keys and value not in (None, ""):
+                return value
+        for value in raw.values():
+            found = nested_thread_value(value, keys)
+            if found not in (None, ""):
+                return found
+    elif isinstance(raw, list):
+        for item in raw:
+            found = nested_thread_value(item, keys)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+def format_thread_info_value(value: Any) -> str:
+    if value in (None, ""):
+        return "_Not returned by App Server_"
+    if isinstance(value, dict):
+        value_type = value.get("type")
+        value = value_type if value_type else json.dumps(value, ensure_ascii=False)
+    elif isinstance(value, list):
+        value = json.dumps(value, ensure_ascii=False)
+    else:
+        value = str(value)
+    return f"`{str(value).replace('`', '\\`')}`"
+
+
+def format_server_thread_info(runtime: dict[str, Any]) -> str:
+    thread = runtime.get("thread") if isinstance(runtime.get("thread"), dict) else {}
+    turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
+    latest_turn = turns[-1] if turns and isinstance(turns[-1], dict) else {}
+    fields = [
+        ("Thread ID", thread.get("id")),
+        ("Status", thread.get("status")),
+        ("Model provider", runtime.get("modelProvider") or thread.get("modelProvider")),
+        ("Model", runtime.get("model")),
+        (
+            "Reasoning effort",
+            runtime.get("reasoningEffort")
+            or nested_thread_value(
+                thread, {"reasoningEffort", "reasoning_effort", "effort"}
+            ),
+        ),
+        (
+            "Service tier",
+            runtime.get("serviceTier")
+            or nested_thread_value(thread, {"serviceTier", "service_tier"}),
+        ),
+        ("Approval policy", runtime.get("approvalPolicy")),
+        ("Approvals reviewer", runtime.get("approvalsReviewer")),
+        ("Sandbox", runtime.get("sandbox")),
+        ("CWD", runtime.get("cwd") or thread.get("cwd")),
+        ("CLI version", thread.get("cliVersion")),
+        ("Source", thread.get("source")),
+        ("Agent role", thread.get("agentRole")),
+        ("Agent nickname", thread.get("agentNickname")),
+        ("Created at", format_thread_time(int(thread.get("createdAt") or 0))),
+        ("Updated at", format_thread_time(int(thread.get("updatedAt") or 0))),
+        ("Turn count", len(turns) if turns else None),
+        ("Latest turn status", latest_turn.get("status")),
+        ("Latest turn duration ms", latest_turn.get("durationMs")),
+        ("Latest turn error", latest_turn.get("error")),
+    ]
+    lines = ["### Codex App Server thread info", "", "Source RPC: `thread/resume`", ""]
+    for label, value in fields:
+        lines.append(f"- **{label}:** {format_thread_info_value(value)}")
+    return "\n".join(lines)
+
+
+def append_server_thread_info_message(
+    settings: AppSettings, project: Project | None, chat: ChatSession | None
+) -> None:
+    if not project or not chat or not chat.thread_id:
+        return
+    target_chat = materialize_chat(project, chat)
+    runtime = CodexClient(settings.app_server_url).read_thread_runtime_info(
+        target_chat.thread_id, project.path
+    )
+    if runtime:
+        content = format_server_thread_info(runtime)
+    else:
+        content = (
+            "### Codex App Server thread info\n\n"
+            "`thread/resume` returned no runtime data."
+        )
+    target_chat.add_message("server_thread_info", content)
+    st.session_state.chat_history_autoscroll = True
+    st.rerun()
 
 
 def valid_json_object_or_empty(value: str) -> bool:
@@ -1370,6 +1552,16 @@ def surface_sidebar(
         ):
             target_chat = draft_or_selected_chat(project, chat)
             codex_run_overrides_dialog(settings.app_server_url, target_chat)
+        if st.button(
+            "Show Server Thread Info",
+            key="show_server_thread_info",
+            disabled=not project
+            or not chat
+            or not chat.thread_id
+            or bool(st.session_state.get("pending_turn")),
+            use_container_width=True,
+        ):
+            append_server_thread_info_message(settings, project, chat)
         st.divider()
         sidebar_promptform_actions(project, chat)
         sidebar_skill_actions(project, chat)
@@ -1391,6 +1583,8 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
         return
 
     current_model = str(config.get("model") or "")
+    current_model_provider = str(config.get("model_provider") or "")
+    current_service_tier = config_string(config, "service_tier")
     model_options = [codex_model_id(model) for model in models if codex_model_id(model)]
     if current_model and current_model not in model_options:
         model_options.insert(0, current_model)
@@ -1398,27 +1592,79 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
     st.info(
         "Stored only in this Nomad Surface session and sent as overrides on this chat's future turns. Codex config.toml is not modified."
     )
-    summary_cols = st.columns(2)
-    summary_cols[0].metric("Codex default model", current_model or "Codex default")
-    summary_cols[1].metric(
-        "Codex default effort",
-        config_string(config, "model_reasoning_effort") or "Codex default",
-    )
 
     controls = chat_run_controls(chat)
     selected_model = controls.get("model", "")
-    if selected_model and selected_model not in model_options:
-        model_options.insert(0, selected_model)
+    selected_model_provider = controls.get("model_provider", "")
     current_effort = controls.get("reasoning_effort", "")
-    effort_source_model = selected_model or current_model
-    effort_options = model_effort_options(models, effort_source_model, current_effort)
+    provider_options = model_provider_options(
+        config, selected_model_provider, current_model_provider
+    )
 
-    if model_options:
+    model_provider = st.selectbox(
+        "Model provider",
+        provider_options,
+        index=option_index(provider_options, selected_model_provider),
+        key=f"run_override_model_provider_{chat.id}",
+        format_func=lambda value: model_provider_label(config, value),
+    )
+
+    active_selected_model = (
+        "" if model_provider != selected_model_provider else selected_model
+    )
+    effective_model_provider = model_provider or current_model_provider
+    use_discovered_model_options = effective_model_provider in {"", "openai"}
+    provider_models = (
+        []
+        if use_discovered_model_options
+        else load_provider_models(
+            effective_model_provider,
+            configured_model_provider(config, effective_model_provider),
+        )
+    )
+    provider_model_options = [
+        codex_model_id(provider_model)
+        for provider_model in provider_models
+        if codex_model_id(provider_model)
+    ]
+    provider_model_value = (
+        active_selected_model
+        if active_selected_model in provider_model_options
+        else (provider_model_options[0] if provider_model_options else "")
+    )
+
+    effective_provider = model_provider or current_model_provider or "Codex default"
+    if use_discovered_model_options:
+        effective_model = (
+            active_selected_model if active_selected_model in model_options else ""
+        )
+        effective_model = effective_model or current_model or "Codex default"
+    else:
+        effective_model = provider_model_value or active_selected_model or "Model required"
+    effective_effort = (
+        current_effort
+        or config_string(config, "model_reasoning_effort")
+        or "Model/Codex default"
+    )
+    effective_service_tier = (
+        controls.get("service_tier", "").strip()
+        or current_service_tier
+        or "Codex default"
+    )
+    st.caption(
+        "Future turns in this chat: "
+        f"Provider {effective_provider} / "
+        f"Model {effective_model} / "
+        f"Reasoning {effective_effort} / "
+        f"Service tier {effective_service_tier}"
+    )
+
+    if model_options and use_discovered_model_options:
         displayed_model_options = [""] + model_options
         model = st.selectbox(
             "Model",
             displayed_model_options,
-            index=option_index(displayed_model_options, selected_model),
+            index=option_index(displayed_model_options, active_selected_model),
             key=f"run_override_model_{chat.id}",
             format_func=lambda value: next(
                 (
@@ -1429,14 +1675,29 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
                 value or "Codex default",
             ),
         )
+    elif provider_model_options:
+        model = st.selectbox(
+            "Model",
+            provider_model_options,
+            index=option_index(provider_model_options, provider_model_value),
+            key=f"run_override_provider_model_{chat.id}",
+        )
     else:
         model = st.text_input(
             "Model",
-            value=selected_model,
+            value=active_selected_model,
             key=f"run_override_model_text_{chat.id}",
-            placeholder=current_model or "Codex default",
+            placeholder=(
+                current_model
+                if use_discovered_model_options and current_model
+                else "Model name"
+            ),
         ).strip()
 
+    effort_source_model = model or (
+        current_model if use_discovered_model_options else ""
+    )
+    effort_options = model_effort_options(models, effort_source_model, current_effort)
     reasoning_effort = st.selectbox(
         "Reasoning effort",
         effort_options,
@@ -1444,6 +1705,12 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
         key=f"run_override_reasoning_effort_{chat.id}",
         format_func=lambda value: value or "Model/Codex default",
     )
+    service_tier = st.text_input(
+        "Service tier",
+        value=controls.get("service_tier", ""),
+        key=f"run_override_service_tier_{chat.id}",
+        placeholder=current_service_tier or "Codex default",
+    ).strip()
     reasoning_summary = st.text_input(
         "Reasoning summary",
         value=controls.get("reasoning_summary", ""),
@@ -1474,6 +1741,10 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
         updates["model"] = model
     if reasoning_effort:
         updates["reasoning_effort"] = reasoning_effort
+    if model_provider:
+        updates["model_provider"] = model_provider
+    if service_tier:
+        updates["service_tier"] = service_tier
     if approval_policy:
         updates["approval_policy"] = approval_policy
     if reasoning_summary:

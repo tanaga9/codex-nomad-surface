@@ -126,6 +126,7 @@ class CodexClient:
         project_path: str,
         prompt: str,
         thread_id: str | None,
+        thread_overrides: dict[str, Any] | None = None,
         turn_overrides: dict[str, Any] | None = None,
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
@@ -143,6 +144,7 @@ class CodexClient:
                     project_path,
                     prompt,
                     thread_id,
+                    thread_overrides,
                     turn_overrides,
                     approval_policy,
                     output_callback,
@@ -206,6 +208,15 @@ class CodexClient:
         return asyncio.run(
             self._read_thread_messages_ws(thread_id, limit, before_offset)
         )
+
+    def read_thread_runtime_info(self, thread_id: str, cwd: str) -> dict[str, Any]:
+        if (
+            not thread_id
+            or not cwd
+            or not self.base_url.startswith(("ws://", "wss://"))
+        ):
+            return {}
+        return asyncio.run(self._read_thread_runtime_info_ws(thread_id, cwd))
 
     def list_skills(self, cwd: str, force_reload: bool = False) -> list[dict[str, Any]]:
         if not cwd or not self.base_url.startswith(("ws://", "wss://")):
@@ -425,6 +436,55 @@ class CodexClient:
             messages = messages[-limit:]
         return CodexThreadMessages(messages)
 
+    async def _read_thread_runtime_info_ws(
+        self, thread_id: str, cwd: str
+    ) -> dict[str, Any]:
+        try:
+            import websockets
+        except ModuleNotFoundError:
+            return {}
+
+        try:
+            async with self._connect_ws(websockets) as websocket:
+                output: list[str] = []
+                approvals: list[dict[str, Any]] = []
+                await self._rpc_call(
+                    websocket,
+                    "initialize",
+                    {
+                        "clientInfo": {
+                            "name": "codex-nomad-surface",
+                            "title": "Codex Nomad Surface",
+                            "version": "0.1.0",
+                        },
+                        "capabilities": {"experimentalApi": True},
+                    },
+                    output,
+                    approvals,
+                )
+                raw = await self._rpc_call(
+                    websocket,
+                    "thread/resume",
+                    {
+                        "threadId": thread_id,
+                        "cwd": cwd,
+                        "persistExtendedHistory": True,
+                    },
+                    output,
+                    approvals,
+                )
+                await self._rpc_call(
+                    websocket,
+                    "thread/unsubscribe",
+                    {"threadId": thread_id},
+                    output,
+                    approvals,
+                )
+        except Exception:
+            return {}
+
+        return raw if isinstance(raw, dict) else {}
+
     def _approval_response_result(
         self, approval: dict[str, Any], decision: str
     ) -> dict[str, Any]:
@@ -454,6 +514,7 @@ class CodexClient:
         project_path: str,
         prompt: str,
         thread_id: str | None,
+        thread_overrides: dict[str, Any] | None = None,
         turn_overrides: dict[str, Any] | None = None,
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
@@ -474,6 +535,7 @@ class CodexClient:
             "thread_id": thread_id,
             "output_callback": output_callback,
         }
+        thread_overrides = thread_overrides or {}
         turn_overrides = turn_overrides or {}
         try:
             websocket = await self._connect_ws(websockets)
@@ -509,6 +571,7 @@ class CodexClient:
                     }
                     if approval_policy:
                         resume_params["approvalPolicy"] = approval_policy
+                    resume_params.update(thread_overrides)
                     thread_result = await self._rpc_call(
                         websocket,
                         "thread/resume",
@@ -528,6 +591,7 @@ class CodexClient:
                     }
                     if approval_policy:
                         start_params["approvalPolicy"] = approval_policy
+                    start_params.update(thread_overrides)
                     thread_result = await self._rpc_call(
                         websocket,
                         "thread/start",
