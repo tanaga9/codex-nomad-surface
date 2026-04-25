@@ -12,6 +12,9 @@ Codex is moving from a coding-focused agent toward a broader general-purpose age
 
 Reusable Prompt Form definitions are stored in `promptform-defs/*.json`.
 They are intended to be reused and refined over time for recurring work shapes.
+The Add Prompt Form picker lists `promptform-defs/` forms in this order:
+project-specific forms from the selected project first, then shared general
+forms.
 
 The app supports two paths:
 
@@ -76,7 +79,7 @@ Open the Streamlit URL in a browser. After authentication, confirm the Codex App
 - `ui_components/`: reusable UI helpers and static assets for embedded forms and custom chat-input integrations.
 - `codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval responses.
 - `settings.py`: storage in `.nomad_surface/settings.json`.
-- `promptform-defs/*.json`: reusable Prompt Form definitions.
+- `promptform-defs/*.json`: reusable Prompt Form definitions for this project or shared general forms.
 - `promptform_defs.py`: loader for Prompt Form definition files.
 - `skill_defs.py`: loader for Codex Skill definition files.
 - `pyproject.toml`: Python project metadata and runtime dependencies.

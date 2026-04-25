@@ -727,7 +727,7 @@ def render_chat(
 ) -> None:
     if not chat:
         return
-    promptform_defs = load_available_promptform_defs()
+    promptform_defs = load_available_promptform_defs(project.path if project else "")
     skill_defs = load_available_skill_defs(
         client.base_url, project.path if project else ""
     )
@@ -1036,8 +1036,8 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
     st.rerun()
 
 
-def load_available_promptform_defs() -> list[PromptFormDef]:
-    defs = load_promptform_defs()
+def load_available_promptform_defs(project_path: str = "") -> list[PromptFormDef]:
+    defs = load_promptform_defs(project_path)
     if not defs:
         st.error(
             "No Prompt Form definitions found. Add JSON files under `promptform-defs/`."
@@ -1212,14 +1212,7 @@ def render_promptform_picker_message(
 ) -> None:
     selected_def_id = str(message.metadata.get("selected_def_id") or "")
     options = [item.id for item in defs]
-    label_by_id = {
-        item.id: (
-            f"{item.form.get('title', item.id)} - {item.form.get('purpose', '').strip()}"
-            if str(item.form.get("purpose") or "").strip()
-            else str(item.form.get("title") or item.id)
-        )
-        for item in defs
-    }
+    label_by_id = {item.id: promptform_def_option_label(item) for item in defs}
     selected_index = (
         options.index(selected_def_id) if selected_def_id in options else None
     )
@@ -1243,6 +1236,13 @@ def render_promptform_picker_message(
         normalize_promptform(selected_def.form),
         instance_key=f"{message_key}-{selected_def.id}",
     )
+
+
+def promptform_def_option_label(item: PromptFormDef) -> str:
+    title = str(item.form.get("title") or item.id)
+    purpose = str(item.form.get("purpose") or "").strip()
+    summary = f"{title} - {purpose}" if purpose else title
+    return f"{item.source_label}: {item.path} - {summary}"
 
 
 def render_skill_picker_message(
