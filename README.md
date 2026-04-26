@@ -68,6 +68,11 @@ Set `NOMAD_AUTH_SECRET` to a real local secret before exposing the app on a netw
 
 Open the Streamlit URL in a browser. After authentication, confirm the Codex App Server URL in Settings. The default App Server URL is `ws://127.0.0.1:8080`.
 
+Authentication uses a signed browser cookie that persists for 14 days, so
+closing the browser does not immediately end the authenticated session. Failed
+password attempts are rate-limited in memory: five failures from the same client
+within one minute temporarily block login for one minute.
+
 ## Layout
 
 - Left sidebar: project / chat selection, Prompt Form and Skill insertion, and the Settings dialog.
@@ -91,6 +96,14 @@ Streamlit app.
 ## Notes
 
 Communication with Codex App Server supports WebSocket RPC only. The Settings URL must use `ws://` or `wss://`.
+
+When the Settings Codex App Server URL host is exactly `127.0.0.1`, HTTP paths
+that look like absolute host file paths are served as local file previews. For
+example, `/path/to/file.py:67` reads `/path/to/file.py` and treats `67` as a
+line number. File previews require the same signed authentication cookie as the
+main app. File contents are returned directly, and directory paths return an
+empty response. This exposes files readable by the web server process and is
+intended for local-host operation only.
 
 `promptform` availability depends on the current Codex client rather than on a
 repository by itself. Codex Nomad Surface supports it, so other repositories

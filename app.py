@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import hmac
 import json
 import os
 import re
@@ -18,14 +17,21 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import streamlit as st
+from starlette.middleware import Middleware
+from streamlit.starlette import App
 
 from chat_store import ChatMessage, ChatSession
 from codex_client import CodexClient, CodexThread, CodexThreadMessages, ConnectionStatus
+from http_gate import (
+    FileContentMiddleware,
+    auth_required,
+    cookie_auth_is_valid,
+    sync_file_content_route_setting,
+)
 from promptform_defs import PromptFormDef, load_promptform_defs, promptform_def_by_id
 from settings import (
     AppSettings,
     Project,
-    configured_secret,
     load_settings,
     save_settings,
 )
@@ -82,10 +88,6 @@ def init_state() -> None:
     st.session_state.setdefault("codex_run_controls_by_chat", {})
 
 
-def auth_required() -> bool:
-    return configured_secret() != ""
-
-
 def settings_state() -> AppSettings:
     if "settings" not in st.session_state:
         st.session_state.settings = load_settings()
@@ -94,6 +96,7 @@ def settings_state() -> AppSettings:
 
 def persist() -> None:
     save_settings(st.session_state.settings)
+    sync_file_content_route_setting(st.session_state.settings)
 
 
 def chats_state() -> list[ChatSession]:
@@ -265,6 +268,9 @@ def auth_screen() -> None:
     if not auth_required():
         st.session_state.authenticated = True
         st.rerun()
+    if cookie_auth_is_valid():
+        st.session_state.authenticated = True
+        st.rerun()
 
     st.title("Codex Nomad Surface")
     st.caption(
@@ -272,27 +278,10 @@ def auth_screen() -> None:
     )
 
     st.info(
-        "Passkey / WebAuthn is not wired yet. This version unlocks with a local secret."
+        "Authentication is handled before the Streamlit app loads. Open `/_nomad_auth/login` to unlock this surface."
     )
 
-    with st.form("auth_form"):
-        secret = st.text_input(
-            "Authentication",
-            type="password",
-            placeholder="Enter the local secret",
-            key="password_input",
-            autocomplete="current-password",
-        )
-        submitted = st.form_submit_button("Unlock")
-    if submitted:
-        if hmac.compare_digest(secret, configured_secret()):
-            st.session_state.authenticated = True
-            st.rerun()
-        st.error("The secret does not match.")
-
-    st.info(
-        "Set the initial secret with the `NOMAD_AUTH_SECRET` environment variable. If it is unset, the development default is `dev-secret`."
-    )
+    st.link_button("Open login", "/_nomad_auth/login")
 
 
 def connection_card(
@@ -1817,10 +1806,17 @@ def main() -> None:
     render_surface_logo()
     if not auth_required():
         st.session_state.authenticated = True
+    elif cookie_auth_is_valid():
+        st.session_state.authenticated = True
+    else:
+        st.session_state.authenticated = False
     if not st.session_state.authenticated:
         auth_screen()
         return
     main_screen()
+
+
+app = App(__file__, middleware=[Middleware(FileContentMiddleware)])
 
 
 if __name__ == "__main__":
