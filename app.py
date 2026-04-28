@@ -126,6 +126,16 @@ def clear_draft_chat(chat: ChatSession | None = None) -> None:
         st.session_state.draft_chat = None
 
 
+def discard_draft_chat(project: Project | None = None) -> None:
+    draft = st.session_state.get("draft_chat")
+    if not isinstance(draft, ChatSession):
+        return
+    if project and draft.project_name != project.name:
+        return
+    run_controls_state().pop(draft.id, None)
+    st.session_state.draft_chat = None
+
+
 def format_thread_time(value: int) -> str:
     if not value:
         return ""
@@ -459,6 +469,7 @@ def project_selector(
             ),
         )
         if selected_key != selected_project_key():
+            discard_draft_chat()
             set_selected_project_key(selected_key)
         return next(
             project for project in projects if project_key(project) == selected_key
@@ -511,6 +522,8 @@ def sync_chat_selection_from_url(server_threads: list[CodexThread]) -> None:
         return
     st.session_state.last_query_chat_id = chat_id
     if st.session_state.selected_chat_id != chat_id:
+        if chat_id:
+            discard_draft_chat()
         st.session_state.selected_chat_id = chat_id
         st.session_state.chat_select_version += 1
     if chat_id:
@@ -648,6 +661,8 @@ def select_chat(
         format_func=lambda chat_id: label_by_id[chat_id],
     )
     if selected_id != st.session_state.selected_chat_id:
+        if selected_id:
+            discard_draft_chat(project)
         st.session_state.selected_chat_id = selected_id
         set_query_chat_id(selected_id)
         st.session_state.chat_history_autoscroll = True
@@ -731,6 +746,13 @@ def render_chat(
             )
             return
         st.caption("No messages yet. Add a prompt form or type a request for Codex.")
+        render_codex_run_overrides(
+            client.base_url,
+            chat,
+            key_prefix=f"start_run_overrides_{chat.id}",
+            allow_model_provider=True,
+            disabled=False,
+        )
         return
 
     messages = (
@@ -761,7 +783,20 @@ def render_chat(
 
         if message.role == "server_thread_info":
             with st.chat_message("server-thread-info", avatar=":material/info:"):
-                st.markdown(message.content)
+                render_server_thread_info_message(message)
+            continue
+
+        if message.role in {"start_run_overrides", "run_overrides"}:
+            message_id = str(message.metadata.get("message_id") or f"{chat.id}-{index}")
+            with st.chat_message("run-overrides", avatar=":material/tune:"):
+                render_codex_run_overrides(
+                    client.base_url,
+                    chat,
+                    key_prefix=f"run_overrides_{chat.id}_{message_id}",
+                    allow_model_provider=message.role == "start_run_overrides",
+                    disabled=index < len(chat.messages) - 1,
+                    message_metadata=message.metadata,
+                )
             continue
 
         with st.chat_message(message.role):
@@ -1022,13 +1057,21 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
     pending = st.session_state.get("pending_turn")
     if pending and pending.get("runtime"):
         return
+    starting_new_thread = not chat or not chat.thread_id
     chat = materialize_chat(project, chat)
-    chat.add_message("user", user_text)
     controls = chat_run_controls(chat)
+    thread_overrides = (
+        build_start_thread_overrides(controls)
+        if starting_new_thread
+        else build_continuation_thread_overrides(controls)
+    )
+    if starting_new_thread:
+        ensure_start_run_overrides_message(chat, controls)
+    chat.add_message("user", user_text)
     st.session_state.pending_turn = {
         "chat_id": chat.id,
         "text": user_text,
-        "thread_overrides": build_thread_overrides(controls),
+        "thread_overrides": thread_overrides,
         "turn_overrides": build_turn_overrides(controls),
         "approval_policy": controls.get("approval_policy", "").strip() or None,
     }
@@ -1111,6 +1154,12 @@ def option_index(options: list[str], value: str) -> int:
     return options.index(value) if value in options else 0
 
 
+def optional_selectbox_index(options: list[str], value: str) -> int | None:
+    if not value:
+        return None
+    return options.index(value) if value in options else None
+
+
 def config_string(config: dict, key: str) -> str:
     value = config.get(key)
     return "" if value is None else str(value)
@@ -1156,7 +1205,7 @@ def model_provider_options(config: dict, selected: str, current: str) -> list[st
 
 def model_provider_label(config: dict, value: str) -> str:
     if not value:
-        return "Codex default"
+        return ""
     providers = config.get("model_providers")
     if not isinstance(providers, dict):
         return value
@@ -1221,12 +1270,22 @@ def build_turn_overrides(controls: dict[str, str]) -> dict[str, Any]:
 
 def build_thread_overrides(controls: dict[str, str]) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
-    model_provider = controls.get("model_provider", "").strip()
     service_tier = controls.get("service_tier", "").strip()
+    model_provider = controls.get("model_provider", "").strip()
     if model_provider:
         overrides["modelProvider"] = model_provider
     if service_tier:
         overrides["serviceTier"] = service_tier
+    return overrides
+
+
+def build_start_thread_overrides(controls: dict[str, str]) -> dict[str, Any]:
+    return build_thread_overrides(controls)
+
+
+def build_continuation_thread_overrides(controls: dict[str, str]) -> dict[str, Any]:
+    overrides = build_thread_overrides(controls)
+    overrides.pop("modelProvider", None)
     return overrides
 
 
@@ -1260,11 +1319,11 @@ def format_thread_info_value(value: Any) -> str:
     return f"`{str(value).replace('`', '\\`')}`"
 
 
-def format_server_thread_info(runtime: dict[str, Any]) -> str:
+def server_thread_info_fields(runtime: dict[str, Any]) -> list[tuple[str, Any]]:
     thread = runtime.get("thread") if isinstance(runtime.get("thread"), dict) else {}
     turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
     latest_turn = turns[-1] if turns and isinstance(turns[-1], dict) else {}
-    fields = [
+    return [
         ("Thread ID", thread.get("id")),
         ("Status", thread.get("status")),
         ("Model provider", runtime.get("modelProvider") or thread.get("modelProvider")),
@@ -1296,10 +1355,80 @@ def format_server_thread_info(runtime: dict[str, Any]) -> str:
         ("Latest turn duration ms", latest_turn.get("durationMs")),
         ("Latest turn error", latest_turn.get("error")),
     ]
+
+
+def format_server_thread_info(runtime: dict[str, Any]) -> str:
+    fields = server_thread_info_fields(runtime)
     lines = ["### Codex App Server thread info", "", "Source RPC: `thread/resume`", ""]
     for label, value in fields:
         lines.append(f"- **{label}:** {format_thread_info_value(value)}")
     return "\n".join(lines)
+
+
+def server_thread_info_metadata(runtime: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fields": [
+            {"label": label, "value": format_thread_info_value(value)}
+            for label, value in server_thread_info_fields(runtime)
+        ]
+    }
+
+
+def render_server_thread_info_message(message: ChatMessage) -> None:
+    fields = message.metadata.get("fields")
+    if not isinstance(fields, list):
+        st.markdown(message.content)
+        return
+
+    primary_labels = {
+        "Thread ID",
+        "Status",
+        "Model provider",
+        "Model",
+        "Reasoning effort",
+    }
+    primary_lines = [
+        "### Codex App Server thread info",
+        "",
+        "Source RPC: `thread/resume`",
+        "",
+    ]
+    detail_lines: list[str] = []
+    for item in fields:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "")
+        value = str(item.get("value") or "")
+        if not label:
+            continue
+        line = f"- **{label}:** {value}"
+        if label in primary_labels:
+            primary_lines.append(line)
+        else:
+            detail_lines.append(line)
+
+    st.markdown("\n".join(primary_lines))
+    if detail_lines:
+        with st.expander("Details"):
+            st.markdown("\n".join(detail_lines))
+
+
+def append_server_thread_info_to_chat(
+    client: CodexClient, project: Project, chat: ChatSession
+) -> None:
+    if not chat.thread_id:
+        return
+    runtime = client.read_thread_runtime_info(chat.thread_id, project.path)
+    if runtime:
+        content = format_server_thread_info(runtime)
+        metadata = server_thread_info_metadata(runtime)
+    else:
+        content = (
+            "### Codex App Server thread info\n\n"
+            "`thread/resume` returned no runtime data."
+        )
+        metadata = {}
+    chat.add_message("server_thread_info", content, metadata=metadata)
 
 
 def append_server_thread_info_message(
@@ -1308,17 +1437,9 @@ def append_server_thread_info_message(
     if not project or not chat or not chat.thread_id:
         return
     target_chat = materialize_chat(project, chat)
-    runtime = CodexClient(settings.app_server_url).read_thread_runtime_info(
-        target_chat.thread_id, project.path
+    append_server_thread_info_to_chat(
+        CodexClient(settings.app_server_url), project, target_chat
     )
-    if runtime:
-        content = format_server_thread_info(runtime)
-    else:
-        content = (
-            "### Codex App Server thread info\n\n"
-            "`thread/resume` returned no runtime data."
-        )
-    target_chat.add_message("server_thread_info", content)
     st.session_state.chat_history_autoscroll = True
     st.rerun()
 
@@ -1333,6 +1454,25 @@ def valid_json_object_or_empty(value: str) -> bool:
     return isinstance(parsed, dict)
 
 
+def run_overrides_message_metadata(controls: dict[str, str]) -> dict[str, Any]:
+    return {
+        "message_id": str(uuid.uuid4()),
+        "controls": controls.copy(),
+    }
+
+
+def ensure_start_run_overrides_message(
+    chat: ChatSession, controls: dict[str, str] | None = None
+) -> None:
+    if chat.thread_id or chat.messages:
+        return
+    chat.add_message(
+        "start_run_overrides",
+        "",
+        metadata=run_overrides_message_metadata(controls or chat_run_controls(chat)),
+    )
+
+
 def add_draftable_chat_message(
     project: Project,
     chat: ChatSession | None,
@@ -1341,9 +1481,77 @@ def add_draftable_chat_message(
     metadata: dict | None = None,
 ) -> ChatSession:
     target_chat = draft_or_selected_chat(project, chat)
+    ensure_start_run_overrides_message(target_chat)
     target_chat.add_message(role, content, metadata)
     st.session_state.chat_history_autoscroll = True
     return target_chat
+
+
+def add_run_overrides_message(project: Project, chat: ChatSession | None) -> None:
+    target_chat = materialize_chat(project, chat)
+    target_chat.add_message(
+        "run_overrides",
+        "",
+        metadata=run_overrides_message_metadata(chat_run_controls(target_chat)),
+    )
+    st.session_state.chat_history_autoscroll = True
+    st.rerun()
+
+
+def run_override_snapshot_controls(
+    message_metadata: dict[str, Any] | None,
+) -> dict[str, str]:
+    if not message_metadata or not isinstance(message_metadata.get("controls"), dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in message_metadata["controls"].items()
+        if value is not None
+    }
+
+
+def format_run_override_snapshot_value(value: str) -> str:
+    if not value.strip():
+        return "_No override_"
+    escaped = value.replace("`", "\\`")
+    return f"`{escaped}`"
+
+
+def render_locked_codex_run_overrides(
+    controls: dict[str, str], allow_model_provider: bool
+) -> None:
+    st.markdown("**Run Overrides**")
+    st.caption("Locked because newer chat content follows it.")
+
+    primary_fields = []
+    if allow_model_provider:
+        primary_fields.append(("Model provider", controls.get("model_provider", "")))
+    primary_fields.extend(
+        [
+            ("Model", controls.get("model", "")),
+            ("Reasoning effort", controls.get("reasoning_effort", "")),
+        ]
+    )
+    lines = [
+        f"- **{label}:** {format_run_override_snapshot_value(value)}"
+        for label, value in primary_fields
+    ]
+    st.markdown("\n".join(lines))
+
+    advanced_fields = [
+        ("Service tier", controls.get("service_tier", "")),
+        ("Reasoning summary", controls.get("reasoning_summary", "")),
+        ("Verbosity", controls.get("verbosity", "")),
+        ("Approval policy", controls.get("approval_policy", "")),
+        ("Sandbox policy JSON", controls.get("sandbox_policy_json", "")),
+    ]
+    with st.expander("Advanced"):
+        st.markdown(
+            "\n".join(
+                f"- **{label}:** {format_run_override_snapshot_value(value)}"
+                for label, value in advanced_fields
+            )
+        )
 
 
 def sidebar_promptform_actions(
@@ -1505,12 +1713,13 @@ def chat_workspace(
     project: Project | None,
     chat: ChatSession | None,
 ) -> None:
+    active_chat = chat or (draft_chat(project) if project else None)
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
-    chat_history_panel(client, project, chat)
-    chat_composer(project, chat)
+    chat_history_panel(client, project, active_chat)
+    chat_composer(project, active_chat)
 
 
 def render_sidebar_home_title() -> None:
@@ -1536,11 +1745,13 @@ def surface_sidebar(
         if st.button(
             "Run Overrides",
             key="open_run_overrides_dialog",
-            disabled=not project,
+            disabled=not project
+            or not chat
+            or not chat.thread_id
+            or bool(st.session_state.get("pending_turn")),
             use_container_width=True,
         ):
-            target_chat = draft_or_selected_chat(project, chat)
-            codex_run_overrides_dialog(settings.app_server_url, target_chat)
+            add_run_overrides_message(project, chat)
         if st.button(
             "Show Server Thread Info",
             key="show_server_thread_info",
@@ -1562,8 +1773,21 @@ def settings_dialog(settings: AppSettings) -> None:
     settings_screen(settings, heading=False)
 
 
-@st.dialog("Run Overrides", width="large")
-def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
+def render_codex_run_overrides(
+    app_server_url: str,
+    chat: ChatSession,
+    key_prefix: str,
+    allow_model_provider: bool,
+    disabled: bool,
+    message_metadata: dict[str, Any] | None = None,
+) -> None:
+    if disabled:
+        render_locked_codex_run_overrides(
+            run_override_snapshot_controls(message_metadata),
+            allow_model_provider=allow_model_provider,
+        )
+        return
+
     config = load_codex_config(app_server_url)
     models = load_codex_models(app_server_url)
 
@@ -1578,7 +1802,8 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
     if current_model and current_model not in model_options:
         model_options.insert(0, current_model)
 
-    st.info(
+    st.markdown("**Run Overrides**")
+    st.caption(
         "Stored only in this Nomad Surface session and sent as overrides on this chat's future turns. Codex config.toml is not modified."
     )
 
@@ -1590,13 +1815,19 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
         config, selected_model_provider, current_model_provider
     )
 
-    model_provider = st.selectbox(
-        "Model provider",
-        provider_options,
-        index=option_index(provider_options, selected_model_provider),
-        key=f"run_override_model_provider_{chat.id}",
-        format_func=lambda value: model_provider_label(config, value),
-    )
+    if allow_model_provider:
+        selected_provider_value = st.selectbox(
+            "Model provider",
+            provider_options,
+            index=optional_selectbox_index(provider_options, selected_model_provider),
+            key=f"{key_prefix}_model_provider",
+            format_func=lambda value: model_provider_label(config, value),
+            placeholder=current_model_provider or "Codex default",
+            disabled=disabled,
+        )
+        model_provider = str(selected_provider_value or "")
+    else:
+        model_provider = selected_model_provider
 
     active_selected_model = (
         "" if model_provider != selected_model_provider else selected_model
@@ -1629,7 +1860,9 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
         )
         effective_model = effective_model or current_model or "Codex default"
     else:
-        effective_model = provider_model_value or active_selected_model or "Model required"
+        effective_model = (
+            provider_model_value or active_selected_model or "Model required"
+        )
     effective_effort = (
         current_effort
         or config_string(config, "model_reasoning_effort")
@@ -1653,34 +1886,43 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
         model = st.selectbox(
             "Model",
             displayed_model_options,
-            index=option_index(displayed_model_options, active_selected_model),
-            key=f"run_override_model_{chat.id}",
+            index=optional_selectbox_index(
+                displayed_model_options, active_selected_model
+            ),
+            key=f"{key_prefix}_model",
             format_func=lambda value: next(
                 (
                     codex_model_label(item)
                     for item in models
                     if codex_model_id(item) == value
                 ),
-                value or "Codex default",
+                value,
             ),
+            placeholder="Use Codex default",
+            disabled=disabled,
         )
+        model = str(model or "")
     elif provider_model_options:
+        displayed_provider_model_options = [""] + provider_model_options
         model = st.selectbox(
             "Model",
-            provider_model_options,
-            index=option_index(provider_model_options, provider_model_value),
-            key=f"run_override_provider_model_{chat.id}",
+            displayed_provider_model_options,
+            index=optional_selectbox_index(
+                displayed_provider_model_options, active_selected_model
+            ),
+            key=f"{key_prefix}_provider_model",
+            format_func=lambda value: value,
+            placeholder="Model name",
+            disabled=disabled,
         )
+        model = str(model or "")
     else:
         model = st.text_input(
             "Model",
             value=active_selected_model,
-            key=f"run_override_model_text_{chat.id}",
-            placeholder=(
-                current_model
-                if use_discovered_model_options and current_model
-                else "Model name"
-            ),
+            key=f"{key_prefix}_model_text",
+            placeholder="Model name",
+            disabled=disabled,
         ).strip()
 
     effort_source_model = model or (
@@ -1690,48 +1932,60 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
     reasoning_effort = st.selectbox(
         "Reasoning effort",
         effort_options,
-        index=option_index(effort_options, current_effort),
-        key=f"run_override_reasoning_effort_{chat.id}",
-        format_func=lambda value: value or "Model/Codex default",
+        index=optional_selectbox_index(effort_options, current_effort),
+        key=f"{key_prefix}_reasoning_effort",
+        format_func=lambda value: value,
+        placeholder="Use model/Codex default",
+        disabled=disabled,
     )
-    service_tier = st.text_input(
-        "Service tier",
-        value=controls.get("service_tier", ""),
-        key=f"run_override_service_tier_{chat.id}",
-        placeholder=current_service_tier or "Codex default",
-    ).strip()
-    reasoning_summary = st.text_input(
-        "Reasoning summary",
-        value=controls.get("reasoning_summary", ""),
-        key=f"run_override_reasoning_summary_{chat.id}",
-        placeholder=config_string(config, "model_reasoning_summary") or "Codex default",
-    )
-    verbosity = st.text_input(
-        "Verbosity",
-        value=controls.get("verbosity", ""),
-        key=f"run_override_verbosity_{chat.id}",
-        placeholder=config_string(config, "model_verbosity") or "Codex default",
-    )
-    approval_policy = st.text_input(
-        "Approval policy",
-        value=controls.get("approval_policy", ""),
-        key=f"run_override_approval_policy_{chat.id}",
-        placeholder=config_string(config, "approval_policy") or "Codex default",
-    )
-    sandbox_policy_json = st.text_area(
-        "Sandbox policy JSON",
-        value=controls.get("sandbox_policy_json", ""),
-        key=f"run_override_sandbox_policy_json_{chat.id}",
-        placeholder='{"type":"workspaceWrite","networkAccess":false}',
-        height=90,
-    ).strip()
+    reasoning_effort = str(reasoning_effort or "")
+    with st.expander("Advanced"):
+        service_tier = st.text_input(
+            "Service tier",
+            value=controls.get("service_tier", ""),
+            key=f"{key_prefix}_service_tier",
+            placeholder=current_service_tier or "Codex default",
+            disabled=disabled,
+        ).strip()
+        reasoning_summary = st.text_input(
+            "Reasoning summary",
+            value=controls.get("reasoning_summary", ""),
+            key=f"{key_prefix}_reasoning_summary",
+            placeholder=config_string(config, "model_reasoning_summary")
+            or "Codex default",
+            disabled=disabled,
+        )
+        verbosity = st.text_input(
+            "Verbosity",
+            value=controls.get("verbosity", ""),
+            key=f"{key_prefix}_verbosity",
+            placeholder=config_string(config, "model_verbosity") or "Codex default",
+            disabled=disabled,
+        )
+        approval_policy = st.text_input(
+            "Approval policy",
+            value=controls.get("approval_policy", ""),
+            key=f"{key_prefix}_approval_policy",
+            placeholder=config_string(config, "approval_policy") or "Codex default",
+            disabled=disabled,
+        )
+        sandbox_policy_json = st.text_area(
+            "Sandbox policy JSON",
+            value=controls.get("sandbox_policy_json", ""),
+            key=f"{key_prefix}_sandbox_policy_json",
+            placeholder='{"type":"workspaceWrite","networkAccess":false}',
+            height=90,
+            disabled=disabled,
+        ).strip()
     updates: dict[str, str] = {}
     if model:
         updates["model"] = model
     if reasoning_effort:
         updates["reasoning_effort"] = reasoning_effort
-    if model_provider:
+    if allow_model_provider and model_provider:
         updates["model_provider"] = model_provider
+    elif selected_model_provider:
+        updates["model_provider"] = selected_model_provider
     if service_tier:
         updates["service_tier"] = service_tier
     if approval_policy:
@@ -1747,10 +2001,9 @@ def codex_run_overrides_dialog(app_server_url: str, chat: ChatSession) -> None:
             st.error("Sandbox policy JSON must be a JSON object.")
     if valid_json_object_or_empty(sandbox_policy_json):
         save_chat_run_controls(chat, updates)
+        if message_metadata is not None:
+            message_metadata["controls"] = updates.copy()
     st.caption("Changes apply automatically to this chat's future turns.")
-    if st.button("Clear this chat overrides", key=f"clear_run_overrides_{chat.id}"):
-        save_chat_run_controls(chat, {})
-        st.rerun()
 
 
 def settings_screen(settings: AppSettings, heading: bool = True) -> None:
