@@ -10,6 +10,11 @@ This directory is organized by document role rather than by feature chronology.
 - [AGENTS.md](../AGENTS.md)
   - Agent-facing instructions for repository-specific output protocols.
 
+- [app-server-api-exceptions.md](app-server-api-exceptions.md)
+  - Management ledger and policy for implementations that use local state,
+    external APIs, or indirect mechanisms instead of current Codex App Server
+    APIs.
+
 ## Protocols
 
 - [protocols/promptform.md](protocols/promptform.md)
