@@ -6,6 +6,7 @@ When working in this repository, preserve these user preferences unless the user
 - Follow `SPEC.md` for product design constraints.
 - Keep documentation concise and avoid overfitting it to recent events.
 - Use generic placeholder paths in documentation, such as `/path/to/...`, instead of real local usernames or machine-specific paths when the path is only illustrative.
+- Prefer current Codex App Server APIs directly. Do not add fallback or legacy fallback behavior for cases the current App Server API does not support unless the user explicitly asks for it. If a fallback seems worth recommending, explain the tradeoff and ask the user before implementing it.
 
 
 # Embedded Response Forms

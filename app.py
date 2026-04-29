@@ -684,7 +684,7 @@ def thread_messages_from_result(result: CodexThreadMessages) -> list[ChatMessage
 
 
 def update_thread_history_state(thread_id: str, result: CodexThreadMessages) -> None:
-    st.session_state.thread_history_cursors[thread_id] = result.before_offset
+    st.session_state.thread_history_cursors[thread_id] = result.cursor
     st.session_state.thread_history_has_older[thread_id] = result.has_older
 
 
@@ -694,7 +694,7 @@ def hydrate_thread_chat(client: CodexClient, chat: ChatSession | None) -> None:
     if chat.thread_id in st.session_state.loaded_thread_ids:
         return
 
-    result = client.read_thread_messages(chat.thread_id, limit=20)
+    result = client.read_thread_messages(chat.thread_id, limit=5)
     update_thread_history_state(chat.thread_id, result)
     messages = thread_messages_from_result(result)
     if not messages:
@@ -714,10 +714,8 @@ def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
         return
 
     if st.button("Load older history", key=f"older_{chat.thread_id}"):
-        before_offset = st.session_state.thread_history_cursors.get(chat.thread_id)
-        result = client.read_thread_messages(
-            chat.thread_id, limit=40, before_offset=before_offset
-        )
+        cursor = st.session_state.thread_history_cursors.get(chat.thread_id)
+        result = client.read_thread_messages(chat.thread_id, limit=20, cursor=cursor)
         update_thread_history_state(chat.thread_id, result)
         messages = thread_messages_from_result(result)
         if messages:
