@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
@@ -43,7 +43,7 @@ class CodexThread:
 
 @dataclass
 class CodexThreadMessages:
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
     cursor: str | None = None
     has_older: bool = False
 
@@ -52,11 +52,150 @@ class ApprovalRequired(Exception):
     pass
 
 
-OutputCallback = Callable[[str], None]
+@dataclass
+class CodexOutputSegment:
+    kind: str
+    text: str
+    item_id: str = ""
+    phase: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "text": self.text,
+            "item_id": self.item_id,
+            "phase": self.phase,
+            "metadata": self.metadata.copy(),
+        }
+
+
+@dataclass
+class CodexTurnOutput:
+    segments: list[CodexOutputSegment] = field(default_factory=list)
+
+    def append_delta(
+        self,
+        kind: str,
+        delta: str,
+        item_id: str = "",
+        phase: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not delta:
+            return
+        segment = self._find_or_reclassify_segment(kind, item_id)
+        if segment:
+            segment.text += delta
+            if phase:
+                segment.phase = phase
+            if metadata:
+                segment.metadata.update(metadata)
+            return
+        self.segments.append(
+            CodexOutputSegment(kind, delta, item_id, phase, metadata or {})
+        )
+
+    def append_block(
+        self,
+        kind: str,
+        text: str,
+        item_id: str = "",
+        phase: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        text = str(text or "").strip()
+        if not text:
+            return
+        segment = self._find_segment(kind, item_id)
+        if segment:
+            segment.text = f"{segment.text.strip()}\n\n{text}".strip()
+            if phase:
+                segment.phase = phase
+            if metadata:
+                segment.metadata.update(metadata)
+            return
+        self.segments.append(
+            CodexOutputSegment(kind, text, item_id, phase, metadata or {})
+        )
+
+    def set_segment(
+        self,
+        kind: str,
+        text: str,
+        item_id: str = "",
+        phase: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        segment = self._find_or_reclassify_segment(kind, item_id)
+        if segment:
+            segment.text = str(text or "")
+            if phase:
+                segment.phase = phase
+            if metadata is not None:
+                segment.metadata = metadata.copy()
+            return
+        self.segments.append(
+            CodexOutputSegment(kind, str(text or ""), item_id, phase, metadata or {})
+        )
+
+    def text_for_kind(self, kind: str) -> str:
+        return "\n\n".join(
+            segment.text.strip()
+            for segment in self.segments
+            if segment.kind == kind and segment.text.strip()
+        )
+
+    def to_snapshot(self) -> dict[str, Any]:
+        final_answer = self.text_for_kind("final_answer")
+        return {
+            "segments": [
+                segment.to_dict() for segment in self.segments if segment.text.strip()
+            ],
+            "output": final_answer,
+            "commentary": self.text_for_kind("commentary"),
+            "plan": self.text_for_kind("plan"),
+            "reasoning_summary": self.text_for_kind("reasoning_summary"),
+            "errors": self.text_for_kind("error"),
+        }
+
+    def _find_segment(self, kind: str, item_id: str = "") -> CodexOutputSegment | None:
+        for segment in self.segments:
+            if segment.kind != kind:
+                continue
+            if item_id:
+                if segment.item_id == item_id:
+                    return segment
+            elif not segment.item_id:
+                return segment
+        return None
+
+    def _find_segment_by_item_id(self, item_id: str) -> CodexOutputSegment | None:
+        for segment in self.segments:
+            if segment.item_id == item_id:
+                return segment
+        return None
+
+    def _find_or_reclassify_segment(
+        self, kind: str, item_id: str = ""
+    ) -> CodexOutputSegment | None:
+        segment = self._find_segment(kind, item_id)
+        if segment or not item_id:
+            return segment
+        segment = self._find_segment_by_item_id(item_id)
+        if segment:
+            segment.kind = kind
+        return segment
+
+
+OutputState = CodexTurnOutput
+OutputSnapshot = dict[str, Any]
+OutputCallback = Callable[[OutputSnapshot], None]
 
 
 class CodexClient:
     WS_MAX_SIZE = 16 * 1024 * 1024
+    TURN_INACTIVITY_TIMEOUT_SECONDS = 180.0
 
     def __init__(self, base_url: str, timeout: float = 5.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -65,6 +204,22 @@ class CodexClient:
     def _connect_ws(self, websockets: Any) -> Any:
         return websockets.connect(
             self.base_url, open_timeout=self.timeout, max_size=self.WS_MAX_SIZE
+        )
+
+    def _empty_output_parts(self) -> OutputState:
+        return CodexTurnOutput()
+
+    def _output_parts_snapshot(self, parts: OutputState) -> OutputSnapshot:
+        return parts.to_snapshot()
+
+    def _fallback_output_text(self, parts: OutputState) -> str:
+        snapshot = self._output_parts_snapshot(parts)
+        return (
+            snapshot["output"]
+            or snapshot["errors"]
+            or snapshot["commentary"]
+            or snapshot["plan"]
+            or snapshot["reasoning_summary"]
         )
 
     def status(self) -> ConnectionStatus:
@@ -520,10 +675,11 @@ class CodexClient:
                 "output": "`websockets` is not installed.",
             }
 
-        output: list[str] = []
+        output_parts = self._empty_output_parts()
         approvals: list[dict[str, Any]] = []
         runtime: dict[str, Any] = {
-            "output": output,
+            "output_parts": output_parts,
+            "stream_items": {},
             "approvals": approvals,
             "thread_id": thread_id,
             "output_callback": output_callback,
@@ -552,9 +708,10 @@ class CodexClient:
                         },
                         "capabilities": {"experimentalApi": True},
                     },
-                    output,
+                    output_parts,
                     approvals,
                     output_callback,
+                    stream_items=runtime["stream_items"],
                 )
                 if thread_id:
                     resume_params: dict[str, Any] = {
@@ -569,10 +726,11 @@ class CodexClient:
                         websocket,
                         "thread/resume",
                         resume_params,
-                        output,
+                        output_parts,
                         approvals,
                         output_callback,
                         handle_approval_message,
+                        runtime["stream_items"],
                     )
                 else:
                     start_params: dict[str, Any] = {
@@ -589,10 +747,11 @@ class CodexClient:
                         websocket,
                         "thread/start",
                         start_params,
-                        output,
+                        output_parts,
                         approvals,
                         output_callback,
                         handle_approval_message,
+                        runtime["stream_items"],
                     )
                 thread_id = thread_result["thread"]["id"]
                 runtime["thread_id"] = thread_id
@@ -613,10 +772,11 @@ class CodexClient:
                     websocket,
                     "turn/start",
                     turn_params | turn_overrides,
-                    output,
+                    output_parts,
                     approvals,
                     output_callback,
                     handle_approval_message,
+                    runtime["stream_items"],
                 )
                 return await self._collect_chat_turn_ws(runtime)
             except ApprovalRequired:
@@ -625,15 +785,18 @@ class CodexClient:
             return self._approval_result(runtime)
         except Exception as exc:
             await self._close_chat_turn_ws(runtime)
-            text_output = "".join(output).strip()
+            text_output = self._fallback_output_text(output_parts)
             if text_output:
                 text_output = f"{text_output}\n\n[send/receive error] {exc}"
             else:
                 text_output = f"[send/receive error] {exc}"
+            output_parts.append_block("error", text_output)
             return {
                 "ok": False,
                 "thread_id": thread_id,
-                "output": text_output,
+                "output": self._output_parts_snapshot(output_parts)["output"]
+                or text_output,
+                "output_parts": self._output_parts_snapshot(output_parts),
                 "approvals": approvals,
             }
 
@@ -654,27 +817,35 @@ class CodexClient:
             return await self._collect_chat_turn_ws(runtime)
         except Exception as exc:
             await self._close_chat_turn_ws(runtime)
-            output = "".join(runtime.get("output") or []).strip()
+            output_parts = runtime.get("output_parts") or self._empty_output_parts()
+            output = self._fallback_output_text(output_parts)
             if output:
                 output = f"{output}\n\n[send/receive error] {exc}"
             else:
                 output = f"[send/receive error] {exc}"
+            output_parts.append_block("error", output)
             return {
                 "ok": False,
                 "thread_id": runtime.get("thread_id"),
-                "output": output,
+                "output": self._output_parts_snapshot(output_parts)["output"] or output,
+                "output_parts": self._output_parts_snapshot(output_parts),
                 "approvals": runtime.get("approvals") or [],
             }
 
     async def _collect_chat_turn_ws(self, runtime: dict[str, Any]) -> dict[str, Any]:
         websocket = runtime["websocket"]
         thread_id = runtime.get("thread_id")
-        output = runtime["output"]
+        output_parts = runtime["output_parts"]
+        stream_items = runtime.setdefault("stream_items", {})
         approvals = runtime["approvals"]
         output_callback = runtime.get("output_callback")
-        deadline = asyncio.get_running_loop().time() + 180.0
-        while asyncio.get_running_loop().time() < deadline:
-            remaining = max(0.1, deadline - asyncio.get_running_loop().time())
+        loop = asyncio.get_running_loop()
+        last_activity = loop.time()
+        while True:
+            inactive_for = loop.time() - last_activity
+            if inactive_for >= self.TURN_INACTIVITY_TIMEOUT_SECONDS:
+                break
+            remaining = max(0.1, self.TURN_INACTIVITY_TIMEOUT_SECONDS - inactive_for)
             try:
                 raw_message = await asyncio.wait_for(
                     websocket.recv(), timeout=min(30.0, remaining)
@@ -682,6 +853,7 @@ class CodexClient:
             except asyncio.TimeoutError:
                 continue
 
+            last_activity = loop.time()
             message = json.loads(raw_message)
             method = message.get("method")
             params = message.get("params") or {}
@@ -691,34 +863,46 @@ class CodexClient:
                 runtime["approval"] = approval
                 return self._approval_result(runtime)
 
-            chunk = self._message_chunk(message, approvals)
-            if chunk:
-                output.append(chunk)
+            changed = self._update_output_parts(
+                message, output_parts, approvals, stream_items
+            )
+            if changed:
                 if output_callback:
-                    output_callback("".join(output))
+                    output_callback(self._output_parts_snapshot(output_parts))
             if method == "turn/completed" and params.get("threadId") == thread_id:
                 await self._close_chat_turn_ws(runtime)
+                snapshot = self._output_parts_snapshot(output_parts)
                 return {
                     "ok": True,
                     "thread_id": thread_id,
-                    "output": "".join(output).strip(),
+                    "output": snapshot["output"],
+                    "output_parts": snapshot,
                     "approvals": approvals,
                 }
         await self._close_chat_turn_ws(runtime)
+        output_parts.append_block(
+            "error",
+            "Codex turn did not receive activity for 180 seconds.",
+        )
+        snapshot = self._output_parts_snapshot(output_parts)
         return {
             "ok": False,
             "thread_id": thread_id,
-            "output": "Codex turn did not complete within 180 seconds.",
+            "output": snapshot["output"],
+            "output_parts": snapshot,
             "approvals": approvals,
         }
 
     def _approval_result(self, runtime: dict[str, Any]) -> dict[str, Any]:
         runtime.pop("output_callback", None)
+        output_parts = runtime.get("output_parts") or self._empty_output_parts()
+        snapshot = self._output_parts_snapshot(output_parts)
         return {
             "ok": False,
             "status": "approval",
             "thread_id": runtime.get("thread_id"),
-            "output": "".join(runtime.get("output") or []).strip(),
+            "output": snapshot["output"],
+            "output_parts": snapshot,
             "approval": runtime.get("approval"),
             "approvals": runtime.get("approvals") or [],
             "runtime": runtime,
@@ -759,7 +943,7 @@ class CodexClient:
         if not isinstance(raw_turns, list):
             raw_turns = []
 
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         for turn in reversed(raw_turns):
             messages.extend(self._messages_from_turn(turn))
 
@@ -770,22 +954,34 @@ class CodexClient:
             has_older=bool(next_cursor),
         )
 
-    def _messages_from_turn(self, turn: Any) -> list[dict[str, str]]:
+    def _messages_from_turn(self, turn: Any) -> list[dict[str, Any]]:
         if not isinstance(turn, dict):
             return []
 
         items = turn.get("items")
         if isinstance(items, list):
-            messages: list[dict[str, str]] = []
+            messages: list[dict[str, Any]] = []
+            assistant_parts = self._empty_output_parts()
             for item in items:
                 message = self._thread_message_from_item(item)
                 if message:
                     messages.append(message)
+                    continue
+                self._update_output_parts_from_item(item, assistant_parts)
+            assistant_snapshot = self._output_parts_snapshot(assistant_parts)
+            if any(assistant_snapshot.values()):
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": assistant_snapshot["output"],
+                        "metadata": {"codex_output": assistant_snapshot},
+                    }
+                )
             return messages
 
         return []
 
-    def _thread_message_from_item(self, item: Any) -> dict[str, str] | None:
+    def _thread_message_from_item(self, item: Any) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
 
@@ -796,11 +992,48 @@ class CodexClient:
                 return None
             return {"role": "user", "content": content}
 
-        if item_type == "agentMessage":
-            content = str(item.get("text") or "").strip()
-            if content:
-                return {"role": "assistant", "content": content}
         return None
+
+    def _update_output_parts_from_item(self, item: Any, parts: OutputState) -> bool:
+        if not isinstance(item, dict):
+            return False
+
+        item_type = str(item.get("type") or "")
+        item_id = str(item.get("id") or "")
+        if item_type == "agentMessage":
+            text = str(item.get("text") or "")
+            if text:
+                phase = str(item.get("phase") or "")
+                kind = "commentary" if phase == "commentary" else "final_answer"
+                parts.set_segment(kind, text, item_id, phase)
+                return True
+        if item_type == "plan":
+            text = str(item.get("text") or "")
+            if text:
+                parts.set_segment("plan", text, item_id)
+                return True
+        if item_type == "reasoning":
+            text = self._reasoning_summary_text(item.get("summary"))
+            if text:
+                parts.set_segment("reasoning_summary", text, item_id)
+                return True
+        return False
+
+    def _reasoning_summary_text(self, summary: Any) -> str:
+        if isinstance(summary, str):
+            return summary
+        if not isinstance(summary, list):
+            return ""
+
+        parts: list[str] = []
+        for item in summary:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("summary") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n\n".join(part.strip() for part in parts if part and part.strip())
 
     def _content_text(self, content: Any) -> str:
         if isinstance(content, str):
@@ -829,15 +1062,131 @@ class CodexClient:
             "detail": json.dumps(params, ensure_ascii=False, indent=2),
         }
 
+    def _update_output_parts(
+        self,
+        message: dict[str, Any],
+        parts: OutputState,
+        approvals: list[dict[str, Any]],
+        stream_items: dict[str, dict[str, str]] | None = None,
+    ) -> bool:
+        method = message.get("method")
+        params = message.get("params") or {}
+        if method == "item/started":
+            item = params.get("item") if isinstance(params, dict) else None
+            return self._update_stream_item(item, parts, stream_items)
+        if method == "item/agentMessage/delta":
+            return self._append_agent_message_delta(params, parts, stream_items)
+        if method == "item/plan/delta":
+            item_id = str(params.get("itemId") or params.get("item_id") or "")
+            parts.append_delta("plan", str(params.get("delta") or ""), item_id)
+            return True
+        if method == "item/reasoning/summaryTextDelta":
+            item_id = str(params.get("itemId") or params.get("item_id") or "")
+            metadata = {}
+            if "summaryIndex" in params:
+                metadata["summary_index"] = params.get("summaryIndex")
+            parts.append_delta(
+                "reasoning_summary",
+                str(params.get("delta") or ""),
+                item_id,
+                metadata=metadata,
+            )
+            return True
+        if method == "item/reasoning/summaryPartAdded":
+            item_id = str(params.get("itemId") or params.get("item_id") or "")
+            parts.append_delta("reasoning_summary", "\n\n", item_id)
+            return True
+        if method == "item/completed":
+            item = params.get("item") if isinstance(params, dict) else None
+            if self._update_stream_item(item, parts, stream_items):
+                return True
+            return self._update_output_parts_from_item(item, parts)
+        if method == "error":
+            parts.append_block("error", f"[error] {params.get('message') or params}")
+            return True
+        if method and "requestApproval" in method:
+            approvals.append(self._approval_from_message(message))
+            parts.append_block("approval_request", "An operation requires approval")
+            return True
+        return False
+
+    def _update_stream_item(
+        self,
+        item: Any,
+        parts: OutputState,
+        stream_items: dict[str, dict[str, str]] | None,
+    ) -> bool:
+        if not isinstance(item, dict) or stream_items is None:
+            return False
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            return False
+
+        item_type = str(item.get("type") or "")
+        if item_type != "agentMessage":
+            return False
+
+        stream_item = stream_items.setdefault(
+            item_id,
+            {"type": item_type, "phase": "", "text": ""},
+        )
+        stream_item["type"] = item_type
+        phase = str(item.get("phase") or "")
+        if phase:
+            stream_item["phase"] = phase
+        if "text" in item:
+            stream_item["text"] = str(item.get("text") or "")
+            kind = (
+                "commentary"
+                if stream_item.get("phase") == "commentary"
+                else "final_answer"
+            )
+            parts.set_segment(
+                kind, stream_item["text"], item_id, stream_item.get("phase", "")
+            )
+        return True
+
+    def _append_agent_message_delta(
+        self,
+        params: Any,
+        parts: OutputState,
+        stream_items: dict[str, dict[str, str]] | None,
+    ) -> bool:
+        if not isinstance(params, dict):
+            return False
+        delta = str(params.get("delta") or "")
+        if not delta:
+            return False
+
+        item_id = str(params.get("itemId") or params.get("item_id") or "")
+        if not item_id or stream_items is None:
+            parts.append_delta("final_answer", delta)
+            return True
+
+        stream_item = stream_items.setdefault(
+            item_id,
+            {"type": "agentMessage", "phase": "", "text": ""},
+        )
+        phase = str(params.get("phase") or "")
+        if phase:
+            stream_item["phase"] = phase
+        stream_item["text"] += delta
+        kind = (
+            "commentary" if stream_item.get("phase") == "commentary" else "final_answer"
+        )
+        parts.append_delta(kind, delta, item_id, stream_item.get("phase", ""))
+        return True
+
     async def _rpc_call(
         self,
         websocket: Any,
         method: str,
         params: dict[str, Any],
-        output: list[str],
+        output: list[str] | OutputState,
         approvals: list[dict[str, Any]],
         output_callback: OutputCallback | None = None,
         approval_handler: Any | None = None,
+        stream_items: dict[str, dict[str, str]] | None = None,
     ) -> Any:
         request_id = str(uuid.uuid4())
         await websocket.send(
@@ -859,9 +1208,24 @@ class CodexClient:
             ):
                 await approval_handler(message)
                 continue
-            chunk = self._handle_ws_message(message, output, approvals)
-            if chunk and output_callback:
-                output_callback("".join(output))
+            if isinstance(output, CodexTurnOutput):
+                changed = self._update_output_parts(
+                    message, output, approvals, stream_items
+                )
+                if changed and output_callback:
+                    output_callback(self._output_parts_snapshot(output))
+            else:
+                chunk = self._handle_ws_message(message, output, approvals)
+                if chunk and output_callback:
+                    output_callback(
+                        {
+                            "output": "".join(output).strip(),
+                            "commentary": "",
+                            "plan": "",
+                            "reasoning_summary": "",
+                            "errors": "",
+                        }
+                    )
             if message.get("id") == request_id:
                 if "error" in message:
                     raise RuntimeError(

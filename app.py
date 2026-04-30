@@ -46,7 +46,6 @@ from ui_components import (
     render_promptform,
 )
 
-
 st.set_page_config(
     page_title="Codex Nomad Surface",
     page_icon="▣",
@@ -677,9 +676,14 @@ def select_chat(
 
 def thread_messages_from_result(result: CodexThreadMessages) -> list[ChatMessage]:
     return [
-        ChatMessage(role=message["role"], content=message["content"])
+        ChatMessage(
+            role=message["role"],
+            content=message["content"],
+            metadata=message.get("metadata") or {},
+        )
         for message in result.messages
-        if message.get("role") in {"user", "assistant"} and message.get("content")
+        if message.get("role") in {"user", "assistant"}
+        and (message.get("content") or message.get("metadata"))
     ]
 
 
@@ -723,6 +727,124 @@ def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
             chat.touch()
         st.session_state.chat_history_autoscroll = False
         st.rerun()
+
+
+def normalize_codex_output_parts(
+    value: object, fallback_output: str = ""
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    segments = normalize_codex_output_segments(value.get("segments"))
+    if not segments:
+        legacy_segments = [
+            ("final_answer", value.get("output") or fallback_output),
+            ("commentary", value.get("commentary")),
+            ("plan", value.get("plan")),
+            ("reasoning_summary", value.get("reasoning_summary")),
+            ("error", value.get("errors")),
+        ]
+        segments = [
+            {
+                "kind": kind,
+                "text": str(text).strip(),
+                "item_id": "",
+                "phase": "",
+                "metadata": {},
+            }
+            for kind, text in legacy_segments
+            if str(text or "").strip()
+        ]
+    return {
+        "segments": segments,
+        "output": codex_output_text_for_kind(segments, "final_answer"),
+        "commentary": codex_output_text_for_kind(segments, "commentary"),
+        "plan": codex_output_text_for_kind(segments, "plan"),
+        "reasoning_summary": codex_output_text_for_kind(segments, "reasoning_summary"),
+        "errors": codex_output_text_for_kind(segments, "error"),
+        "approval_request": codex_output_text_for_kind(segments, "approval_request"),
+    }
+
+
+def normalize_codex_output_segments(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    segments: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        metadata = item.get("metadata")
+        segments.append(
+            {
+                "kind": str(item.get("kind") or "unknown").strip() or "unknown",
+                "text": text,
+                "item_id": str(item.get("item_id") or ""),
+                "phase": str(item.get("phase") or ""),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        )
+    return segments
+
+
+def codex_output_text_for_kind(segments: list[dict[str, Any]], kind: str) -> str:
+    return "\n\n".join(
+        str(segment.get("text") or "").strip()
+        for segment in segments
+        if segment.get("kind") == kind and str(segment.get("text") or "").strip()
+    )
+
+
+def codex_output_has_auxiliary(parts: dict[str, Any]) -> bool:
+    return any(
+        segment.get("kind") != "final_answer"
+        for segment in parts.get("segments", [])
+        if isinstance(segment, dict)
+    )
+
+
+def render_codex_output_auxiliary(
+    parts: dict[str, Any], expanded_until_final_answer: bool = False
+) -> None:
+    labels = {
+        "commentary": "Progress notes",
+        "reasoning_summary": "Reasoning summary",
+        "plan": "Plan",
+        "approval_request": "Approval",
+        "error": "Errors",
+    }
+    for kind, label in labels.items():
+        text = codex_output_text_for_kind(parts.get("segments", []), kind)
+        if not text:
+            continue
+        if kind == "error":
+            st.error(text)
+        else:
+            with st.expander(label, expanded=expanded_until_final_answer):
+                st.markdown(text)
+
+    known_kinds = set(labels) | {"final_answer"}
+    unknown_segments = [
+        segment
+        for segment in parts.get("segments", [])
+        if isinstance(segment, dict) and segment.get("kind") not in known_kinds
+    ]
+    if unknown_segments:
+        with st.expander("Other output", expanded=expanded_until_final_answer):
+            for segment in unknown_segments:
+                st.markdown(f"**{segment.get('kind') or 'unknown'}**")
+                st.markdown(str(segment.get("text") or ""))
+
+
+def render_codex_stream_output(parts: dict[str, Any]) -> None:
+    normalized = normalize_codex_output_parts(parts)
+    final_answer_started = bool(normalized["output"])
+    render_codex_output_auxiliary(
+        normalized, expanded_until_final_answer=not final_answer_started
+    )
+    if final_answer_started:
+        st.markdown(normalized["output"])
 
 
 def render_chat(
@@ -802,9 +924,15 @@ def render_chat(
             embedded_forms: list[dict] = []
             embedded_form_errors: list[str] = []
             if message.role == "assistant":
+                output_parts = normalize_codex_output_parts(
+                    message.metadata.get("codex_output"), content
+                )
+                content = output_parts["output"]
                 content, embedded_forms, embedded_form_errors = extract_promptforms(
                     content
                 )
+            if message.role == "assistant" and codex_output_has_auxiliary(output_parts):
+                render_codex_output_auxiliary(output_parts)
             if content:
                 st.markdown(content)
             for form_index, form_schema in enumerate(embedded_forms):
@@ -952,11 +1080,13 @@ def render_pending_turn(
         if not pending.get("runtime") and not pending.get("approval"):
             output_placeholder = st.empty()
 
-            def update_stream(output: str) -> None:
-                pending["output"] = output
-                output_placeholder.markdown(output.strip() or " ")
+            def update_stream(output_parts: dict[str, Any]) -> None:
+                pending["output_parts"] = normalize_codex_output_parts(output_parts)
+                pending["output"] = pending["output_parts"]["output"]
+                with output_placeholder.container():
+                    render_codex_stream_output(pending["output_parts"])
 
-            with st.spinner("Sending to Codex...", show_time=True):
+            with st.spinner("Sending to Codex..."):
                 result = client.start_chat_turn(
                     project.path,
                     pending["text"],
@@ -980,13 +1110,18 @@ def render_inline_approval(
 ) -> None:
     output_placeholder = st.empty()
 
-    def update_stream(output: str) -> None:
-        pending["output"] = output
-        output_placeholder.markdown(output.strip() or " ")
+    def update_stream(output_parts: dict[str, Any]) -> None:
+        pending["output_parts"] = normalize_codex_output_parts(output_parts)
+        pending["output"] = pending["output_parts"]["output"]
+        with output_placeholder.container():
+            render_codex_stream_output(pending["output_parts"])
 
-    existing_output = str(pending.get("output") or "").strip()
-    if existing_output:
-        output_placeholder.markdown(existing_output)
+    existing_parts = normalize_codex_output_parts(
+        pending.get("output_parts"), str(pending.get("output") or "")
+    )
+    if any(existing_parts.values()):
+        with output_placeholder.container():
+            render_codex_stream_output(existing_parts)
 
     approval = pending["approval"]
     key = approval_key(approval)
@@ -1002,14 +1137,14 @@ def render_inline_approval(
     )
     if st.button("Approve", key=f"inline-approve-{key}", disabled=in_progress):
         st.session_state.approval_action_in_progress = key
-        with st.spinner("Approving and continuing...", show_time=True):
+        with st.spinner("Approving and continuing..."):
             result = client.respond_chat_turn(
                 pending["runtime"], approval, "approve", output_callback=update_stream
             )
         handle_turn_result(chat, pending, result)
     if st.button("Reject", key=f"inline-reject-{key}", disabled=in_progress):
         st.session_state.approval_action_in_progress = key
-        with st.spinner("Rejecting and continuing...", show_time=True):
+        with st.spinner("Rejecting and continuing..."):
             result = client.respond_chat_turn(
                 pending["runtime"], approval, "reject", output_callback=update_stream
             )
@@ -1023,13 +1158,24 @@ def handle_turn_result(chat: ChatSession, pending: dict, result: dict) -> None:
     if result.get("status") == "approval" and result.get("approval"):
         pending["runtime"] = result["runtime"]
         pending["approval"] = result["approval"]
-        pending["output"] = str(result.get("output") or "").strip()
+        pending["output_parts"] = normalize_codex_output_parts(
+            result.get("output_parts"), str(result.get("output") or "")
+        )
+        pending["output"] = pending["output_parts"]["output"]
         st.session_state.approval_action_in_progress = ""
         st.session_state.chat_history_autoscroll = True
         st.rerun()
 
-    response_text = str(result.get("output") or "").strip() or "The response was empty."
-    chat.add_message("assistant", response_text)
+    output_parts = normalize_codex_output_parts(
+        result.get("output_parts"), str(result.get("output") or "")
+    )
+    if any(output_parts.values()):
+        response_text = output_parts["output"]
+        metadata = {"codex_output": output_parts}
+    else:
+        response_text = "The response was empty."
+        metadata = {}
+    chat.add_message("assistant", response_text, metadata=metadata)
     st.session_state.pending_turn = None
     st.session_state.approval_action_in_progress = ""
     st.session_state.chat_history_autoscroll = True
