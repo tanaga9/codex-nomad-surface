@@ -807,31 +807,45 @@ def codex_output_has_auxiliary(parts: dict[str, Any]) -> bool:
 def render_codex_output_auxiliary(
     parts: dict[str, Any], expanded_until_final_answer: bool = False
 ) -> None:
+    segments = [
+        segment for segment in parts.get("segments", []) if isinstance(segment, dict)
+    ]
+    progress_segments = [
+        segment
+        for segment in segments
+        if segment.get("kind") in {"commentary", "operation_event"}
+        and str(segment.get("text") or "").strip()
+    ]
+    if progress_segments:
+        with st.expander("Progress notes", expanded=expanded_until_final_answer):
+            for segment in progress_segments:
+                st.markdown(str(segment.get("text") or ""))
+
     labels = {
-        "commentary": "Progress notes",
         "reasoning_summary": "Reasoning summary",
         "plan": "Plan",
         "approval_request": "Approval",
         "error": "Errors",
     }
     for kind, label in labels.items():
-        text = codex_output_text_for_kind(parts.get("segments", []), kind)
+        text = codex_output_text_for_kind(segments, kind)
         if not text:
             continue
         if kind == "error":
             st.error(text)
         else:
-            with st.expander(label, expanded=expanded_until_final_answer):
+            with st.expander(label, expanded=False):
                 st.markdown(text)
 
     known_kinds = set(labels) | {"final_answer"}
     unknown_segments = [
         segment
-        for segment in parts.get("segments", [])
-        if isinstance(segment, dict) and segment.get("kind") not in known_kinds
+        for segment in segments
+        if segment.get("kind") not in known_kinds
+        and segment.get("kind") not in {"commentary", "operation_event"}
     ]
     if unknown_segments:
-        with st.expander("Other output", expanded=expanded_until_final_answer):
+        with st.expander("Other output", expanded=False):
             for segment in unknown_segments:
                 st.markdown(f"**{segment.get('kind') or 'unknown'}**")
                 st.markdown(str(segment.get("text") or ""))
@@ -1129,22 +1143,28 @@ def render_inline_approval(
     title = (
         approval.get("title")
         or approval.get("command")
-        or "Operation requires approval"
+        or "Codex is waiting for a user response"
     )
     st.markdown(f"**{title}**")
     st.code(
         str(approval.get("detail") or approval.get("body") or approval), language="text"
     )
-    if st.button("Approve", key=f"inline-approve-{key}", disabled=in_progress):
+    approve_label = (
+        "Approve"
+        if approval.get("kind") == "approval_request"
+        else "Send affirmative response"
+    )
+    reject_label = "Reject" if approval.get("kind") == "approval_request" else "Decline"
+    if st.button(approve_label, key=f"inline-approve-{key}", disabled=in_progress):
         st.session_state.approval_action_in_progress = key
-        with st.spinner("Approving and continuing..."):
+        with st.spinner("Sending response and continuing..."):
             result = client.respond_chat_turn(
                 pending["runtime"], approval, "approve", output_callback=update_stream
             )
         handle_turn_result(chat, pending, result)
-    if st.button("Reject", key=f"inline-reject-{key}", disabled=in_progress):
+    if st.button(reject_label, key=f"inline-reject-{key}", disabled=in_progress):
         st.session_state.approval_action_in_progress = key
-        with st.spinner("Rejecting and continuing..."):
+        with st.spinner("Sending response and continuing..."):
             result = client.respond_chat_turn(
                 pending["runtime"], approval, "reject", output_callback=update_stream
             )

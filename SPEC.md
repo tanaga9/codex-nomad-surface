@@ -98,6 +98,8 @@ The current policy is:
 - Send prompts to Codex.
 - Display results and approval-pending state.
 - Handle operations that require approval on screen.
+- Display user-response requests from Codex App Server even when the request
+  format is not yet recognized by this app.
 - Switch Skins for task-specific UI.
 - Provide a minimal settings screen.
 - Assume access over VPN.
@@ -120,6 +122,7 @@ Before authentication, the app may effectively expose only authentication.
 - Prompt input
 - Result display
 - Approval operation
+- User response operation for non-prompt interaction requests
 - Settings
 
 Codex may optimize the screen structure and UI details during implementation.
@@ -154,6 +157,29 @@ Codex may optimize the screen structure and UI details during implementation.
 - Avoid UI that only restates implementation details. Redundant tabs, disabled
   fields, and explanatory rows should be removed when a short inline note
   communicates the same thing more clearly.
+
+### App Server Interaction Handling Policy
+
+Codex App Server may send output, approval requests, MCP elicitations, tool
+suggestions, or other structured interaction requests that are not plain
+assistant text. Codex Nomad Surface should treat these messages as first-class
+operation-surface events, not as incidental transport details.
+
+The long-lived policy is:
+
+- If Codex App Server sends any assistant-side event or item, the app should
+  reflect it somewhere in the UI. Unknown event types should be preserved in a
+  generic output area rather than silently ignored.
+- If Codex App Server sends any request that appears to require a user response
+  outside the prompt body, the app should display an actionable response UI.
+  The user should not be left waiting on an invisible request.
+- Known request types should get purpose-built UI and response payloads when
+  practical.
+- Unknown request types should still get a conservative generic UI with at
+  least affirmative and declining responses, so the turn does not freeze purely
+  because the app does not yet understand the newer protocol shape.
+- Generic fallback handling is a safety net, not a substitute for adding
+  explicit support once a request type becomes known and stable.
 
 ---
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -156,6 +157,7 @@ class CodexTurnOutput:
             "commentary": self.text_for_kind("commentary"),
             "plan": self.text_for_kind("plan"),
             "reasoning_summary": self.text_for_kind("reasoning_summary"),
+            "approval_request": self.text_for_kind("approval_request"),
             "errors": self.text_for_kind("error"),
         }
 
@@ -655,7 +657,27 @@ class CodexClient:
             return {"permissions": {}, "scope": "turn"}
         if method in {"execCommandApproval", "applyPatchApproval"}:
             return {"decision": "approved" if approved else "denied"}
+        if self._is_mcp_elicitation_method(method):
+            if approved:
+                return {"action": "accept", "content": {}}
+            return {"action": "decline"}
+        if approval.get("kind") == "generic_user_response_request":
+            return {"accepted": approved}
         return {"decision": "accept" if approved else "decline"}
+
+    def _is_approval_request_message(self, message: dict[str, Any]) -> bool:
+        method = str(message.get("method") or "")
+        return "requestApproval" in method or self._is_mcp_elicitation_method(method)
+
+    def _is_user_response_request_message(self, message: dict[str, Any]) -> bool:
+        method = str(message.get("method") or "")
+        return bool(message.get("id") and method)
+
+    def _is_mcp_elicitation_method(self, method: str) -> bool:
+        return method in {
+            "mcpServer/elicitation/request",
+            "elicitation/create",
+        } or method.endswith("/elicitation/request")
 
     async def _start_chat_turn_ws(
         self,
@@ -857,7 +879,7 @@ class CodexClient:
             message = json.loads(raw_message)
             method = message.get("method")
             params = message.get("params") or {}
-            if method and "requestApproval" in method:
+            if self._is_user_response_request_message(message):
                 approval = self._approval_from_message(message)
                 approvals.append(approval)
                 runtime["approval"] = approval
@@ -1017,7 +1039,83 @@ class CodexClient:
             if text:
                 parts.set_segment("reasoning_summary", text, item_id)
                 return True
+        recognized_summary = self._recognized_item_summary(item)
+        if recognized_summary:
+            parts.append_block("operation_event", recognized_summary, item_id)
+            return True
+        if item_type and item_type != "userMessage":
+            parts.append_block(
+                "other_event",
+                f"Unrecognized item: `{item_type}`",
+            )
+            return True
         return False
+
+    def _recognized_item_summary(self, item: dict[str, Any]) -> str:
+        item_type = str(item.get("type") or "")
+        renderers = {
+            "commandExecution": self._command_execution_item_summary,
+            "fileChange": self._file_change_item_summary,
+        }
+        renderer = renderers.get(item_type)
+        return renderer(item) if renderer else ""
+
+    def _command_execution_item_summary(self, item: dict[str, Any]) -> str:
+        lines = ["**Command execution**"]
+        command = self._format_command(item.get("command"))
+        if command:
+            lines.append(f"- Command: `{command}`")
+        cwd = str(item.get("cwd") or "").strip()
+        if cwd:
+            lines.append(f"- CWD: `{cwd}`")
+        status = str(item.get("status") or "").strip()
+        if status:
+            lines.append(f"- Status: `{status}`")
+        if item.get("exitCode") is not None:
+            lines.append(f"- Exit code: `{item.get('exitCode')}`")
+        if item.get("durationMs") is not None:
+            lines.append(f"- Duration: `{item.get('durationMs')} ms`")
+        output = self._first_line(item.get("aggregatedOutput"))
+        if output:
+            lines.append(f"- Output: {output}")
+        return "\n".join(lines)
+
+    def _file_change_item_summary(self, item: dict[str, Any]) -> str:
+        lines = ["**File change**"]
+        status = str(item.get("status") or "").strip()
+        if status:
+            lines.append(f"- Status: `{status}`")
+
+        changes = item.get("changes")
+        if not isinstance(changes, list):
+            changes = []
+        lines.append(f"- Changes: `{len(changes)}`")
+        for change in changes[:5]:
+            if not isinstance(change, dict):
+                continue
+            path = str(change.get("path") or "").strip()
+            kind = str(change.get("kind") or "").strip()
+            if path and kind:
+                lines.append(f"- `{path}` ({kind})")
+            elif path:
+                lines.append(f"- `{path}`")
+        if len(changes) > 5:
+            lines.append(f"- ... and {len(changes) - 5} more")
+        return "\n".join(lines)
+
+    def _format_command(self, command: Any) -> str:
+        if isinstance(command, list):
+            return " ".join(shlex.quote(str(part)) for part in command)
+        return str(command or "").strip()
+
+    def _first_line(self, value: Any, max_chars: int = 240) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        line = next((part.strip() for part in text.splitlines() if part.strip()), "")
+        if len(line) <= max_chars:
+            return line
+        return f"{line[:max_chars].rstrip()}..."
 
     def _reasoning_summary_text(self, summary: Any) -> str:
         if isinstance(summary, str):
@@ -1054,13 +1152,28 @@ class CodexClient:
     def _approval_from_message(self, message: dict[str, Any]) -> dict[str, Any]:
         method = str(message.get("method") or "")
         params = message.get("params") or {}
+        kind = (
+            "approval_request"
+            if self._is_approval_request_message(message)
+            else "generic_user_response_request"
+        )
         return {
             "id": message.get("id"),
+            "kind": kind,
             "method": method,
             "params": params,
             "title": method,
-            "detail": json.dumps(params, ensure_ascii=False, indent=2),
+            "detail": self._json_preview(params),
         }
+
+    def _json_preview(self, value: Any, max_chars: int = 8000) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = str(value)
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars].rstrip()}\n... [truncated]"
 
     def _update_output_parts(
         self,
@@ -1104,9 +1217,21 @@ class CodexClient:
         if method == "error":
             parts.append_block("error", f"[error] {params.get('message') or params}")
             return True
-        if method and "requestApproval" in method:
+        if self._is_approval_request_message(message):
             approvals.append(self._approval_from_message(message))
             parts.append_block("approval_request", "An operation requires approval")
+            return True
+        if self._is_user_response_request_message(message):
+            approvals.append(self._approval_from_message(message))
+            parts.append_block(
+                "approval_request", "Codex is waiting for a user response"
+            )
+            return True
+        if method and method != "turn/completed":
+            parts.append_block(
+                "other_event",
+                f"Unrecognized event: `{method}`",
+            )
             return True
         return False
 
@@ -1203,8 +1328,8 @@ class CodexClient:
             )
             if (
                 approval_handler
-                and message.get("method")
-                and "requestApproval" in str(message.get("method"))
+                and self._is_user_response_request_message(message)
+                and message.get("id") != request_id
             ):
                 await approval_handler(message)
                 continue
@@ -1258,8 +1383,9 @@ class CodexClient:
             chunk = f"\n[error] {params.get('message') or params}\n"
             output.append(chunk)
             return chunk
-        elif method and "requestApproval" in method:
+        elif self._is_user_response_request_message(message):
             approvals.append(self._approval_from_message(message))
+            return "\n\n[Codex is waiting for a user response]\n"
         return ""
 
     def _message_chunk(
@@ -1275,7 +1401,7 @@ class CodexClient:
             return str(params.get("delta") or "")
         if method == "error":
             return f"\n[error] {params.get('message') or params}\n"
-        if method and "requestApproval" in method:
+        if self._is_user_response_request_message(message):
             approvals.append(self._approval_from_message(message))
-            return "\n\n[An operation requires approval]\n"
+            return "\n\n[Codex is waiting for a user response]\n"
         return ""

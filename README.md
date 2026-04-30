@@ -31,6 +31,8 @@ The system is intended for personal use and includes:
 - Prompt submission
 - Result display
 - Inline approval request display and response
+- Generic display and response handling for App Server requests that require
+  user input outside the prompt body
 - Reusable Prompt Form defs loaded from JSON files
 - User-triggered Prompt Form insertion from the sidebar
 - User-triggered Skill picker insertion from the sidebar
@@ -76,13 +78,14 @@ within one minute temporarily block login for one minute.
 ## Layout
 
 - Left sidebar: project / chat selection, Prompt Form and Skill insertion, and the Settings dialog.
-- Main area: chat history, inline approvals, and the bottom chat input.
+- Main area: chat history, inline approvals or other user-response requests,
+  and the bottom chat input.
 
 ## Structure
 
 - `app.py`: Streamlit UI.
 - `ui_components/`: reusable UI helpers and static assets for embedded forms and custom chat-input integrations.
-- `codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval responses.
+- `codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval or user-response requests.
 - `settings.py`: storage in `.nomad_surface/settings.json`.
 - `promptform-defs/*.json`: reusable Prompt Form definitions for this project or shared general forms.
 - `promptform_defs.py`: loader for Prompt Form definition files.
@@ -96,6 +99,12 @@ Streamlit app.
 ## Notes
 
 Communication with Codex App Server supports WebSocket RPC only. The Settings URL must use `ws://` or `wss://`.
+
+Codex Nomad Surface should not silently drop assistant-side App Server events.
+Known response requests, such as approvals and MCP elicitations, are rendered
+with specific inline controls. Unknown App Server requests that carry a JSON-RPC
+`id` and `method` are still shown with a generic response UI so the user can
+answer instead of leaving the turn blocked on an invisible prompt.
 
 When the Settings Codex App Server URL host is exactly `127.0.0.1`, HTTP paths
 that look like absolute host file paths are served as local file previews. For
