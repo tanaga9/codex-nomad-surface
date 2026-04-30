@@ -15,18 +15,13 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = [
-    "app",
-    "chat_store",
-    "codex_client",
-    "promptform_defs",
-    "settings",
-    "skill_defs",
+packages = [
+    "codex_nomad_surface",
+    "codex_nomad_surface.ui_components",
 ]
-packages = ["ui_components"]
 
 [tool.setuptools.package-data]
-ui_components = ["assets/*.js", "assets/*.css", "assets/*.svg"]
+"codex_nomad_surface.ui_components" = ["assets/*.js", "assets/*.css", "assets/*.svg"]
 
 [tool.ruff]
 target-version = "py312"

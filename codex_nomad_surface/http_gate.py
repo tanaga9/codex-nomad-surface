@@ -14,7 +14,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 import streamlit as st
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
-from settings import AppSettings, configured_secret, load_settings
+from codex_nomad_surface.settings import (
+    AppSettings,
+    configured_secret,
+    load_settings,
+)
 
 
 AUTH_COOKIE_NAME = "codex_nomad_auth"

@@ -55,7 +55,7 @@ pip install -e .
 Start the Streamlit app.
 
 ```bash
-NOMAD_AUTH_SECRET='your-secret' streamlit run app.py
+NOMAD_AUTH_SECRET='your-secret' streamlit run codex_nomad_surface/app.py
 ```
 
 If the configured Codex App Server URL points to `127.0.0.1` and the app cannot connect, the connection screen can start Codex App Server for you.
@@ -83,13 +83,13 @@ within one minute temporarily block login for one minute.
 
 ## Structure
 
-- `app.py`: Streamlit UI.
-- `ui_components/`: reusable UI helpers and static assets for embedded forms and custom chat-input integrations.
-- `codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval or user-response requests.
-- `settings.py`: storage in `.nomad_surface/settings.json`.
+- `codex_nomad_surface/app.py`: Streamlit UI.
+- `codex_nomad_surface/ui_components/`: reusable UI helpers and static assets for embedded forms and custom chat-input integrations.
+- `codex_nomad_surface/codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval or user-response requests.
+- `codex_nomad_surface/settings.py`: storage in `.nomad_surface/settings.json`.
 - `promptform-defs/*.json`: reusable Prompt Form definitions for this project or shared general forms.
-- `promptform_defs.py`: loader for Prompt Form definition files.
-- `skill_defs.py`: loader for Codex Skill definition files.
+- `codex_nomad_surface/promptform_defs.py`: loader for Prompt Form definition files.
+- `codex_nomad_surface/skill_defs.py`: loader for Codex Skill definition files.
 - `pyproject.toml`: Python project metadata and runtime dependencies.
 
 The embedded Prompt Form UI is assembled at runtime by the `ui_components`

@@ -20,27 +20,36 @@ import streamlit as st
 from starlette.middleware import Middleware
 from streamlit.starlette import App
 
-from chat_store import ChatMessage, ChatSession
-from codex_client import CodexClient, CodexThread, CodexThreadMessages, ConnectionStatus
-from http_gate import (
+from codex_nomad_surface.chat_store import ChatMessage, ChatSession
+from codex_nomad_surface.codex_client import (
+    CodexClient,
+    CodexThread,
+    CodexThreadMessages,
+    ConnectionStatus,
+)
+from codex_nomad_surface.http_gate import (
     FileContentMiddleware,
     auth_required,
     cookie_auth_is_valid,
     sync_file_content_route_setting,
 )
-from promptform_defs import PromptFormDef, load_promptform_defs, promptform_def_by_id
-from settings import (
+from codex_nomad_surface.promptform_defs import (
+    PromptFormDef,
+    load_promptform_defs,
+    promptform_def_by_id,
+)
+from codex_nomad_surface.settings import (
     AppSettings,
     Project,
     load_settings,
     save_settings,
 )
-from skill_defs import (
+from codex_nomad_surface.skill_defs import (
     SkillDef,
     skill_def_by_id,
     skill_defs_from_app_server,
 )
-from ui_components import (
+from codex_nomad_surface.ui_components import (
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
     render_promptform,

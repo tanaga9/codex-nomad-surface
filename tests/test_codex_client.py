@@ -1,6 +1,6 @@
 import unittest
 
-from codex_client import CodexClient, CodexTurnOutput
+from codex_nomad_surface.codex_client import CodexClient, CodexTurnOutput
 
 
 class CodexClientApprovalTests(unittest.TestCase):
