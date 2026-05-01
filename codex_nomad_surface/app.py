@@ -1239,6 +1239,7 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
         else build_continuation_thread_overrides(controls)
     )
     if starting_new_thread:
+        remember_new_chat_run_control_defaults(controls)
         ensure_start_run_overrides_message(chat, controls)
     chat.add_message("user", user_text)
     st.session_state.pending_turn = {
@@ -1408,14 +1409,44 @@ def chat_run_controls(chat: ChatSession | None) -> dict[str, str]:
     if not chat:
         return {}
     controls = run_controls_state().get(chat.id)
-    return controls.copy() if isinstance(controls, dict) else {}
+    if isinstance(controls, dict):
+        return controls.copy()
+    if chat.thread_id or chat.messages:
+        return {}
+
+    defaults = new_chat_run_control_defaults(settings_state())
+    run_controls_state()[chat.id] = defaults.copy()
+    return defaults
 
 
 def save_chat_run_controls(chat: ChatSession, controls: dict[str, str]) -> None:
-    if controls:
-        run_controls_state()[chat.id] = controls
-    else:
-        run_controls_state().pop(chat.id, None)
+    run_controls_state()[chat.id] = controls.copy()
+
+
+def new_chat_run_control_defaults(settings: AppSettings) -> dict[str, str]:
+    defaults = {
+        "model_provider": settings.new_chat_model_provider.strip(),
+        "model": settings.new_chat_model.strip(),
+        "reasoning_effort": settings.new_chat_reasoning_effort.strip(),
+    }
+    return {key: value for key, value in defaults.items() if value}
+
+
+def remember_new_chat_run_control_defaults(controls: dict[str, str]) -> None:
+    settings = settings_state()
+    model_provider = controls.get("model_provider", "").strip()
+    model = controls.get("model", "").strip()
+    reasoning_effort = controls.get("reasoning_effort", "").strip()
+    if (
+        settings.new_chat_model_provider == model_provider
+        and settings.new_chat_model == model
+        and settings.new_chat_reasoning_effort == reasoning_effort
+    ):
+        return
+    settings.new_chat_model_provider = model_provider
+    settings.new_chat_model = model
+    settings.new_chat_reasoning_effort = reasoning_effort
+    persist()
 
 
 def build_turn_overrides(controls: dict[str, str]) -> dict[str, Any]:
@@ -1962,7 +1993,6 @@ def render_codex_run_overrides(
         return
 
     config = load_codex_config(app_server_url)
-    models = load_codex_models(app_server_url)
 
     if not config:
         st.warning("Could not read Codex config from App Server.")
@@ -1971,9 +2001,6 @@ def render_codex_run_overrides(
     current_model = str(config.get("model") or "")
     current_model_provider = str(config.get("model_provider") or "")
     current_service_tier = config_string(config, "service_tier")
-    model_options = [codex_model_id(model) for model in models if codex_model_id(model)]
-    if current_model and current_model not in model_options:
-        model_options.insert(0, current_model)
 
     st.markdown("**Run Overrides**")
     st.caption(
@@ -2007,6 +2034,14 @@ def render_codex_run_overrides(
     )
     effective_model_provider = model_provider or current_model_provider
     use_discovered_model_options = effective_model_provider in {"", "openai"}
+    models = (
+        load_codex_models(app_server_url) if use_discovered_model_options else []
+    )
+    model_options = [
+        codex_model_id(model) for model in models if codex_model_id(model)
+    ]
+    if current_model and current_model not in model_options:
+        model_options.insert(0, current_model)
     provider_models = (
         []
         if use_discovered_model_options

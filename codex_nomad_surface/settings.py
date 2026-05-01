@@ -21,11 +21,21 @@ class Project:
 @dataclass
 class AppSettings:
     app_server_url: str = DEFAULT_APP_SERVER_URL
+    new_chat_model_provider: str = ""
+    new_chat_model: str = ""
+    new_chat_reasoning_effort: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "AppSettings":
         app_server_url = raw.get("app_server_url") or cls.app_server_url
-        return cls(app_server_url=app_server_url)
+        return cls(
+            app_server_url=app_server_url,
+            new_chat_model_provider=str(raw.get("new_chat_model_provider") or ""),
+            new_chat_model=str(raw.get("new_chat_model") or ""),
+            new_chat_reasoning_effort=str(
+                raw.get("new_chat_reasoning_effort") or ""
+            ),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
