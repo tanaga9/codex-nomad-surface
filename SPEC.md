@@ -167,14 +167,26 @@ operation-surface events, not as incidental transport details.
 
 The long-lived policy is:
 
+- Incoming App Server messages should be classified first by user-visible
+  behavior: response-required, known output, known silent status, or unknown
+  observed event. This keeps protocol drift from turning into invisible waits.
 - If Codex App Server sends any assistant-side event or item, the app should
   reflect it somewhere in the UI. Unknown event types should be preserved in a
-  generic output area rather than silently ignored.
+  generic output area rather than silently ignored. Item lifecycle events should
+  follow the same rule at both start and completion.
 - If Codex App Server sends any request that appears to require a user response
   outside the prompt body, the app should display an actionable response UI.
   The user should not be left waiting on an invisible request.
 - Known request types should get purpose-built UI and response payloads when
   practical.
+- When a known request type provides its own response choices, such as App
+  Server `tool/requestUserInput` options or approval `availableDecisions`, the
+  app should render those choices as given and send back the corresponding
+  protocol-shaped answer. Do not replace explicit assistant-provided choices
+  with generic labels unless the request lacks usable choices.
+- When a request contains multiple questions, each question should keep its own
+  visible response control. Do not collapse multi-question requests into a
+  single affirmative or declining response.
 - Unknown request types should still get a conservative generic UI with at
   least affirmative and declining responses, so the turn does not freeze purely
   because the app does not yet understand the newer protocol shape.

@@ -195,6 +195,12 @@ OutputSnapshot = dict[str, Any]
 OutputCallback = Callable[[OutputSnapshot], None]
 
 
+@dataclass(frozen=True)
+class AppServerMessageClassification:
+    kind: str
+    method: str = ""
+
+
 class CodexClient:
     WS_MAX_SIZE = 16 * 1024 * 1024
     TURN_INACTIVITY_TIMEOUT_SECONDS = 180.0
@@ -647,6 +653,13 @@ class CodexClient:
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
         }:
+            if decision.startswith("decision:"):
+                return {"decision": decision.split(":", 1)[1]}
+            if decision.startswith("decisionJson:"):
+                try:
+                    return {"decision": json.loads(decision.split(":", 1)[1])}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return {"decision": "decline"}
             return {"decision": "accept" if approved else "decline"}
         if method == "item/permissions/requestApproval":
             if approved:
@@ -661,23 +674,146 @@ class CodexClient:
             if approved:
                 return {"action": "accept", "content": {}}
             return {"action": "decline"}
+        if self._is_tool_request_user_input_method(method):
+            return self._tool_request_user_input_response(approval, decision)
         if approval.get("kind") == "generic_user_response_request":
             return {"accepted": approved}
         return {"decision": "accept" if approved else "decline"}
 
+    def _classify_app_server_message(
+        self, message: dict[str, Any]
+    ) -> AppServerMessageClassification:
+        method = str(message.get("method") or "")
+        if not method:
+            return AppServerMessageClassification("unknown_observed", method)
+        recognized_summary = self._recognized_event_summary(message)
+        if recognized_summary is not None:
+            kind = "known_output" if recognized_summary else "known_silent"
+            return AppServerMessageClassification(kind, method)
+        if self._is_approval_request_message(message):
+            if self._message_response_id(message) is not None:
+                return AppServerMessageClassification("response_required", method)
+            return AppServerMessageClassification("unknown_observed", method)
+        if message.get("id") is not None:
+            return AppServerMessageClassification("response_required", method)
+        if self._is_known_output_message(message):
+            return AppServerMessageClassification("known_output", method)
+        return AppServerMessageClassification("unknown_observed", method)
+
     def _is_approval_request_message(self, message: dict[str, Any]) -> bool:
         method = str(message.get("method") or "")
-        return "requestApproval" in method or self._is_mcp_elicitation_method(method)
+        return (
+            "requestApproval" in method
+            or self._is_mcp_elicitation_method(method)
+            or self._is_tool_request_user_input_method(method)
+        )
 
     def _is_user_response_request_message(self, message: dict[str, Any]) -> bool:
+        return self._classify_app_server_message(message).kind == "response_required"
+
+    def _message_response_id(self, message: dict[str, Any]) -> Any:
+        if message.get("id") is not None:
+            return message.get("id")
+        params = message.get("params")
+        if not isinstance(params, dict):
+            return None
+        return self._response_id_from_mapping(params)
+
+    def _response_id_from_mapping(self, mapping: dict[str, Any]) -> Any:
+        direct_keys = (
+            "id",
+            "requestId",
+            "request_id",
+            "approvalId",
+            "approval_id",
+            "elicitationId",
+            "elicitation_id",
+            "serverRequestId",
+            "server_request_id",
+        )
+        for key in direct_keys:
+            if mapping.get(key) is not None:
+                return mapping.get(key)
+        for value in mapping.values():
+            if not isinstance(value, dict):
+                continue
+            for key in direct_keys:
+                if value.get(key) is not None:
+                    return value.get(key)
+        return None
+
+    def _is_known_output_message(self, message: dict[str, Any]) -> bool:
         method = str(message.get("method") or "")
-        return bool(message.get("id") and method)
+        return method in {
+            "item/started",
+            "item/agentMessage/delta",
+            "item/plan/delta",
+            "item/reasoning/summaryTextDelta",
+            "item/reasoning/summaryPartAdded",
+            "item/completed",
+            "error",
+            "turn/completed",
+        }
+
+    def _known_request_options(
+        self, method: str, params: dict[str, Any], questions: list[dict[str, Any]]
+    ) -> list[dict[str, str]]:
+        if self._is_tool_request_user_input_method(method):
+            return self._tool_request_user_input_button_options(questions)
+        if method in {
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+        }:
+            return self._available_decision_options(params)
+        return []
+
+    def _available_decision_options(self, params: dict[str, Any]) -> list[dict[str, str]]:
+        decisions = params.get("availableDecisions") if isinstance(params, dict) else None
+        if not isinstance(decisions, list):
+            return []
+        options: list[dict[str, str]] = []
+        for decision in decisions:
+            label = self._available_decision_label(decision)
+            if not label:
+                continue
+            if isinstance(decision, str):
+                value = f"decision:{decision}"
+            else:
+                value = f"decisionJson:{self._compact_json(decision)}"
+            options.append({"label": label, "decision": value})
+        return options
+
+    def _available_decision_label(self, decision: Any) -> str:
+        if isinstance(decision, str):
+            labels = {
+                "accept": "Accept",
+                "acceptForSession": "Accept for session",
+                "decline": "Decline",
+                "cancel": "Cancel",
+            }
+            return labels.get(decision, decision)
+        if isinstance(decision, dict) and len(decision) == 1:
+            key = next(iter(decision.keys()))
+            labels = {
+                "acceptWithExecpolicyAmendment": "Accept with permission change",
+            }
+            return labels.get(str(key), str(key))
+        return str(decision or "").strip()
+
+    def _compact_json(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return json.dumps(str(value), ensure_ascii=False)
 
     def _is_mcp_elicitation_method(self, method: str) -> bool:
         return method in {
             "mcpServer/elicitation/request",
             "elicitation/create",
         } or method.endswith("/elicitation/request")
+
+    def _is_tool_request_user_input_method(self, method: str) -> bool:
+        return method in {"tool/requestUserInput", "item/tool/requestUserInput"}
 
     async def _start_chat_turn_ws(
         self,
@@ -733,6 +869,7 @@ class CodexClient:
                     output_parts,
                     approvals,
                     output_callback,
+                    handle_approval_message,
                     stream_items=runtime["stream_items"],
                 )
                 if thread_id:
@@ -1038,7 +1175,7 @@ class CodexClient:
             text = self._reasoning_summary_text(item.get("summary"))
             if text:
                 parts.set_segment("reasoning_summary", text, item_id)
-                return True
+            return True
         recognized_summary = self._recognized_item_summary(item)
         if recognized_summary:
             parts.append_block("operation_event", recognized_summary, item_id)
@@ -1056,6 +1193,7 @@ class CodexClient:
         renderers = {
             "commandExecution": self._command_execution_item_summary,
             "fileChange": self._file_change_item_summary,
+            "mcpToolCall": self._mcp_tool_call_item_summary,
         }
         renderer = renderers.get(item_type)
         return renderer(item) if renderer else ""
@@ -1103,10 +1241,38 @@ class CodexClient:
             lines.append(f"- ... and {len(changes) - 5} more")
         return "\n".join(lines)
 
+    def _mcp_tool_call_item_summary(self, item: dict[str, Any]) -> str:
+        lines = ["**MCP tool call**"]
+        server = str(item.get("server") or "").strip()
+        if server:
+            lines.append(f"- Server: `{server}`")
+        tool = str(item.get("tool") or "").strip()
+        if tool:
+            lines.append(f"- Tool: `{tool}`")
+        status = str(item.get("status") or "").strip()
+        if status:
+            lines.append(f"- Status: `{status}`")
+        arguments = self._json_first_line(item.get("arguments"))
+        if arguments:
+            lines.append(f"- Arguments: `{arguments}`")
+        error = self._first_line(item.get("error"))
+        if error:
+            lines.append(f"- Error: {error}")
+        return "\n".join(lines)
+
     def _format_command(self, command: Any) -> str:
         if isinstance(command, list):
             return " ".join(shlex.quote(str(part)) for part in command)
         return str(command or "").strip()
+
+    def _json_first_line(self, value: Any, max_chars: int = 240) -> str:
+        if value in (None, ""):
+            return ""
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            text = str(value)
+        return self._first_line(text, max_chars)
 
     def _first_line(self, value: Any, max_chars: int = 240) -> str:
         text = str(value or "").strip()
@@ -1152,19 +1318,173 @@ class CodexClient:
     def _approval_from_message(self, message: dict[str, Any]) -> dict[str, Any]:
         method = str(message.get("method") or "")
         params = message.get("params") or {}
+        questions = (
+            self._tool_request_user_input_questions(params)
+            if self._is_tool_request_user_input_method(method)
+            else []
+        )
         kind = (
-            "approval_request"
+            "tool_user_input_request"
+            if self._is_tool_request_user_input_method(method)
+            else "approval_request"
             if self._is_approval_request_message(message)
             else "generic_user_response_request"
         )
         return {
-            "id": message.get("id"),
+            "id": self._message_response_id(message),
             "kind": kind,
             "method": method,
             "params": params,
-            "title": method,
-            "detail": self._json_preview(params),
+            "title": self._tool_request_user_input_title(questions) or method,
+            "detail": self._tool_request_user_input_detail(questions)
+            if questions
+            else self._json_preview(params),
+            "questions": questions,
+            "options": self._known_request_options(method, params, questions),
         }
+
+    def _tool_request_user_input_questions(
+        self, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        questions = params.get("questions") if isinstance(params, dict) else None
+        normalized: list[dict[str, Any]] = []
+        iterable: list[tuple[str, Any]]
+        if isinstance(questions, dict):
+            iterable = [(str(key), value) for key, value in questions.items()]
+        elif isinstance(questions, list):
+            iterable = [
+                (
+                    str(
+                        question.get("id")
+                        or question.get("key")
+                        or question.get("name")
+                        or index
+                    )
+                    if isinstance(question, dict)
+                    else str(index),
+                    question,
+                )
+                for index, question in enumerate(questions)
+            ]
+        else:
+            return normalized
+
+        for question_id, question in iterable:
+            if not isinstance(question, dict):
+                continue
+            option_labels: list[str] = []
+            options = question.get("options")
+            if isinstance(options, list):
+                for option in options:
+                    if isinstance(option, dict):
+                        label = str(option.get("label") or option.get("value") or "")
+                    else:
+                        label = str(option or "")
+                    label = label.strip()
+                    if label:
+                        option_labels.append(label)
+            normalized.append(
+                {
+                    "id": question_id,
+                    "header": str(question.get("header") or "").strip(),
+                    "question": str(question.get("question") or "").strip(),
+                    "isOther": bool(question.get("isOther")),
+                    "isSecret": bool(question.get("isSecret")),
+                    "options": option_labels,
+                }
+            )
+        return normalized
+
+    def _tool_request_user_input_title(self, questions: list[dict[str, Any]]) -> str:
+        for question in questions:
+            title = str(question.get("header") or question.get("question") or "")
+            if title.strip():
+                return title.strip()
+        return ""
+
+    def _tool_request_user_input_detail(self, questions: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for question in questions:
+            text = str(question.get("question") or question.get("header") or "").strip()
+            if text:
+                lines.append(text)
+            options = question.get("options")
+            if isinstance(options, list) and options:
+                lines.append(
+                    "Options: " + ", ".join(str(option) for option in options)
+                )
+        return "\n".join(lines)
+
+    def _tool_request_user_input_button_options(
+        self, questions: list[dict[str, Any]]
+    ) -> list[dict[str, str]]:
+        if len(questions) != 1:
+            return []
+        options = questions[0].get("options")
+        if not isinstance(options, list):
+            return []
+        return [
+            {"label": str(label), "decision": f"option:{index}"}
+            for index, label in enumerate(options)
+            if str(label).strip()
+        ]
+
+    def _tool_request_user_input_response(
+        self, approval: dict[str, Any], decision: str
+    ) -> dict[str, Any]:
+        if decision.startswith("answersJson:"):
+            try:
+                value = json.loads(decision.split(":", 1)[1])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {}
+            return value if isinstance(value, dict) else {}
+
+        questions = approval.get("questions")
+        if not isinstance(questions, list):
+            params = (
+                approval.get("params") if isinstance(approval.get("params"), dict) else {}
+            )
+            questions = self._tool_request_user_input_questions(params)
+
+        response: dict[str, Any] = {}
+        for question in questions:
+            if not isinstance(question, dict):
+                continue
+            question_id = str(question.get("id") or "").strip()
+            if not question_id:
+                continue
+            label = self._tool_request_user_input_selected_label(question, decision)
+            response[question_id] = {"answers": [label] if label else []}
+        return response
+
+    def _tool_request_user_input_selected_label(
+        self, question: dict[str, Any], decision: str
+    ) -> str:
+        options = question.get("options")
+        if not isinstance(options, list):
+            options = []
+        labels = [str(option).strip() for option in options if str(option).strip()]
+        if decision.startswith("option:"):
+            try:
+                index = int(decision.split(":", 1)[1])
+            except ValueError:
+                index = -1
+            if 0 <= index < len(labels):
+                return labels[index]
+        preferred = ("accept", "approve", "allow", "yes") if decision == "approve" else (
+            "decline",
+            "reject",
+            "deny",
+            "no",
+            "cancel",
+        )
+        for label in labels:
+            folded = label.casefold()
+            if any(word in folded for word in preferred):
+                return label
+        return labels[0] if labels else (
+            "Accept" if decision == "approve" else "Decline"
+        )
 
     def _json_preview(self, value: Any, max_chars: int = 8000) -> str:
         try:
@@ -1186,7 +1506,9 @@ class CodexClient:
         params = message.get("params") or {}
         if method == "item/started":
             item = params.get("item") if isinstance(params, dict) else None
-            return self._update_stream_item(item, parts, stream_items)
+            if self._update_stream_item(item, parts, stream_items):
+                return True
+            return self._update_output_parts_from_item(item, parts)
         if method == "item/agentMessage/delta":
             return self._append_agent_message_delta(params, parts, stream_items)
         if method == "item/plan/delta":
@@ -1217,23 +1539,49 @@ class CodexClient:
         if method == "error":
             parts.append_block("error", f"[error] {params.get('message') or params}")
             return True
-        if self._is_approval_request_message(message):
+        classification = self._classify_app_server_message(message)
+        if classification.kind == "response_required":
             approvals.append(self._approval_from_message(message))
-            parts.append_block("approval_request", "An operation requires approval")
-            return True
-        if self._is_user_response_request_message(message):
-            approvals.append(self._approval_from_message(message))
-            parts.append_block(
-                "approval_request", "Codex is waiting for a user response"
+            text = (
+                "An operation requires approval"
+                if self._is_approval_request_message(message)
+                else "Codex is waiting for a user response"
             )
+            parts.append_block("approval_request", text)
             return True
-        if method and method != "turn/completed":
+        if classification.kind == "known_silent":
+            return True
+        if classification.kind == "known_output":
+            recognized_summary = self._recognized_event_summary(message)
+            if recognized_summary:
+                parts.append_block("operation_event", recognized_summary)
+                return True
+            return False
+        if classification.kind == "unknown_observed" and method:
             parts.append_block(
                 "other_event",
                 f"Unrecognized event: `{method}`",
             )
             return True
         return False
+
+    def _recognized_event_summary(self, message: dict[str, Any]) -> str | None:
+        method = str(message.get("method") or "")
+        renderers = {
+            "thread/started": self._silent_event_summary,
+            "thread/status/changed": self._silent_event_summary,
+            "turn/started": self._silent_event_summary,
+            "mcpServer/startupStatus/updated": self._silent_event_summary,
+            "skills/changed": self._silent_event_summary,
+            "account/rateLimits/updated": self._silent_event_summary,
+            "thread/tokenUsage/updated": self._silent_event_summary,
+            "serverRequest/resolved": self._silent_event_summary,
+        }
+        renderer = renderers.get(method)
+        return renderer(message) if renderer else None
+
+    def _silent_event_summary(self, message: dict[str, Any]) -> str:
+        return ""
 
     def _update_stream_item(
         self,

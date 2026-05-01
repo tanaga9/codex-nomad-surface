@@ -499,6 +499,10 @@ def approval_key(approval: dict, fallback: str = "") -> str:
     )
 
 
+def compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def query_chat_id() -> str:
     value = st.query_params.get("chat", "")
     if isinstance(value, list):
@@ -1158,26 +1162,139 @@ def render_inline_approval(
     st.code(
         str(approval.get("detail") or approval.get("body") or approval), language="text"
     )
-    approve_label = (
-        "Approve"
-        if approval.get("kind") == "approval_request"
-        else "Send affirmative response"
-    )
-    reject_label = "Reject" if approval.get("kind") == "approval_request" else "Decline"
-    if st.button(approve_label, key=f"inline-approve-{key}", disabled=in_progress):
-        st.session_state.approval_action_in_progress = key
-        with st.spinner("Sending response and continuing..."):
-            result = client.respond_chat_turn(
-                pending["runtime"], approval, "approve", output_callback=update_stream
+    response_options = approval.get("options")
+    if approval.get("kind") == "tool_user_input_request" and isinstance(
+        approval.get("questions"), list
+    ) and not response_options:
+        if render_tool_user_input_request(
+            client, chat, pending, approval, key, in_progress, update_stream
+        ):
+            return
+
+    if isinstance(response_options, list) and response_options:
+        for index, option in enumerate(response_options):
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label") or "").strip()
+            decision = str(option.get("decision") or f"option:{index}")
+            if not label:
+                continue
+            if st.button(
+                label,
+                key=f"inline-option-{key}-{index}",
+                disabled=in_progress,
+            ):
+                st.session_state.approval_action_in_progress = key
+                with st.spinner("Sending response and continuing..."):
+                    result = client.respond_chat_turn(
+                        pending["runtime"],
+                        approval,
+                        decision,
+                        output_callback=update_stream,
+                    )
+                handle_turn_result(chat, pending, result)
+    else:
+        approve_label = (
+            "Approve"
+            if approval.get("kind") == "approval_request"
+            else "Send affirmative response"
+        )
+        reject_label = (
+            "Reject" if approval.get("kind") == "approval_request" else "Decline"
+        )
+        if st.button(
+            approve_label, key=f"inline-approve-{key}", disabled=in_progress
+        ):
+            st.session_state.approval_action_in_progress = key
+            with st.spinner("Sending response and continuing..."):
+                result = client.respond_chat_turn(
+                    pending["runtime"],
+                    approval,
+                    "approve",
+                    output_callback=update_stream,
+                )
+            handle_turn_result(chat, pending, result)
+        if st.button(
+            reject_label, key=f"inline-reject-{key}", disabled=in_progress
+        ):
+            st.session_state.approval_action_in_progress = key
+            with st.spinner("Sending response and continuing..."):
+                result = client.respond_chat_turn(
+                    pending["runtime"],
+                    approval,
+                    "reject",
+                    output_callback=update_stream,
+                )
+            handle_turn_result(chat, pending, result)
+
+
+def render_tool_user_input_request(
+    client: CodexClient,
+    chat: ChatSession,
+    pending: dict,
+    approval: dict,
+    key: str,
+    in_progress: bool,
+    update_stream: Any,
+) -> bool:
+    questions = [
+        question for question in approval.get("questions", []) if isinstance(question, dict)
+    ]
+    if not questions:
+        return False
+
+    with st.form(f"tool-user-input-{key}"):
+        answers: dict[str, dict[str, list[str]]] = {}
+        for index, question in enumerate(questions):
+            question_id = str(question.get("id") or index)
+            prompt = str(
+                question.get("question") or question.get("header") or f"Question {index + 1}"
             )
-        handle_turn_result(chat, pending, result)
-    if st.button(reject_label, key=f"inline-reject-{key}", disabled=in_progress):
-        st.session_state.approval_action_in_progress = key
-        with st.spinner("Sending response and continuing..."):
-            result = client.respond_chat_turn(
-                pending["runtime"], approval, "reject", output_callback=update_stream
-            )
-        handle_turn_result(chat, pending, result)
+            options = [
+                str(option).strip()
+                for option in question.get("options", [])
+                if str(option).strip()
+            ]
+            is_other = bool(question.get("isOther"))
+            if options:
+                labels = [*options, "Other"] if is_other else options
+                selected = st.radio(
+                    prompt,
+                    labels,
+                    key=f"tool-user-input-{key}-{question_id}",
+                    disabled=in_progress,
+                )
+                if selected == "Other":
+                    value = st.text_input(
+                        "Other",
+                        key=f"tool-user-input-other-{key}-{question_id}",
+                        disabled=in_progress,
+                    )
+                else:
+                    value = selected
+            else:
+                value = st.text_input(
+                    prompt,
+                    key=f"tool-user-input-text-{key}-{question_id}",
+                    type="password" if question.get("isSecret") else "default",
+                    disabled=in_progress,
+                )
+            answers[question_id] = {"answers": [str(value)] if str(value).strip() else []}
+
+        submitted = st.form_submit_button("Send response", disabled=in_progress)
+    if not submitted:
+        return True
+
+    st.session_state.approval_action_in_progress = key
+    with st.spinner("Sending response and continuing..."):
+        result = client.respond_chat_turn(
+            pending["runtime"],
+            approval,
+            f"answersJson:{compact_json(answers)}",
+            output_callback=update_stream,
+        )
+    handle_turn_result(chat, pending, result)
+    return True
 
 
 def handle_turn_result(chat: ChatSession, pending: dict, result: dict) -> None:
