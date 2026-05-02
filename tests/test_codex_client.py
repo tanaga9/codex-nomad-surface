@@ -7,6 +7,15 @@ class CodexClientApprovalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = CodexClient("ws://127.0.0.1:1234")
 
+    def test_model_list_result_reports_non_websocket_url(self) -> None:
+        client = CodexClient("http://127.0.0.1:8080")
+
+        result = client.list_models_result()
+
+        self.assertEqual(result.models, [])
+        self.assertEqual(result.error, "Could not generate the model list.")
+        self.assertEqual(client.list_models(), [])
+
     def test_mcp_elicitation_is_approval_request(self) -> None:
         message = {
             "id": "approval-1",

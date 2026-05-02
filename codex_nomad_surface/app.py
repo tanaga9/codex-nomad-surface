@@ -23,6 +23,7 @@ from streamlit.starlette import App
 from codex_nomad_surface.chat_store import ChatMessage, ChatSession
 from codex_nomad_surface.codex_client import (
     CodexClient,
+    CodexModelListResult,
     CodexThread,
     CodexThreadMessages,
     ConnectionStatus,
@@ -1622,7 +1623,12 @@ def load_codex_config(base_url: str) -> dict:
 
 @st.cache_data(show_spinner=False, ttl=60)
 def load_codex_models(base_url: str) -> list[dict]:
-    return CodexClient(base_url).list_models()
+    return load_codex_model_list(base_url).models
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_codex_model_list(base_url: str) -> CodexModelListResult:
+    return CodexClient(base_url).list_models_result()
 
 
 @st.cache_data(show_spinner=False, ttl=30)
@@ -2515,12 +2521,17 @@ def render_codex_run_overrides(
     )
     effective_model_provider = model_provider or current_model_provider
     use_discovered_model_options = effective_model_provider in {"", "openai"}
-    models = (
-        load_codex_models(app_server_url) if use_discovered_model_options else []
+    model_list_result = (
+        load_codex_model_list(app_server_url)
+        if use_discovered_model_options
+        else CodexModelListResult([])
     )
+    models = model_list_result.models
+    model_list_error = model_list_result.error.strip()
     model_options = [
         codex_model_id(model) for model in models if codex_model_id(model)
     ]
+    discovered_model_options = model_options.copy()
     if current_model and current_model not in model_options:
         model_options.insert(0, current_model)
     provider_models = (
@@ -2536,6 +2547,7 @@ def render_codex_run_overrides(
         for provider_model in provider_models
         if codex_model_id(provider_model)
     ]
+    discovered_provider_model_options = provider_model_options.copy()
     provider_model_value = (
         active_selected_model
         if active_selected_model in provider_model_options
@@ -2569,6 +2581,19 @@ def render_codex_run_overrides(
         f"Reasoning {effective_effort} / "
         f"Service tier {effective_service_tier}"
     )
+
+    if use_discovered_model_options and not discovered_model_options:
+        st.warning(
+            "Could not generate the model list from Codex App Server. "
+            "Enter a model name manually.",
+            icon="⚠️",
+        )
+    elif not use_discovered_model_options and not discovered_provider_model_options:
+        st.warning(
+            "Could not generate the model list for the selected Model provider. "
+            "The provider may be temporarily unavailable. Enter a model name manually.",
+            icon="⚠️",
+        )
 
     if model_options and use_discovered_model_options:
         displayed_model_options = [""] + model_options

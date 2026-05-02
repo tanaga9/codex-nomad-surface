@@ -49,6 +49,12 @@ class CodexThreadMessages:
     has_older: bool = False
 
 
+@dataclass
+class CodexModelListResult:
+    models: list[dict[str, Any]]
+    error: str = ""
+
+
 class ApprovalRequired(Exception):
     pass
 
@@ -432,15 +438,24 @@ class CodexClient:
             return {}
 
     def list_models(self, include_hidden: bool = False) -> list[dict[str, Any]]:
+        return self.list_models_result(include_hidden).models
+
+    def list_models_result(
+        self, include_hidden: bool = False
+    ) -> CodexModelListResult:
         if not self.base_url.startswith(("ws://", "wss://")):
-            return []
+            return CodexModelListResult(
+                [], "Could not generate the model list."
+            )
         return asyncio.run(self._list_models_ws(include_hidden))
 
-    async def _list_models_ws(self, include_hidden: bool) -> list[dict[str, Any]]:
+    async def _list_models_ws(
+        self, include_hidden: bool
+    ) -> CodexModelListResult:
         try:
             import websockets
         except ModuleNotFoundError:
-            return []
+            return CodexModelListResult([], "The websockets package is not installed.")
 
         try:
             async with self._connect_ws(websockets) as websocket:
@@ -467,9 +482,9 @@ class CodexClient:
                     output,
                     approvals,
                 )
-                return self._parse_models(raw)
-        except Exception:
-            return []
+                return CodexModelListResult(self._parse_models(raw))
+        except Exception as exc:
+            return CodexModelListResult([], str(exc) or exc.__class__.__name__)
 
     def _parse_models(self, raw: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
