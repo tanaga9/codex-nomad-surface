@@ -158,6 +158,27 @@ Codex may optimize the screen structure and UI details during implementation.
   fields, and explanatory rows should be removed when a short inline note
   communicates the same thing more clearly.
 
+### Streamlit Concurrency Policy
+
+Use Streamlit's concurrency-friendly execution model as much as practical, and
+avoid adding true parallelism unless there is a clear compute-bound need.
+
+The long-lived policy is:
+
+- Prefer concurrency for I/O-bound work such as Codex App Server WebSocket RPC,
+  connection checks, history reads, file previews, and short polling.
+- Prefer Streamlit-native mechanisms first: reruns, session state, caching,
+  fragments, placeholders, and containers.
+- Use `asyncio` or short-lived threads only when they make I/O waits more
+  responsive or keep the UI from blocking.
+- Do not call Streamlit UI APIs from background threads. Collect results in the
+  background and render them from the normal Streamlit script run.
+- Avoid multiprocessing, process pools, and CPU-oriented parallel workers in
+  the app path unless a specific compute-bound operation justifies them.
+- If true parallelism becomes necessary, isolate it behind a small module,
+  document why concurrency was insufficient, and keep Streamlit session state
+  and UI rendering out of the parallel worker.
+
 ### App Server Interaction Handling Policy
 
 Codex App Server may send output, approval requests, MCP elicitations, tool

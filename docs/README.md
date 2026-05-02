@@ -39,3 +39,7 @@ This directory is organized by document role rather than by feature chronology.
 
 - [OpenAI Local shell guide](https://platform.openai.com/docs/guides/tools-local-shell)
   - Relevant background for local-agent tooling patterns related to Codex CLI style execution.
+
+- [Streamlit multithreading guide](https://docs.streamlit.io/develop/concepts/design/multithreading)
+  - Reference for Streamlit's threading model and the tradeoff between
+    concurrency for I/O-bound work and multiprocessing for compute-bound work.
