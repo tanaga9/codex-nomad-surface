@@ -1194,6 +1194,13 @@ def render_inline_approval(
                     )
                 handle_turn_result(chat, pending, result)
     else:
+        allow_for_thread = False
+        if approval.get("method") == "item/permissions/requestApproval":
+            allow_for_thread = st.checkbox(
+                "Allow in this thread",
+                key=f"inline-approval-thread-scope-{key}",
+                disabled=in_progress,
+            )
         approve_label = (
             "Approve"
             if approval.get("kind") == "approval_request"
@@ -1207,10 +1214,11 @@ def render_inline_approval(
         ):
             st.session_state.approval_action_in_progress = key
             with st.spinner("Sending response and continuing..."):
+                decision = "approveForThread" if allow_for_thread else "approve"
                 result = client.respond_chat_turn(
                     pending["runtime"],
                     approval,
-                    "approve",
+                    decision,
                     output_callback=update_stream,
                 )
             handle_turn_result(chat, pending, result)

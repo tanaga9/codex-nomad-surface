@@ -61,6 +61,155 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(approval["id"], "approval-1")
         self.assertEqual(approval["kind"], "approval_request")
 
+    def test_permissions_approval_can_be_scoped_to_thread(self) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "permissions": {"network": {"domains": {"example.com": "allow"}}},
+                },
+            }
+        )
+
+        self.assertEqual(
+            self.client._approval_response_result(approval, "approve"),
+            {
+                "permissions": {"network": {"domains": {"example.com": "allow"}}},
+                "scope": "turn",
+            },
+        )
+        self.assertEqual(
+            self.client._approval_response_result(approval, "approveForThread"),
+            {
+                "permissions": {"network": {"domains": {"example.com": "allow"}}},
+                "scope": "thread",
+            },
+        )
+
+    def test_permissions_approval_exposes_dynamic_scope_options(self) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "permissions": {"network": {"domains": {"example.com": "allow"}}},
+                    "availableScopes": [
+                        "turn",
+                        {"value": "thread", "label": "Allow in this thread"},
+                        {"value": "project", "label": "Allow for this project"},
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(
+            approval["options"],
+            [
+                {"label": "Allow once", "decision": "permissionScope:turn"},
+                {
+                    "label": "Allow in this thread",
+                    "decision": "permissionScope:thread",
+                },
+                {
+                    "label": "Allow for this project",
+                    "decision": "permissionScope:project",
+                },
+                {"label": "Decline", "decision": "reject"},
+            ],
+        )
+        self.assertEqual(
+            self.client._approval_response_result(approval, "permissionScope:project"),
+            {
+                "permissions": {"network": {"domains": {"example.com": "allow"}}},
+                "scope": "project",
+            },
+        )
+
+    def test_permissions_approval_uses_explicit_response_options(self) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "options": [
+                        {
+                            "label": "Allow while this app is open",
+                            "response": {
+                                "permissions": {"apps": {"browser": "allow"}},
+                                "scope": "appSession",
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(
+            approval["options"],
+            [
+                {
+                    "label": "Allow while this app is open",
+                    "decision": (
+                        'responseJson:{"permissions":{"apps":{"browser":"allow"}},'
+                        '"scope":"appSession"}'
+                    ),
+                },
+                {"label": "Decline", "decision": "reject"},
+            ],
+        )
+        self.assertEqual(
+            self.client._approval_response_result(
+                approval,
+                'responseJson:{"permissions":{"apps":{"browser":"allow"}},"scope":"appSession"}',
+            ),
+            {"permissions": {"apps": {"browser": "allow"}}, "scope": "appSession"},
+        )
+
+    def test_permissions_approval_does_not_duplicate_explicit_negative_option(
+        self,
+    ) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "options": [
+                        {
+                            "label": "Allow while this app is open",
+                            "response": {
+                                "permissions": {"apps": {"browser": "allow"}},
+                                "scope": "appSession",
+                            },
+                        },
+                        {
+                            "label": "Cancel",
+                            "response": {"permissions": {}, "scope": "turn"},
+                        },
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(len(approval["options"]), 2)
+        self.assertEqual(approval["options"][1]["label"], "Cancel")
+
+    def test_permissions_approval_does_not_infer_scope_from_generic_options(
+        self,
+    ) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "permissions": {"network": {"domains": {"example.com": "allow"}}},
+                    "options": [{"label": "Maybe later", "value": "thread"}],
+                },
+            }
+        )
+
+        self.assertEqual(approval["options"], [])
+
     def test_numeric_zero_request_id_still_needs_user_response(self) -> None:
         message = {
             "id": 0,

@@ -648,7 +648,15 @@ class CodexClient:
         params = (
             approval.get("params") if isinstance(approval.get("params"), dict) else {}
         )
-        approved = decision == "approve"
+        approved = decision in {"approve", "approveForThread"} or decision.startswith(
+            "permissionScope:"
+        )
+        if decision.startswith("responseJson:"):
+            try:
+                response = json.loads(decision.split(":", 1)[1])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {}
+            return response if isinstance(response, dict) else {}
         if method in {
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
@@ -666,7 +674,11 @@ class CodexClient:
                 permissions = (
                     params.get("permissions") if isinstance(params, dict) else {}
                 )
-                return {"permissions": permissions or {}, "scope": "turn"}
+                if decision.startswith("permissionScope:"):
+                    scope = decision.split(":", 1)[1]
+                else:
+                    scope = "thread" if decision == "approveForThread" else "turn"
+                return {"permissions": permissions or {}, "scope": scope}
             return {"permissions": {}, "scope": "turn"}
         if method in {"execCommandApproval", "applyPatchApproval"}:
             return {"decision": "approved" if approved else "denied"}
@@ -765,6 +777,8 @@ class CodexClient:
             "item/fileChange/requestApproval",
         }:
             return self._available_decision_options(params)
+        if method == "item/permissions/requestApproval":
+            return self._permission_request_options(params)
         return []
 
     def _available_decision_options(self, params: dict[str, Any]) -> list[dict[str, str]]:
@@ -799,6 +813,134 @@ class CodexClient:
             }
             return labels.get(str(key), str(key))
         return str(decision or "").strip()
+
+    def _permission_request_options(
+        self, params: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        options = self._explicit_response_options(params)
+        if options:
+            if not self._has_negative_response_option(options):
+                options.append({"label": "Decline", "decision": "reject"})
+            return options
+        return self._scope_response_options(params)
+
+    def _explicit_response_options(
+        self, params: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        candidates = self._first_list_value(
+            params,
+            (
+                "availableResponses",
+                "responseOptions",
+                "availableOptions",
+                "options",
+                "availableChoices",
+                "choices",
+            ),
+        )
+        if not candidates:
+            return []
+
+        options: list[dict[str, str]] = []
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            label = self._option_label(candidate, f"Option {index + 1}")
+            response = self._option_response_payload(candidate)
+            if response is not None:
+                options.append(
+                    {
+                        "label": label,
+                        "decision": f"responseJson:{self._compact_json(response)}",
+                    }
+                )
+        return options
+
+    def _scope_response_options(self, params: dict[str, Any]) -> list[dict[str, str]]:
+        scopes = self._first_list_value(
+            params,
+            (
+                "availableScopes",
+                "scopeOptions",
+                "availablePermissionScopes",
+                "permissionScopes",
+                "scopes",
+            ),
+        )
+        if not scopes:
+            return []
+
+        options: list[dict[str, str]] = []
+        for scope in scopes:
+            value = self._scope_value(scope)
+            if not value:
+                continue
+            options.append(
+                {
+                    "label": self._scope_label(scope, value),
+                    "decision": f"permissionScope:{value}",
+                }
+            )
+        options.append({"label": "Decline", "decision": "reject"})
+        return options
+
+    def _first_list_value(
+        self, mapping: dict[str, Any], keys: tuple[str, ...]
+    ) -> list[Any]:
+        for key in keys:
+            value = mapping.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+
+    def _option_label(self, option: dict[str, Any], fallback: str) -> str:
+        for key in ("label", "title", "name", "description", "value", "scope"):
+            value = option.get(key)
+            if value is not None:
+                text = str(value).strip()
+                if text:
+                    return text
+        return fallback
+
+    def _option_response_payload(self, option: dict[str, Any]) -> Any | None:
+        for key in ("response", "result", "payload", "answer"):
+            value = option.get(key)
+            if isinstance(value, dict):
+                return value
+        return None
+
+    def _option_scope(self, option: dict[str, Any]) -> str:
+        for key in ("scope", "value", "id"):
+            value = option.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _has_negative_response_option(self, options: list[dict[str, str]]) -> bool:
+        negative_words = ("decline", "reject", "deny", "cancel")
+        for option in options:
+            label = str(option.get("label") or "").casefold()
+            decision = str(option.get("decision") or "").casefold()
+            if any(word in label or word in decision for word in negative_words):
+                return True
+        return False
+
+    def _scope_value(self, scope: Any) -> str:
+        if isinstance(scope, str):
+            return scope.strip()
+        if isinstance(scope, dict):
+            return self._option_scope(scope)
+        return ""
+
+    def _scope_label(self, scope: Any, value: str) -> str:
+        if isinstance(scope, dict):
+            return self._option_label(scope, value)
+        labels = {
+            "turn": "Allow once",
+            "thread": "Allow in this thread",
+            "session": "Allow for session",
+        }
+        return labels.get(value, value)
 
     def _compact_json(self, value: Any) -> str:
         try:
