@@ -829,6 +829,13 @@ def codex_output_has_auxiliary(parts: dict[str, Any]) -> bool:
     )
 
 
+def codex_output_is_low_priority_unknown(segment: dict[str, Any]) -> bool:
+    if segment.get("kind") != "other_event":
+        return False
+    text = str(segment.get("text") or "").strip()
+    return text.startswith(("Unrecognized event:", "Unrecognized item:"))
+
+
 def render_codex_output_auxiliary(
     parts: dict[str, Any], expanded_until_final_answer: bool = False
 ) -> None:
@@ -872,6 +879,9 @@ def render_codex_output_auxiliary(
     if unknown_segments:
         with st.expander("Other output", expanded=False):
             for segment in unknown_segments:
+                if codex_output_is_low_priority_unknown(segment):
+                    st.caption(str(segment.get("text") or ""))
+                    continue
                 st.markdown(f"**{segment.get('kind') or 'unknown'}**")
                 st.markdown(str(segment.get("text") or ""))
 
