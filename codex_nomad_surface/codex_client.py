@@ -332,6 +332,16 @@ class CodexClient:
         loop = runtime.get("loop")
         if not loop:
             return {"ok": False, "output": "Approval connection was not found."}
+        if runtime.get("approval_response_in_progress") or loop.is_running():
+            return {
+                "ok": False,
+                "status": "duplicate_approval_response",
+                "output": "Approval response is already being processed.",
+                "runtime": runtime,
+            }
+        if loop.is_closed():
+            return {"ok": False, "output": "Approval connection was already closed."}
+        runtime["approval_response_in_progress"] = True
         try:
             asyncio.set_event_loop(loop)
             runtime["output_callback"] = output_callback
@@ -343,6 +353,7 @@ class CodexClient:
                 loop.close()
             return result
         finally:
+            runtime["approval_response_in_progress"] = False
             asyncio.set_event_loop(None)
 
     def close_chat_turn(self, runtime: dict[str, Any]) -> None:

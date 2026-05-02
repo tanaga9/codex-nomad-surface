@@ -65,6 +65,7 @@ st.set_page_config(
 
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
+UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 LOGO_PATH = Path(__file__).parent / "ui_components" / "assets" / "logo.svg"
 PROMPTFORM_BLOCK_PATTERN = re.compile(
@@ -89,11 +90,14 @@ def init_state() -> None:
     st.session_state.setdefault("thread_history_cursors", {})
     st.session_state.setdefault("thread_history_has_older", {})
     st.session_state.setdefault("approval_action_in_progress", "")
+    st.session_state.setdefault("approval_action_queued", None)
     st.session_state.setdefault("app_server_launch_in_progress", False)
     st.session_state.setdefault("app_server_launch_failure_returncode", None)
     st.session_state.setdefault("managed_app_server_process", None)
     st.session_state.setdefault("chat_history_autoscroll", False)
     st.session_state.setdefault("codex_run_controls_by_chat", {})
+    st.session_state.setdefault("ui_test_chat", None)
+    st.session_state.setdefault("ui_test_pending", None)
 
 
 def settings_state() -> AppSettings:
@@ -280,6 +284,14 @@ def selected_project_key() -> str:
 
 def set_selected_project_key(value: str) -> None:
     st.session_state.selected_project_key = value
+
+
+def test_mode_enabled() -> bool:
+    return str(st.query_params.get("test") or "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def auth_screen() -> None:
@@ -1133,7 +1145,10 @@ def render_pending_turn(
 
 
 def render_inline_approval(
-    client: CodexClient, chat: ChatSession, pending: dict
+    client: CodexClient,
+    chat: ChatSession,
+    pending: dict,
+    pending_state_key: str = "pending_turn",
 ) -> None:
     output_placeholder = st.empty()
 
@@ -1152,7 +1167,10 @@ def render_inline_approval(
 
     approval = pending["approval"]
     key = approval_key(approval)
-    in_progress = st.session_state.approval_action_in_progress == key
+    queued_action = st.session_state.approval_action_queued
+    in_progress = st.session_state.approval_action_in_progress == key or (
+        isinstance(queued_action, dict) and queued_action.get("key") == key
+    )
     title = (
         approval.get("title")
         or approval.get("command")
@@ -1167,7 +1185,14 @@ def render_inline_approval(
         approval.get("questions"), list
     ) and not response_options:
         if render_tool_user_input_request(
-            client, chat, pending, approval, key, in_progress, update_stream
+            client,
+            chat,
+            pending,
+            approval,
+            key,
+            in_progress,
+            update_stream,
+            pending_state_key,
         ):
             return
 
@@ -1179,20 +1204,13 @@ def render_inline_approval(
             decision = str(option.get("decision") or f"option:{index}")
             if not label:
                 continue
-            if st.button(
+            st.button(
                 label,
                 key=f"inline-option-{key}-{index}",
                 disabled=in_progress,
-            ):
-                st.session_state.approval_action_in_progress = key
-                with st.spinner("Sending response and continuing..."):
-                    result = client.respond_chat_turn(
-                        pending["runtime"],
-                        approval,
-                        decision,
-                        output_callback=update_stream,
-                    )
-                handle_turn_result(chat, pending, result)
+                on_click=queue_approval_action,
+                args=(key, decision),
+            )
     else:
         allow_for_thread = False
         if approval.get("method") == "item/permissions/requestApproval":
@@ -1209,31 +1227,103 @@ def render_inline_approval(
         reject_label = (
             "Reject" if approval.get("kind") == "approval_request" else "Decline"
         )
-        if st.button(
-            approve_label, key=f"inline-approve-{key}", disabled=in_progress
-        ):
-            st.session_state.approval_action_in_progress = key
-            with st.spinner("Sending response and continuing..."):
-                decision = "approveForThread" if allow_for_thread else "approve"
-                result = client.respond_chat_turn(
-                    pending["runtime"],
-                    approval,
-                    decision,
-                    output_callback=update_stream,
-                )
-            handle_turn_result(chat, pending, result)
-        if st.button(
-            reject_label, key=f"inline-reject-{key}", disabled=in_progress
-        ):
-            st.session_state.approval_action_in_progress = key
-            with st.spinner("Sending response and continuing..."):
-                result = client.respond_chat_turn(
-                    pending["runtime"],
-                    approval,
-                    "reject",
-                    output_callback=update_stream,
-                )
-            handle_turn_result(chat, pending, result)
+        approve_decision = "approveForThread" if allow_for_thread else "approve"
+        st.button(
+            approve_label,
+            key=f"inline-approve-{key}",
+            disabled=in_progress,
+            on_click=queue_approval_action,
+            args=(key, approve_decision),
+        )
+        st.button(
+            reject_label,
+            key=f"inline-reject-{key}",
+            disabled=in_progress,
+            on_click=queue_approval_action,
+            args=(key, "reject"),
+        )
+
+    process_queued_approval_action(
+        client, chat, pending, approval, key, update_stream, pending_state_key
+    )
+
+
+def queue_approval_action(key: str, decision: str) -> None:
+    queued_action = st.session_state.get("approval_action_queued")
+    if st.session_state.get("approval_action_in_progress") == key or (
+        isinstance(queued_action, dict) and queued_action.get("key") == key
+    ):
+        return
+    st.session_state.approval_action_in_progress = key
+    st.session_state.approval_action_queued = {"key": key, "decision": decision}
+
+
+def process_queued_approval_action(
+    client: CodexClient,
+    chat: ChatSession,
+    pending: dict,
+    approval: dict,
+    key: str,
+    update_stream: Any,
+    pending_state_key: str = "pending_turn",
+) -> None:
+    queued_action = st.session_state.get("approval_action_queued")
+    if not isinstance(queued_action, dict) or queued_action.get("key") != key:
+        return
+    decision = str(queued_action.get("decision") or "")
+    if not decision:
+        st.session_state.approval_action_queued = None
+        return
+    st.session_state.approval_action_queued = None
+    if pending.get("ui_test"):
+        with st.spinner("Sending response and continuing..."):
+            time.sleep(UI_TEST_DELAY_SECONDS)
+            result = ui_test_result(pending, approval, decision)
+        handle_turn_result(chat, pending, result, pending_state_key)
+        return
+    with st.spinner("Sending response and continuing..."):
+        result = client.respond_chat_turn(
+            pending["runtime"],
+            approval,
+            decision,
+            output_callback=update_stream,
+        )
+    if result.get("status") == "duplicate_approval_response":
+        return
+    handle_turn_result(chat, pending, result, pending_state_key)
+
+
+def ui_test_result(pending: dict, approval: dict, decision: str) -> dict[str, Any]:
+    test_label = str(pending.get("ui_test_label") or "UI test")
+    response = ui_test_response_label(decision)
+    output_parts = normalize_codex_output_parts(
+        {
+            "output": (
+                f"{test_label} completed.\n\n"
+                f"- Response: {response}\n"
+                f"- Request id: {approval.get('id')}\n"
+                "- Controls should be disabled while the response is pending."
+            )
+        }
+    )
+    return {
+        "ok": True,
+        "thread_id": pending.get("thread_id"),
+        "output": output_parts["output"],
+        "output_parts": output_parts,
+    }
+
+
+def ui_test_response_label(decision: str) -> str:
+    if decision.startswith("answersJson:"):
+        return decision.removeprefix("answersJson:")
+    if decision.startswith("permissionScope:"):
+        return decision.removeprefix("permissionScope:")
+    if decision in {"approve", "approveForThread"}:
+        return "approved"
+    if decision in {"reject", "decline"}:
+        return "rejected"
+    return decision
 
 
 def render_tool_user_input_request(
@@ -1244,6 +1334,7 @@ def render_tool_user_input_request(
     key: str,
     in_progress: bool,
     update_stream: Any,
+    pending_state_key: str = "pending_turn",
 ) -> bool:
     questions = [
         question for question in approval.get("questions", []) if isinstance(question, dict)
@@ -1293,7 +1384,19 @@ def render_tool_user_input_request(
     if not submitted:
         return True
 
+    if st.session_state.get("approval_action_in_progress") == key:
+        return True
     st.session_state.approval_action_in_progress = key
+    if pending.get("ui_test"):
+        with st.spinner("Sending response and continuing..."):
+            time.sleep(UI_TEST_DELAY_SECONDS)
+            result = ui_test_result(
+                pending,
+                approval,
+                f"answersJson:{compact_json(answers)}",
+            )
+        handle_turn_result(chat, pending, result, pending_state_key)
+        return True
     with st.spinner("Sending response and continuing..."):
         result = client.respond_chat_turn(
             pending["runtime"],
@@ -1301,11 +1404,18 @@ def render_tool_user_input_request(
             f"answersJson:{compact_json(answers)}",
             output_callback=update_stream,
         )
-    handle_turn_result(chat, pending, result)
+    if result.get("status") == "duplicate_approval_response":
+        return True
+    handle_turn_result(chat, pending, result, pending_state_key)
     return True
 
 
-def handle_turn_result(chat: ChatSession, pending: dict, result: dict) -> None:
+def handle_turn_result(
+    chat: ChatSession,
+    pending: dict,
+    result: dict,
+    pending_state_key: str = "pending_turn",
+) -> None:
     if result.get("thread_id"):
         chat.thread_id = result["thread_id"]
 
@@ -1317,6 +1427,7 @@ def handle_turn_result(chat: ChatSession, pending: dict, result: dict) -> None:
         )
         pending["output"] = pending["output_parts"]["output"]
         st.session_state.approval_action_in_progress = ""
+        st.session_state.approval_action_queued = None
         st.session_state.chat_history_autoscroll = True
         st.rerun()
 
@@ -1330,8 +1441,9 @@ def handle_turn_result(chat: ChatSession, pending: dict, result: dict) -> None:
         response_text = "The response was empty."
         metadata = {}
     chat.add_message("assistant", response_text, metadata=metadata)
-    st.session_state.pending_turn = None
+    st.session_state[pending_state_key] = None
     st.session_state.approval_action_in_progress = ""
+    st.session_state.approval_action_queued = None
     st.session_state.chat_history_autoscroll = True
     st.rerun()
 
@@ -1349,6 +1461,7 @@ def cancel_pending_turn_if_needed(
         client.close_chat_turn(runtime)
     st.session_state.pending_turn = None
     st.session_state.approval_action_in_progress = ""
+    st.session_state.approval_action_queued = None
 
 
 def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) -> None:
@@ -1376,6 +1489,103 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
     }
     st.session_state.chat_history_autoscroll = True
     st.rerun()
+
+
+UI_TEST_CASES = {
+    "approval": {
+        "label": "Approval",
+        "description": "Basic Approve and Reject buttons.",
+    },
+    "approval_options": {
+        "label": "Approval options",
+        "description": "Explicit response choices from an approval request.",
+    },
+    "user_input": {
+        "label": "User input",
+        "description": "A multi-question response form with radio and text fields.",
+    },
+    "generic_response": {
+        "label": "Generic response",
+        "description": "Fallback affirmative and declining response controls.",
+    },
+}
+
+
+def queue_ui_test_turn(chat: ChatSession, test_id: str) -> None:
+    if st.session_state.get("ui_test_pending"):
+        return
+    if test_id not in UI_TEST_CASES:
+        test_id = "approval"
+    test_label = str(UI_TEST_CASES[test_id]["label"])
+    text = f"UI test: {test_label}"
+    chat.add_message("user", text)
+    approval = ui_test_approval(test_id)
+    st.session_state.ui_test_pending = {
+        "chat_id": chat.id,
+        "text": text,
+        "ui_test": True,
+        "ui_test_id": test_id,
+        "ui_test_label": test_label,
+        "approval": approval,
+        "output_parts": normalize_codex_output_parts(
+            {"output": f"{test_label} is waiting for a response."}
+        ),
+        "output": f"{test_label} is waiting for a response.",
+    }
+    st.session_state.chat_history_autoscroll = True
+    st.rerun()
+
+
+def ui_test_approval(test_id: str) -> dict[str, Any]:
+    request_id = f"ui-test-{test_id}-{uuid.uuid4()}"
+    if test_id == "approval_options":
+        return {
+            "id": request_id,
+            "kind": "approval_request",
+            "title": "Approval options",
+            "detail": "Choose one of the explicit approval responses.",
+            "options": [
+                {"label": "Allow once", "decision": "approve"},
+                {"label": "Allow in this thread", "decision": "approveForThread"},
+                {"label": "Decline", "decision": "reject"},
+            ],
+        }
+    if test_id == "user_input":
+        return {
+            "id": request_id,
+            "kind": "tool_user_input_request",
+            "title": "User input",
+            "detail": "Answer the test questions and send the response.",
+            "questions": [
+                {
+                    "id": "choice",
+                    "question": "Which response path should this test simulate?",
+                    "options": ["Accept", "Decline", "Custom"],
+                    "isOther": True,
+                },
+                {
+                    "id": "note",
+                    "question": "Optional note",
+                    "options": [],
+                },
+            ],
+        }
+    if test_id == "generic_response":
+        return {
+            "id": request_id,
+            "kind": "generic_user_response_request",
+            "title": "Generic response",
+            "detail": "This exercises the fallback affirmative and decline controls.",
+        }
+    return {
+        "id": request_id,
+        "kind": "approval_request",
+        "title": "Approval",
+        "detail": (
+            "Press Approve twice quickly and confirm the button becomes disabled "
+            "while the response is pending."
+        ),
+    }
 
 
 def load_available_promptform_defs(project_path: str = "") -> list[PromptFormDef]:
@@ -1915,6 +2125,112 @@ def sidebar_skill_actions(project: Project | None, chat: ChatSession | None) -> 
         st.rerun()
 
 
+def add_ui_test_launcher_message() -> None:
+    if st.session_state.get("ui_test_pending"):
+        return
+    target_chat = ChatSession.new("UI Test")
+    target_chat.add_message(
+        "ui_test_launcher",
+        "",
+        {
+            "launcher_id": str(uuid.uuid4()),
+            "selected_test_id": "approval",
+        },
+    )
+    st.session_state.ui_test_chat = target_chat
+    st.session_state.approval_action_in_progress = ""
+    st.session_state.approval_action_queued = None
+    st.session_state.chat_history_autoscroll = True
+    st.rerun()
+
+
+def sidebar_ui_test_action() -> None:
+    if not test_mode_enabled():
+        return
+    disabled = bool(st.session_state.get("ui_test_pending"))
+    st.divider()
+    st.caption("UI tests.")
+    if st.button(
+        "Start Test",
+        key="start_ui_test",
+        disabled=disabled,
+        use_container_width=True,
+    ):
+        add_ui_test_launcher_message()
+
+
+def ui_test_chat_state() -> ChatSession:
+    chat = st.session_state.get("ui_test_chat")
+    if isinstance(chat, ChatSession):
+        return chat
+    chat = ChatSession.new("UI Test")
+    st.session_state.ui_test_chat = chat
+    return chat
+
+
+def ui_test_sidebar(settings: AppSettings) -> None:
+    with st.sidebar:
+        render_sidebar_home_title()
+        if st.button("Settings", key="open_settings_dialog"):
+            settings_dialog(settings)
+        sidebar_ui_test_action()
+
+
+def render_ui_test_workspace(settings: AppSettings) -> None:
+    chat = ui_test_chat_state()
+    pending = st.session_state.get("ui_test_pending")
+    skip_latest_user = (
+        isinstance(pending, dict)
+        and pending.get("ui_test")
+        and pending.get("chat_id") == chat.id
+    )
+    messages = (
+        chat.messages[:-1]
+        if skip_latest_user and chat.messages and chat.messages[-1].role == "user"
+        else chat.messages
+    )
+
+    with st.container(
+        height="stretch",
+        autoscroll=bool(st.session_state.chat_history_autoscroll),
+        key="ui-test-panel",
+    ):
+        if not messages and not skip_latest_user:
+            st.caption("Use Start Test to open the UI Test Launcher.")
+        for index, message in enumerate(messages):
+            if message.role == "ui_test_launcher":
+                launcher_id = str(
+                    message.metadata.get("launcher_id") or f"{chat.id}-{index}"
+                )
+                with st.chat_message("ui-test", avatar=":material/science:"):
+                    render_ui_test_launcher_message(
+                        chat,
+                        message,
+                        message_key=f"{chat.id}-{launcher_id}",
+                        disabled=bool(st.session_state.get("ui_test_pending")),
+                    )
+                continue
+            with st.chat_message(message.role):
+                st.markdown(message.content)
+
+        if skip_latest_user and isinstance(pending, dict):
+            client = CodexClient(settings.app_server_url)
+            with st.chat_message("user"):
+                st.markdown(str(pending.get("text") or ""))
+            with st.chat_message("assistant"):
+                render_inline_approval(
+                    client, chat, pending, pending_state_key="ui_test_pending"
+                )
+
+    if st.session_state.chat_history_autoscroll:
+        st.session_state.chat_history_autoscroll = False
+
+
+def ui_test_screen(settings: AppSettings) -> None:
+    ui_test_sidebar(settings)
+    render_ui_test_workspace(settings)
+
+
 def render_promptform_picker_message(
     message: ChatMessage, defs: list[PromptFormDef], message_key: str
 ) -> None:
@@ -1990,6 +2306,36 @@ def render_skill_picker_message(
         }
         st.rerun()
     append_pending_skill_to_chat_input(message_key)
+
+
+def render_ui_test_launcher_message(
+    chat: ChatSession,
+    message: ChatMessage,
+    message_key: str,
+    disabled: bool = False,
+) -> None:
+    st.markdown("**UI Test Launcher**")
+    test_ids = list(UI_TEST_CASES)
+    selected_test_id = str(message.metadata.get("selected_test_id") or "approval")
+    if selected_test_id not in UI_TEST_CASES:
+        selected_test_id = "approval"
+    selected_index = test_ids.index(selected_test_id)
+    selected_test_id = st.selectbox(
+        "Test",
+        test_ids,
+        index=selected_index,
+        key=f"ui_test_launcher_{message_key}",
+        disabled=disabled,
+        format_func=lambda item_id: str(UI_TEST_CASES[item_id]["label"]),
+    )
+    message.metadata["selected_test_id"] = selected_test_id
+    st.caption(str(UI_TEST_CASES[selected_test_id]["description"]))
+    if st.button(
+        "Run Test",
+        key=f"run_ui_test_{message_key}",
+        disabled=disabled,
+    ):
+        queue_ui_test_turn(chat, selected_test_id)
 
 
 def append_pending_skill_to_chat_input(message_key: str) -> None:
@@ -2368,6 +2714,10 @@ def settings_screen(settings: AppSettings, heading: bool = True) -> None:
 
 def main_screen() -> None:
     settings = settings_state()
+    if test_mode_enabled():
+        ui_test_screen(settings)
+        return
+
     client = CodexClient(settings.app_server_url)
     status = client.status()
 

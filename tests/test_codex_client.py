@@ -48,6 +48,24 @@ class CodexClientApprovalTests(unittest.TestCase):
         snapshot = parts.to_snapshot()
         self.assertEqual(snapshot["approval_request"], "An operation requires approval")
 
+    def test_duplicate_approval_response_is_ignored_before_event_loop_reentry(
+        self,
+    ) -> None:
+        loop = type(
+            "FakeLoop",
+            (),
+            {"is_running": lambda self: False, "is_closed": lambda self: False},
+        )()
+        runtime = {"loop": loop, "approval_response_in_progress": True}
+
+        result = self.client.respond_chat_turn(
+            runtime,
+            {"id": "approval-1"},
+            "approve",
+        )
+
+        self.assertEqual(result["status"], "duplicate_approval_response")
+
     def test_approval_request_without_top_level_id_still_needs_user_response(
         self,
     ) -> None:
