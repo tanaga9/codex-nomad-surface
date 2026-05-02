@@ -6,6 +6,7 @@ When working in this repository, preserve these user preferences unless the user
 - Follow `SPEC.md` for product design constraints.
 - Keep documentation concise and avoid overfitting it to recent events.
 - Use generic placeholder paths in documentation, such as `/path/to/...`, instead of real local usernames or machine-specific paths when the path is only illustrative.
+- Once per session, read `docs/README.md` before the first development command so local environment and testing notes are not missed.
 - Prefer current Codex App Server APIs directly. Do not add fallback or legacy fallback behavior for cases the current App Server API does not support unless the user explicitly asks for it. If a fallback seems worth recommending, explain the tradeoff and ask the user before implementing it. Maintain `docs/app-server-api-exceptions.md` when local state, external APIs, or indirect mechanisms are used instead of current Codex App Server APIs.
 
 

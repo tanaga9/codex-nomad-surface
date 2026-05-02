@@ -15,6 +15,10 @@ This directory is organized by document role rather than by feature chronology.
     external APIs, or indirect mechanisms instead of current Codex App Server
     APIs.
 
+- [development.md](development.md)
+  - Local development notes, including repo-local `.env` usage, Streamlit
+    launch tips, test commands, and UI Test mode.
+
 ## Protocols
 
 - [protocols/promptform.md](protocols/promptform.md)
