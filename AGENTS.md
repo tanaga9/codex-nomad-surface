@@ -9,6 +9,16 @@ When working in this repository, preserve these user preferences unless the user
 - Once per session, read `docs/README.md` before the first development command so local environment and testing notes are not missed.
 - Prefer current Codex App Server APIs directly. Do not add fallback or legacy fallback behavior for cases the current App Server API does not support unless the user explicitly asks for it. If a fallback seems worth recommending, explain the tradeoff and ask the user before implementing it. Maintain `docs/app-server-api-exceptions.md` when local state, external APIs, or indirect mechanisms are used instead of current Codex App Server APIs.
 
+## Git Diff Workflow
+
+The user reviews AI-generated edits before staging them. In this repository,
+staged changes are user-reviewed candidate changes, while unstaged changes are
+in-progress agent edits.
+
+Use `git diff --cached` for staged-review or commit-message requests. Use
+`git diff` for current unstaged edits. If both exist, clearly distinguish them.
+Do not stage, unstage, revert, or commit unless explicitly asked.
+
 
 # Embedded Response Forms
 
