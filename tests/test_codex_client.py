@@ -1,3 +1,5 @@
+import asyncio
+import json
 import unittest
 
 from codex_nomad_surface.codex_client import CodexClient, CodexTurnOutput
@@ -609,6 +611,32 @@ class CodexClientApprovalTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertEqual(parts.segments, [])
+
+    def test_send_turn_steer_uses_active_turn_rpc_shape(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+
+        websocket = FakeWebSocket()
+        runtime = {
+            "websocket": websocket,
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "control_request_ids": set(),
+        }
+
+        result = asyncio.run(self.client._send_turn_steer_ws(runtime, "Adjust course."))
+
+        self.assertTrue(result["ok"])
+        payload = json.loads(websocket.sent[0])
+        self.assertEqual(payload["method"], "turn/steer")
+        self.assertEqual(payload["params"]["threadId"], "thread-1")
+        self.assertEqual(payload["params"]["expectedTurnId"], "turn-1")
+        self.assertEqual(payload["params"]["input"][0]["text"], "Adjust course.")
+        self.assertIn(payload["id"], runtime["control_request_ids"])
 
 
 if __name__ == "__main__":

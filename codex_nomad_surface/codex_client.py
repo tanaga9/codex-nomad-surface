@@ -298,6 +298,7 @@ class CodexClient:
         turn_overrides: dict[str, Any] | None = None,
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
+        runtime_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         if not self.base_url.startswith(("ws://", "wss://")):
             return {
@@ -316,6 +317,7 @@ class CodexClient:
                     turn_overrides,
                     approval_policy,
                     output_callback,
+                    runtime_callback,
                 )
             )
             runtime = result.get("runtime")
@@ -325,6 +327,22 @@ class CodexClient:
                 loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.close()
             return result
+        finally:
+            asyncio.set_event_loop(None)
+
+    def steer_chat_turn(self, runtime: dict[str, Any], prompt: str) -> dict[str, Any]:
+        loop = runtime.get("loop")
+        if not loop:
+            return {"ok": False, "output": "Active turn connection was not found."}
+        if loop.is_closed():
+            return {"ok": False, "output": "Active turn connection was already closed."}
+        coroutine = self._send_turn_steer_ws(runtime, prompt)
+        if loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            return future.result(timeout=max(self.timeout, 30.0))
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coroutine)
         finally:
             asyncio.set_event_loop(None)
 
@@ -367,6 +385,14 @@ class CodexClient:
         if not loop:
             return
         try:
+            if loop.is_closed():
+                return
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._close_chat_turn_ws(runtime), loop
+                )
+                future.result(timeout=max(self.timeout, 30.0))
+                return
             asyncio.set_event_loop(loop)
             loop.run_until_complete(self._close_chat_turn_ws(runtime))
             loop.run_until_complete(loop.shutdown_asyncgens())
@@ -992,6 +1018,7 @@ class CodexClient:
         turn_overrides: dict[str, Any] | None = None,
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
+        runtime_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1009,7 +1036,9 @@ class CodexClient:
             "approvals": approvals,
             "thread_id": thread_id,
             "output_callback": output_callback,
+            "control_request_ids": set(),
         }
+        runtime["loop"] = asyncio.get_running_loop()
         thread_overrides = thread_overrides or {}
         turn_overrides = turn_overrides or {}
         try:
@@ -1095,7 +1124,7 @@ class CodexClient:
                 }
                 if approval_policy:
                     turn_params["approvalPolicy"] = approval_policy
-                await self._rpc_call(
+                turn_result = await self._rpc_call(
                     websocket,
                     "turn/start",
                     turn_params | turn_overrides,
@@ -1105,6 +1134,18 @@ class CodexClient:
                     handle_approval_message,
                     runtime["stream_items"],
                 )
+                turn = turn_result.get("turn") if isinstance(turn_result, dict) else {}
+                if isinstance(turn, dict) and turn.get("id"):
+                    runtime["turn_id"] = turn["id"]
+                if runtime_callback:
+                    runtime_callback(runtime)
+                if runtime.get("cancel_requested"):
+                    await self._close_chat_turn_ws(runtime)
+                    return {
+                        "ok": False,
+                        "thread_id": thread_id,
+                        "output": "Codex turn was cancelled before it became active in the UI.",
+                    }
                 return await self._collect_chat_turn_ws(runtime)
             except ApprovalRequired:
                 return self._approval_result(runtime)
@@ -1159,6 +1200,38 @@ class CodexClient:
                 "approvals": runtime.get("approvals") or [],
             }
 
+    async def _send_turn_steer_ws(
+        self, runtime: dict[str, Any], prompt: str
+    ) -> dict[str, Any]:
+        websocket = runtime.get("websocket")
+        thread_id = runtime.get("thread_id")
+        turn_id = runtime.get("turn_id")
+        if not websocket or not thread_id or not turn_id:
+            return {"ok": False, "output": "Active turn state was not found."}
+        request_id = str(uuid.uuid4())
+        runtime.setdefault("control_request_ids", set()).add(request_id)
+        await websocket.send(
+            json.dumps(
+                {
+                    "id": request_id,
+                    "method": "turn/steer",
+                    "params": {
+                        "threadId": thread_id,
+                        "input": [
+                            {
+                                "type": "text",
+                                "text": prompt,
+                                "text_elements": [],
+                            }
+                        ],
+                        "expectedTurnId": turn_id,
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
+
     async def _collect_chat_turn_ws(self, runtime: dict[str, Any]) -> dict[str, Any]:
         websocket = runtime["websocket"]
         thread_id = runtime.get("thread_id")
@@ -1182,6 +1255,17 @@ class CodexClient:
 
             last_activity = loop.time()
             message = json.loads(raw_message)
+            if message.get("id") in runtime.get("control_request_ids", set()):
+                runtime["control_request_ids"].discard(message.get("id"))
+                if "error" in message:
+                    output_parts.append_block(
+                        "error",
+                        message["error"].get("message")
+                        or json.dumps(message["error"], ensure_ascii=False),
+                    )
+                    if output_callback:
+                        output_callback(self._output_parts_snapshot(output_parts))
+                continue
             method = message.get("method")
             params = message.get("params") or {}
             if self._is_user_response_request_message(message):

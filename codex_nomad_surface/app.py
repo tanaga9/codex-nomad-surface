@@ -3,10 +3,12 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import textwrap
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -49,6 +51,15 @@ from codex_nomad_surface.skill_defs import (
     SkillDef,
     skill_def_by_id,
     skill_defs_from_app_server,
+)
+from codex_nomad_surface.turn_run import (
+    TURN_RUN_AWAITING_APPROVAL,
+    TURN_RUN_COMPLETED,
+    TURN_RUN_FAILED,
+    TURN_RUN_RESPONDING_APPROVAL,
+    TURN_RUN_RUNNING,
+    TURN_RUN_STARTING,
+    turn_run_can_start_worker,
 )
 from codex_nomad_surface.ui_components import (
     inject_compact_chat_input_style,
@@ -117,6 +128,9 @@ def init_state() -> None:
     st.session_state.setdefault("managed_app_server_process", None)
     st.session_state.setdefault("chat_history_autoscroll", False)
     st.session_state.setdefault("codex_run_controls_by_chat", {})
+    st.session_state.setdefault("pending_interrupt_draft", None)
+    st.session_state.setdefault("pending_chat_input_restore", None)
+    st.session_state.setdefault("turn_worker_registry", {})
     st.session_state.setdefault("ui_test_chat", None)
     st.session_state.setdefault("ui_test_pending", None)
 
@@ -1013,6 +1027,8 @@ def render_chat(
             content = message.content
             embedded_forms: list[dict] = []
             embedded_form_errors: list[str] = []
+            if message.metadata.get("kind") == "turn_steer":
+                st.caption("turn/steer")
             if message.role == "assistant":
                 output_parts = normalize_codex_output_parts(
                     message.metadata.get("codex_output"), content
@@ -1136,6 +1152,7 @@ def extract_promptforms(content: str) -> tuple[str, list[dict], list[str]]:
     return stripped, forms, errors
 
 
+@st.fragment(run_every=1)
 def chat_history_panel(
     client: CodexClient, project: Project | None, chat: ChatSession | None
 ) -> None:
@@ -1162,37 +1179,189 @@ def render_pending_turn(
     pending = st.session_state.get("pending_turn")
     if not pending or pending.get("chat_id") != chat.id:
         return
+    drain_pending_turn_events(pending)
 
     with st.chat_message("user"):
         st.markdown(pending["text"])
     with st.chat_message("assistant"):
-        result = None
-        if not pending.get("runtime") and not pending.get("approval"):
-            output_placeholder = st.empty()
-
-            def update_stream(output_parts: dict[str, Any]) -> None:
-                pending["output_parts"] = normalize_codex_output_parts(output_parts)
-                pending["output"] = pending["output_parts"]["output"]
-                with output_placeholder.container():
-                    render_codex_stream_output(pending["output_parts"])
-
-            with st.spinner("Sending to Codex..."):
-                result = client.start_chat_turn(
-                    project.path,
-                    pending["text"],
-                    chat.thread_id,
-                    thread_overrides=pending.get("thread_overrides"),
-                    turn_overrides=pending.get("turn_overrides"),
-                    approval_policy=pending.get("approval_policy"),
-                    output_callback=update_stream,
-                )
-        elif pending.get("approval"):
+        if pending.get("approval"):
             render_inline_approval(client, chat, pending)
             return
+        if pending.get("output_parts"):
+            render_codex_stream_output(pending["output_parts"])
+        elif pending.get("worker_id"):
+            with st.spinner("Sending to Codex..."):
+                st.caption(f"Codex turn is {pending.get('status') or 'running'}.")
+        result = pending.pop("result", None)
 
         if result:
             handle_turn_result(chat, pending, result)
             return
+    render_pending_interrupt_draft(client, chat, pending)
+
+
+def start_turn_run_worker(
+    client: CodexClient, project: Project, chat: ChatSession, pending: dict
+) -> None:
+    if not turn_run_can_start_worker(pending):
+        return
+    if not pending.get("run_id"):
+        pending["run_id"] = str(uuid.uuid4())
+    worker_id = str(pending.get("worker_id") or "")
+    registry = st.session_state.setdefault("turn_worker_registry", {})
+    worker = registry.get(worker_id) if worker_id else None
+    if isinstance(worker, threading.Thread) and worker.is_alive():
+        return
+    if pending.get("result") or pending.get("approval"):
+        return
+    if worker_id:
+        registry.pop(worker_id, None)
+        if pending.get("worker_queue"):
+            pending["result"] = {
+                "ok": False,
+                "output": "Codex turn worker stopped before returning a result.",
+            }
+            return
+
+    event_queue: queue.Queue = queue.Queue()
+    cancel_event = threading.Event()
+    worker_id = str(uuid.uuid4())
+    pending["worker_id"] = worker_id
+    pending["worker_queue"] = event_queue
+    pending["worker_cancel_event"] = cancel_event
+    pending["worker_started_at"] = time.time()
+    pending["status"] = TURN_RUN_RUNNING
+
+    def output_callback(output_parts: dict[str, Any]) -> None:
+        event_queue.put({"type": "output", "output_parts": output_parts})
+
+    def runtime_callback(runtime: dict[str, Any]) -> None:
+        if cancel_event.is_set():
+            runtime["cancel_requested"] = True
+        event_queue.put({"type": "runtime", "runtime": runtime})
+
+    def run_turn() -> None:
+        try:
+            result = client.start_chat_turn(
+                project.path,
+                pending["text"],
+                chat.thread_id,
+                thread_overrides=pending.get("thread_overrides"),
+                turn_overrides=pending.get("turn_overrides"),
+                approval_policy=pending.get("approval_policy"),
+                output_callback=output_callback,
+                runtime_callback=runtime_callback,
+            )
+        except Exception as exc:
+            result = {"ok": False, "output": f"[send/receive error] {exc}"}
+        event_queue.put({"type": "result", "result": result})
+
+    worker = threading.Thread(
+        target=run_turn,
+        name=f"codex-turn-{pending['run_id'][:8]}-{worker_id[:8]}",
+        daemon=True,
+    )
+    registry[worker_id] = worker
+    worker.start()
+
+
+def drain_pending_turn_events(pending: dict) -> None:
+    if pending.get("approval"):
+        return
+    event_queue = pending.get("worker_queue")
+    if not event_queue:
+        return
+    while True:
+        try:
+            event = event_queue.get_nowait()
+        except queue.Empty:
+            return
+        event_type = event.get("type")
+        if event_type == "output":
+            update_pending_output(pending, event.get("output_parts"))
+        elif event_type == "runtime":
+            runtime = event.get("runtime")
+            pending["runtime"] = runtime
+            if isinstance(runtime, dict):
+                pending["thread_id"] = runtime.get("thread_id")
+                pending["turn_id"] = runtime.get("turn_id")
+            if pending.get("status") == TURN_RUN_STARTING:
+                pending["status"] = TURN_RUN_RUNNING
+        elif event_type == "result":
+            pending["result"] = event.get("result")
+
+
+def cleanup_pending_turn_worker(pending: dict) -> None:
+    cancel_event = pending.get("worker_cancel_event")
+    if isinstance(cancel_event, threading.Event):
+        cancel_event.set()
+    worker_id = str(pending.get("worker_id") or "")
+    if worker_id:
+        st.session_state.setdefault("turn_worker_registry", {}).pop(worker_id, None)
+    pending.pop("worker_id", None)
+    pending.pop("worker_queue", None)
+    pending.pop("worker_cancel_event", None)
+    pending.pop("worker_started_at", None)
+
+
+def update_pending_output(pending: dict, output_parts: dict[str, Any]) -> None:
+    pending["output_parts"] = normalize_codex_output_parts(output_parts)
+    pending["output"] = pending["output_parts"]["output"]
+
+
+def render_pending_interrupt_draft(
+    client: CodexClient, chat: ChatSession, pending: dict
+) -> None:
+    draft = st.session_state.get("pending_interrupt_draft")
+    if not draft or draft.get("chat_id") != chat.id:
+        return
+    text = str(draft.get("text") or "").strip()
+    if not text:
+        st.session_state.pending_interrupt_draft = None
+        return
+
+    st.markdown("**Use this input as:**")
+    st.markdown(text)
+    col_steer, col_restore = st.columns(2)
+    runtime_ready = bool(pending.get("runtime") and pending["runtime"].get("turn_id"))
+    with col_steer:
+        if st.button(
+            "turn/steer",
+            key=f"pending-draft-steer-{chat.id}",
+            disabled=not runtime_ready,
+            use_container_width=True,
+        ):
+            result = client.steer_chat_turn(pending["runtime"], text)
+            if result.get("ok"):
+                pending.setdefault("steered_inputs", []).append(text)
+                chat.add_message(
+                    "user",
+                    text,
+                    metadata={
+                        "kind": "turn_steer",
+                        "thread_id": pending["runtime"].get("thread_id"),
+                        "turn_id": pending["runtime"].get("turn_id"),
+                    },
+                )
+                st.session_state.pending_interrupt_draft = None
+                st.session_state.chat_history_autoscroll = True
+                st.rerun()
+            else:
+                st.error(result.get("output") or "turn/steer failed.")
+    with col_restore:
+        if st.button(
+            "Return to input",
+            key=f"pending-draft-restore-{chat.id}",
+            use_container_width=True,
+        ):
+            st.session_state.pending_chat_input_restore = {
+                "chat_id": chat.id,
+                "text": text,
+                "nonce": str(uuid.uuid4()),
+            }
+            st.session_state.pending_interrupt_draft = None
+            st.session_state.chat_history_autoscroll = True
+            st.rerun()
 
 
 def render_inline_approval(
@@ -1347,16 +1516,66 @@ def process_queued_approval_action(
             result = ui_test_result(pending, approval, decision)
         handle_turn_result(chat, pending, result, pending_state_key)
         return
-    with st.spinner("Sending response and continuing..."):
-        result = client.respond_chat_turn(
-            pending["runtime"],
-            approval,
-            decision,
-            output_callback=update_stream,
-        )
-    if result.get("status") == "duplicate_approval_response":
+    if pending_state_key != "pending_turn":
+        with st.spinner("Sending response and continuing..."):
+            result = client.respond_chat_turn(
+                pending["runtime"],
+                approval,
+                decision,
+                output_callback=update_stream,
+            )
+        if result.get("status") == "duplicate_approval_response":
+            return
+        handle_turn_result(chat, pending, result, pending_state_key)
         return
-    handle_turn_result(chat, pending, result, pending_state_key)
+    start_approval_response_worker(client, chat, pending, approval, decision)
+    st.session_state.chat_history_autoscroll = True
+    st.rerun()
+
+
+def start_approval_response_worker(
+    client: CodexClient,
+    chat: ChatSession,
+    pending: dict,
+    approval: dict,
+    decision: str,
+) -> None:
+    cleanup_pending_turn_worker(pending)
+    event_queue: queue.Queue = queue.Queue()
+    cancel_event = threading.Event()
+    worker_id = str(uuid.uuid4())
+    pending["worker_id"] = worker_id
+    pending["worker_queue"] = event_queue
+    pending["worker_cancel_event"] = cancel_event
+    pending["worker_started_at"] = time.time()
+    pending["status"] = TURN_RUN_RESPONDING_APPROVAL
+    pending.pop("approval", None)
+
+    def output_callback(output_parts: dict[str, Any]) -> None:
+        event_queue.put({"type": "output", "output_parts": output_parts})
+
+    def run_response() -> None:
+        try:
+            if cancel_event.is_set():
+                result = {"ok": False, "output": "Approval response was cancelled."}
+            else:
+                result = client.respond_chat_turn(
+                    pending["runtime"],
+                    approval,
+                    decision,
+                    output_callback=output_callback,
+                )
+        except Exception as exc:
+            result = {"ok": False, "output": f"[send/receive error] {exc}"}
+        event_queue.put({"type": "result", "result": result})
+
+    worker = threading.Thread(
+        target=run_response,
+        name=f"codex-approval-{chat.id}-{worker_id[:8]}",
+        daemon=True,
+    )
+    st.session_state.setdefault("turn_worker_registry", {})[worker_id] = worker
+    worker.start()
 
 
 def ui_test_result(pending: dict, approval: dict, decision: str) -> dict[str, Any]:
@@ -1463,11 +1682,17 @@ def render_tool_user_input_request(
             )
         handle_turn_result(chat, pending, result, pending_state_key)
         return True
+    decision = f"answersJson:{compact_json(answers)}"
+    if pending_state_key == "pending_turn":
+        start_approval_response_worker(client, chat, pending, approval, decision)
+        st.session_state.chat_history_autoscroll = True
+        st.rerun()
+        return True
     with st.spinner("Sending response and continuing..."):
         result = client.respond_chat_turn(
             pending["runtime"],
             approval,
-            f"answersJson:{compact_json(answers)}",
+            decision,
             output_callback=update_stream,
         )
     if result.get("status") == "duplicate_approval_response":
@@ -1482,10 +1707,13 @@ def handle_turn_result(
     result: dict,
     pending_state_key: str = "pending_turn",
 ) -> None:
+    cleanup_pending_turn_worker(pending)
     if result.get("thread_id"):
         chat.thread_id = result["thread_id"]
+        pending["thread_id"] = result["thread_id"]
 
     if result.get("status") == "approval" and result.get("approval"):
+        pending["status"] = TURN_RUN_AWAITING_APPROVAL
         pending["runtime"] = result["runtime"]
         pending["approval"] = result["approval"]
         pending["output_parts"] = normalize_codex_output_parts(
@@ -1497,6 +1725,7 @@ def handle_turn_result(
         st.session_state.chat_history_autoscroll = True
         st.rerun()
 
+    pending["status"] = TURN_RUN_COMPLETED if result.get("ok") else TURN_RUN_FAILED
     output_parts = normalize_codex_output_parts(
         result.get("output_parts"), str(result.get("output") or "")
     )
@@ -1525,14 +1754,20 @@ def cancel_pending_turn_if_needed(
     runtime = pending.get("runtime")
     if runtime:
         client.close_chat_turn(runtime)
+    cleanup_pending_turn_worker(pending)
     st.session_state.pending_turn = None
     st.session_state.approval_action_in_progress = ""
     st.session_state.approval_action_queued = None
 
 
-def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) -> None:
+def queue_user_turn(
+    client: CodexClient, project: Project, chat: ChatSession | None, user_text: str
+) -> None:
     pending = st.session_state.get("pending_turn")
-    if pending and pending.get("runtime"):
+    if pending and pending.get("status") not in {
+        TURN_RUN_COMPLETED,
+        TURN_RUN_FAILED,
+    }:
         return
     starting_new_thread = not chat or not chat.thread_id
     chat = materialize_chat(project, chat)
@@ -1546,12 +1781,27 @@ def queue_user_turn(project: Project, chat: ChatSession | None, user_text: str) 
         remember_new_chat_run_control_defaults(controls)
         ensure_start_run_overrides_message(chat, controls)
     chat.add_message("user", user_text)
-    st.session_state.pending_turn = {
+    pending = {
+        "run_id": str(uuid.uuid4()),
         "chat_id": chat.id,
+        "status": TURN_RUN_STARTING,
         "text": user_text,
         "thread_overrides": thread_overrides,
         "turn_overrides": build_turn_overrides(controls),
         "approval_policy": controls.get("approval_policy", "").strip() or None,
+    }
+    st.session_state.pending_turn = pending
+    start_turn_run_worker(client, project, chat, pending)
+    st.session_state.chat_history_autoscroll = True
+    st.rerun()
+
+
+def queue_interrupt_draft(chat: ChatSession | None, user_text: str) -> None:
+    if not chat:
+        return
+    st.session_state.pending_interrupt_draft = {
+        "chat_id": chat.id,
+        "text": user_text,
     }
     st.session_state.chat_history_autoscroll = True
     st.rerun()
@@ -1574,6 +1824,10 @@ UI_TEST_CASES = {
         "label": "Generic response",
         "description": "Fallback affirmative and declining response controls.",
     },
+    "no_thread_turn": {
+        "label": "No-thread turn",
+        "description": "A synchronous pending turn simulation that blocks the UI before interruption controls can render.",
+    },
 }
 
 
@@ -1585,6 +1839,18 @@ def queue_ui_test_turn(chat: ChatSession, test_id: str) -> None:
     test_label = str(UI_TEST_CASES[test_id]["label"])
     text = f"UI test: {test_label}"
     chat.add_message("user", text)
+    if test_id == "no_thread_turn":
+        st.session_state.ui_test_pending = {
+            "chat_id": chat.id,
+            "text": text,
+            "ui_test": True,
+            "ui_test_id": test_id,
+            "ui_test_label": test_label,
+            "output_parts": normalize_codex_output_parts({}),
+            "output": "",
+        }
+        st.session_state.chat_history_autoscroll = True
+        st.rerun()
     approval = ui_test_approval(test_id)
     st.session_state.ui_test_pending = {
         "chat_id": chat.id,
@@ -2402,12 +2668,29 @@ def render_ui_test_workspace(settings: AppSettings) -> None:
             with st.chat_message("user"):
                 st.markdown(str(pending.get("text") or ""))
             with st.chat_message("assistant"):
-                render_inline_approval(
-                    client, chat, pending, pending_state_key="ui_test_pending"
-                )
+                if pending.get("ui_test_id") == "no_thread_turn":
+                    render_no_thread_turn_test(chat, pending)
+                else:
+                    render_inline_approval(
+                        client, chat, pending, pending_state_key="ui_test_pending"
+                    )
 
     if st.session_state.chat_history_autoscroll:
         st.session_state.chat_history_autoscroll = False
+
+
+def render_no_thread_turn_test(chat: ChatSession, pending: dict) -> None:
+    if not pending.get("blocking_started"):
+        pending["blocking_started"] = True
+        st.warning("Blocking synchronously. The app cannot render chat input now.")
+        time.sleep(UI_TEST_DELAY_SECONDS)
+        pending["result"] = {
+            "ok": True,
+            "output": "No-thread simulation completed. No interruption UI could be used while it was sleeping.",
+        }
+    result = pending.pop("result", None)
+    if result:
+        handle_turn_result(chat, pending, result, pending_state_key="ui_test_pending")
 
 
 def ui_test_screen(settings: AppSettings) -> None:
@@ -2651,21 +2934,53 @@ def append_pending_file_path_to_chat_input(message_key: str) -> None:
     )
 
 
+def restore_pending_text_to_chat_input(chat: ChatSession | None) -> None:
+    pending = st.session_state.pop("pending_chat_input_restore", None)
+    if not isinstance(pending, dict) or not chat or pending.get("chat_id") != chat.id:
+        return
+    text = str(pending.get("text") or "").strip()
+    if not text:
+        return
+    nonce = str(pending.get("nonce") or uuid.uuid4())
+    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", f"restore-input-{chat.id}-{nonce}")
+    st.html(
+        f"""
+        <span id="{dom_id}"></span>
+        <script>
+        (() => {{
+          const text = {json.dumps(text)};
+          const appendToChatInput = window.codexNomadSurface?.appendToChatInput;
+          if (typeof appendToChatInput !== "function") {{
+            return;
+          }}
+          appendToChatInput(text, {{ spacing: "paragraph" }});
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
 def chat_composer(
+    client: CodexClient,
     project: Project | None,
     chat: ChatSession | None,
 ) -> None:
-    prompt_disabled = not project or bool(st.session_state.get("pending_turn"))
+    prompt_disabled = not project
     prompt = st.chat_input(
         "Message Codex", key="chat_prompt_input", disabled=prompt_disabled
     )
     if prompt and project:
         user_text = prompt.strip()
         if user_text:
-            queue_user_turn(project, chat, user_text)
+            if st.session_state.get("pending_turn"):
+                queue_interrupt_draft(chat, user_text)
+            else:
+                queue_user_turn(client, project, chat, user_text)
 
     if not project:
         st.caption("Select a project and enter a message before sending.")
+    restore_pending_text_to_chat_input(chat)
 
 
 def chat_workspace(
@@ -2680,7 +2995,7 @@ def chat_workspace(
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     chat_history_panel(client, project, active_chat)
-    chat_composer(project, active_chat)
+    chat_composer(client, project, active_chat)
 
 
 def render_sidebar_home_title() -> None:
