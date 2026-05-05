@@ -70,6 +70,25 @@ DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 LOGO_PATH = Path(__file__).parent / "ui_components" / "assets" / "logo.svg"
+FILE_PATH_PICKER_MAX_OPTIONS = 500
+FILE_PATH_PICKER_MAX_VISITED = 20000
+FILE_PATH_PICKER_SKIP_DIRS = {
+    ".cache",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "venv",
+}
 PROMPTFORM_BLOCK_PATTERN = re.compile(
     r"""
     ^[ \t]*```promptform[ \t]*\r?\n
@@ -959,6 +978,16 @@ def render_chat(
                     message,
                     skill_defs,
                     message_key=f"{chat.id}-{picker_id}",
+            )
+            continue
+
+        if message.role == "file_path_picker":
+            picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
+            with st.chat_message("file-path-picker", avatar=":material/folder_open:"):
+                render_file_path_picker_message(
+                    message,
+                    project.path if project else "",
+                    message_key=f"{chat.id}-{picker_id}",
                 )
             continue
 
@@ -1642,6 +1671,103 @@ def load_available_skill_defs(base_url: str, project_path: str = "") -> list[Ski
     return skill_defs_from_app_server(CodexClient(base_url).list_skills(project_path))
 
 
+@st.cache_data(show_spinner=False, ttl=30)
+def load_available_file_path_options(
+    project_path: str = "",
+    query: str = "",
+    max_options: int = FILE_PATH_PICKER_MAX_OPTIONS,
+    max_visited: int = FILE_PATH_PICKER_MAX_VISITED,
+) -> tuple[list[str], bool, int]:
+    root = Path(project_path).expanduser()
+    if not project_path or not root.is_dir():
+        return [], False, 0
+
+    stripped_query = query.strip()
+    direct_option = direct_file_path_option(root, stripped_query)
+    if direct_option:
+        return [direct_option], False, 1
+
+    normalized_query = stripped_query.lower()
+
+    options: list[str] = []
+    visited = 0
+    truncated = False
+    stack = [root]
+
+    while stack:
+        current = stack.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError:
+            continue
+
+        with entries:
+            for entry in entries:
+                visited += 1
+                if visited > max_visited:
+                    truncated = True
+                    break
+
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file(follow_symlinks=False)
+                except OSError:
+                    continue
+
+                if is_dir:
+                    if entry.name not in FILE_PATH_PICKER_SKIP_DIRS:
+                        stack.append(Path(entry.path))
+                    continue
+
+                if not is_file:
+                    continue
+
+                try:
+                    relative_path = Path(entry.path).relative_to(root).as_posix()
+                except ValueError:
+                    continue
+
+                if normalized_query and normalized_query not in relative_path.lower():
+                    continue
+
+                options.append(relative_path)
+                if len(options) > max_options:
+                    truncated = True
+                    break
+
+        if truncated:
+            break
+
+    return sorted(options[:max_options]), truncated, visited
+
+
+def direct_file_path_option(root: Path, query: str) -> str:
+    if not query:
+        return ""
+    relative_query = query.removeprefix("@").strip()
+    if (
+        len(relative_query) >= 2
+        and relative_query[0] == relative_query[-1]
+        and relative_query[0] in {'"', "'"}
+    ):
+        relative_query = relative_query[1:-1]
+
+    candidate = Path(relative_query)
+    if candidate.is_absolute():
+        return ""
+    try:
+        resolved = (root / candidate).resolve()
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return ""
+    if not resolved.is_file():
+        return ""
+    try:
+        return resolved.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return ""
+
+
 @st.cache_data(show_spinner=False, ttl=15)
 def load_codex_config(base_url: str) -> dict:
     return CodexClient(base_url).read_config()
@@ -2167,6 +2293,22 @@ def sidebar_skill_actions(project: Project | None, chat: ChatSession | None) -> 
         st.rerun()
 
 
+def sidebar_file_path_actions(project: Project | None, chat: ChatSession | None) -> None:
+    disabled = not project or bool(st.session_state.get("pending_turn"))
+    if st.button("Add File Path", disabled=disabled, use_container_width=True):
+        add_draftable_chat_message(
+            project,
+            chat,
+            "file_path_picker",
+            metadata={
+                "picker_id": str(uuid.uuid4()),
+                "selected_file_path": "",
+                "file_path_query": "",
+            },
+        )
+        st.rerun()
+
+
 def add_ui_test_launcher_message() -> None:
     if st.session_state.get("ui_test_pending"):
         return
@@ -2350,6 +2492,78 @@ def render_skill_picker_message(
     append_pending_skill_to_chat_input(message_key)
 
 
+def render_file_path_picker_message(
+    message: ChatMessage, project_path: str, message_key: str
+) -> None:
+    current_query = str(message.metadata.get("file_path_query") or "")
+    initial_options, initial_truncated, _initial_visited = (
+        load_available_file_path_options(project_path, "")
+    )
+    needs_filter = initial_truncated or bool(current_query)
+    query = current_query
+    if needs_filter:
+        query = st.text_input(
+            "File Path Filter",
+            value=current_query,
+            key=f"file_path_filter_{message_key}",
+            placeholder="Filter file paths",
+            label_visibility="collapsed",
+        )
+        message.metadata["file_path_query"] = query
+        if initial_truncated and not query.strip():
+            st.warning(
+                "Too many files. Filter to narrow the list.",
+                icon="⚠️",
+            )
+            return
+
+    options, truncated, _visited = (
+        load_available_file_path_options(project_path, query)
+        if query.strip()
+        else (initial_options, initial_truncated, _initial_visited)
+    )
+    if not options:
+        if truncated:
+            st.warning(
+                "Search stopped before all files were checked. Filter further and try again.",
+                icon="⚠️",
+            )
+            return
+        st.caption("No matching files were found.")
+        return
+
+    selected_file_path = str(message.metadata.get("selected_file_path") or "")
+    selected_index = (
+        options.index(selected_file_path) if selected_file_path in options else None
+    )
+    selected_file_path = st.selectbox(
+        "File Path",
+        options,
+        index=selected_index,
+        key=f"file_path_picker_{message_key}",
+        placeholder="Choose a file path",
+        label_visibility="collapsed",
+    )
+    message.metadata["selected_file_path"] = selected_file_path
+    if truncated:
+        st.warning(
+            f"Showing up to {FILE_PATH_PICKER_MAX_OPTIONS} matches. "
+            "Use the filter to narrow the list.",
+            icon="⚠️",
+        )
+    if not selected_file_path:
+        return
+
+    st.caption(f"{project_path}/{selected_file_path}")
+    if st.button("Add to prompt", key=f"file_path_append_{message_key}"):
+        st.session_state[f"pending_file_path_append_{message_key}"] = {
+            "path": selected_file_path,
+            "nonce": str(uuid.uuid4()),
+        }
+        st.rerun()
+    append_pending_file_path_to_chat_input(message_key)
+
+
 def render_ui_test_launcher_message(
     chat: ChatSession,
     message: ChatMessage,
@@ -2401,6 +2615,35 @@ def append_pending_skill_to_chat_input(message_key: str) -> None:
             return;
           }}
           appendToChatInput(marker, {{ spacing: "line" }});
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
+def append_pending_file_path_to_chat_input(message_key: str) -> None:
+    pending_key = f"pending_file_path_append_{message_key}"
+    pending = st.session_state.pop(pending_key, None)
+    if not isinstance(pending, dict):
+        return
+    path = str(pending.get("path") or "")
+    if not path:
+        return
+    marker = f'"{path}"' if any(char.isspace() for char in path) else f"@{path}"
+    nonce = str(pending.get("nonce") or uuid.uuid4())
+    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", f"file-path-append-{message_key}-{nonce}")
+    st.html(
+        f"""
+        <span id="{dom_id}"></span>
+        <script>
+        (() => {{
+          const path = {json.dumps(marker)};
+          const appendToChatInput = window.codexNomadSurface?.appendToChatInput;
+          if (typeof appendToChatInput !== "function") {{
+            return;
+          }}
+          appendToChatInput(path, {{ spacing: "line" }});
         }})();
         </script>
         """,
@@ -2483,6 +2726,7 @@ def surface_sidebar(
         st.divider()
         sidebar_promptform_actions(project, chat)
         sidebar_skill_actions(project, chat)
+        sidebar_file_path_actions(project, chat)
     return project, chat
 
 

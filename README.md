@@ -36,6 +36,7 @@ The system is intended for personal use and includes:
 - Reusable Prompt Form defs loaded from JSON files
 - User-triggered Prompt Form insertion from the sidebar
 - User-triggered Skill picker insertion from the sidebar
+- User-triggered File Path picker insertion from the sidebar
 - A minimal settings screen
 
 There is no CLI fallback. Prompt submission is disabled when Codex App Server is not running.
@@ -77,7 +78,7 @@ within one minute temporarily block login for one minute.
 
 ## Layout
 
-- Left sidebar: project / chat selection, Prompt Form and Skill insertion, and the Settings dialog.
+- Left sidebar: project / chat selection, Prompt Form, Skill, and File Path insertion, and the Settings dialog.
 - Main area: chat history, inline approvals or other user-response requests,
   and the bottom chat input.
 
