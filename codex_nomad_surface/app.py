@@ -516,6 +516,12 @@ def approval_key(approval: dict, fallback: str = "") -> str:
     )
 
 
+def approval_option_is_declining(label: str, decision: str) -> bool:
+    text = f"{label} {decision}".lower()
+    declining_words = ("decline", "reject", "deny", "cancel")
+    return any(word in text for word in declining_words)
+
+
 def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -1212,6 +1218,7 @@ def render_inline_approval(
             return
 
     if isinstance(response_options, list) and response_options:
+        option_columns = st.columns(2, gap="large")
         for index, option in enumerate(response_options):
             if not isinstance(option, dict):
                 continue
@@ -1219,13 +1226,21 @@ def render_inline_approval(
             decision = str(option.get("decision") or f"option:{index}")
             if not label:
                 continue
-            st.button(
-                label,
-                key=f"inline-option-{key}-{index}",
-                disabled=in_progress,
-                on_click=queue_approval_action,
-                args=(key, decision),
-            )
+            column_index = 0 if approval_option_is_declining(label, decision) else 1
+            with option_columns[column_index]:
+                st.button(
+                    label,
+                    key=f"inline-option-{key}-{index}",
+                    disabled=in_progress,
+                    type=(
+                        "secondary"
+                        if approval_option_is_declining(label, decision)
+                        else "primary"
+                    ),
+                    on_click=queue_approval_action,
+                    args=(key, decision),
+                    use_container_width=True,
+                )
     else:
         allow_for_thread = False
         if approval.get("method") == "item/permissions/requestApproval":
@@ -1243,20 +1258,26 @@ def render_inline_approval(
             "Reject" if approval.get("kind") == "approval_request" else "Decline"
         )
         approve_decision = "approveForThread" if allow_for_thread else "approve"
-        st.button(
-            approve_label,
-            key=f"inline-approve-{key}",
-            disabled=in_progress,
-            on_click=queue_approval_action,
-            args=(key, approve_decision),
-        )
-        st.button(
-            reject_label,
-            key=f"inline-reject-{key}",
-            disabled=in_progress,
-            on_click=queue_approval_action,
-            args=(key, "reject"),
-        )
+        decline_column, approve_column = st.columns(2, gap="large")
+        with decline_column:
+            st.button(
+                reject_label,
+                key=f"inline-reject-{key}",
+                disabled=in_progress,
+                on_click=queue_approval_action,
+                args=(key, "reject"),
+                use_container_width=True,
+            )
+        with approve_column:
+            st.button(
+                approve_label,
+                key=f"inline-approve-{key}",
+                disabled=in_progress,
+                type="primary",
+                on_click=queue_approval_action,
+                args=(key, approve_decision),
+                use_container_width=True,
+            )
 
     process_queued_approval_action(
         client, chat, pending, approval, key, update_stream, pending_state_key
