@@ -422,12 +422,16 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
         return
 
     st.caption("The configured App Server URL points to local host 127.0.0.1.")
+    process = managed_app_server_process()
+    start_disabled = (
+        st.session_state.app_server_launch_in_progress or process is not None
+    )
     if st.session_state.app_server_launch_in_progress:
         st.info("Starting Codex App Server...")
     if st.button(
         "Start Codex App Server (WebSockets)",
         type="primary",
-        disabled=st.session_state.app_server_launch_in_progress,
+        disabled=start_disabled,
     ):
         st.session_state.app_server_launch_in_progress = True
         st.rerun()
