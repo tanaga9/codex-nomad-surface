@@ -209,6 +209,24 @@ def inject_chat_input_bridge() -> None:
     )
 
 
+def inject_compact_chat_input_style() -> None:
+    st.html(
+        """
+        <style>
+        [data-testid="stBottomBlockContainer"] {
+          padding-top: 0.4rem !important;
+          padding-bottom: max(0.4rem, env(safe-area-inset-bottom)) !important;
+        }
+
+        [data-testid="stChatInput"] {
+          padding-top: 0.4rem !important;
+          padding-bottom: max(0.4rem, env(safe-area-inset-bottom)) !important;
+        }
+        </style>
+        """
+    )
+
+
 def render_add_starter_button(starter: str, disabled: bool) -> None:
     starter = starter.strip()
     disabled_attr = "disabled" if disabled else ""

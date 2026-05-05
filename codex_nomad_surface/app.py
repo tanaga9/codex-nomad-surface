@@ -51,6 +51,7 @@ from codex_nomad_surface.skill_defs import (
     skill_defs_from_app_server,
 )
 from codex_nomad_surface.ui_components import (
+    inject_compact_chat_input_style,
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
     render_promptform,
@@ -2432,6 +2433,7 @@ def chat_workspace(
     active_chat = chat or (draft_chat(project) if project else None)
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
+    inject_compact_chat_input_style()
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     chat_history_panel(client, project, active_chat)
