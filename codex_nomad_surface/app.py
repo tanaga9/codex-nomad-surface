@@ -1364,6 +1364,21 @@ def render_pending_interrupt_draft(
             st.rerun()
 
 
+def restore_interrupt_draft_to_input_if_pending(chat: ChatSession) -> None:
+    draft = st.session_state.get("pending_interrupt_draft")
+    if not isinstance(draft, dict) or draft.get("chat_id") != chat.id:
+        return
+    text = str(draft.get("text") or "").strip()
+    st.session_state.pending_interrupt_draft = None
+    if not text:
+        return
+    st.session_state.pending_chat_input_restore = {
+        "chat_id": chat.id,
+        "text": text,
+        "nonce": str(uuid.uuid4()),
+    }
+
+
 def render_inline_approval(
     client: CodexClient,
     chat: ChatSession,
@@ -1736,6 +1751,8 @@ def handle_turn_result(
         response_text = "The response was empty."
         metadata = {}
     chat.add_message("assistant", response_text, metadata=metadata)
+    if pending_state_key == "pending_turn":
+        restore_interrupt_draft_to_input_if_pending(chat)
     st.session_state[pending_state_key] = None
     st.session_state.approval_action_in_progress = ""
     st.session_state.approval_action_queued = None
