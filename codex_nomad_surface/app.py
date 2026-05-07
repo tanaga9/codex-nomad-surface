@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import html
 import json
 import os
 import queue
@@ -908,8 +909,19 @@ def render_codex_output_auxiliary(
     ]
     if progress_segments:
         with st.expander("Progress notes", expanded=expanded_until_final_answer):
-            for segment in progress_segments:
+            commentary_segments = [
+                segment
+                for segment in progress_segments
+                if segment.get("kind") == "commentary"
+            ]
+            operation_segments = [
+                segment
+                for segment in progress_segments
+                if segment.get("kind") == "operation_event"
+            ]
+            for segment in commentary_segments:
                 st.markdown(str(segment.get("text") or ""))
+            render_progress_operation_segments(operation_segments)
 
     labels = {
         "reasoning_summary": "Reasoning summary",
@@ -942,6 +954,25 @@ def render_codex_output_auxiliary(
                     continue
                 st.markdown(f"**{segment.get('kind') or 'unknown'}**")
                 st.markdown(str(segment.get("text") or ""))
+
+
+def render_progress_operation_segments(operation_segments: list[dict[str, Any]]) -> None:
+    if not operation_segments:
+        return
+    lines = [
+        str(segment.get("text") or "").strip()
+        for segment in operation_segments
+        if str(segment.get("text") or "").strip()
+    ]
+    if len(lines) <= 1:
+        for line in lines:
+            st.markdown(line)
+        return
+    items = "".join(f"<li>{html.escape(line)}</li>" for line in lines)
+    st.markdown(
+        f"<details><summary>Operations ({len(lines)})</summary><ul>{items}</ul></details>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_codex_stream_output(parts: dict[str, Any]) -> None:

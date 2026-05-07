@@ -537,7 +537,8 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(parts.segments[0].kind, "operation_event")
         self.assertIn("Command execution", parts.segments[0].text)
         self.assertIn("python3 -m unittest", parts.segments[0].text)
-        self.assertIn("Exit code: `0`", parts.segments[0].text)
+        self.assertIn("exit 0", parts.segments[0].text)
+        self.assertNotIn("\n", parts.segments[0].text)
 
     def test_file_change_item_is_summarized(self) -> None:
         parts = CodexTurnOutput()
@@ -558,8 +559,9 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(parts.segments[0].kind, "operation_event")
         self.assertIn("File change", parts.segments[0].text)
-        self.assertIn("Changes: `2`", parts.segments[0].text)
+        self.assertIn("2 changes", parts.segments[0].text)
         self.assertIn("`app.py` (update)", parts.segments[0].text)
+        self.assertNotIn("\n", parts.segments[0].text)
 
     def test_mcp_tool_call_item_is_summarized(self) -> None:
         parts = CodexTurnOutput()
@@ -581,6 +583,7 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertIn("MCP tool call", parts.segments[0].text)
         self.assertIn("github", parts.segments[0].text)
         self.assertIn("issues/list", parts.segments[0].text)
+        self.assertNotIn("\n", parts.segments[0].text)
 
     def test_unknown_event_is_preserved_as_other_output(self) -> None:
         parts = CodexTurnOutput()

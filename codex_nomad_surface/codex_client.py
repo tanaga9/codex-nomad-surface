@@ -1420,66 +1420,72 @@ class CodexClient:
         return renderer(item) if renderer else ""
 
     def _command_execution_item_summary(self, item: dict[str, Any]) -> str:
-        lines = ["**Command execution**"]
+        details = []
         command = self._format_command(item.get("command"))
         if command:
-            lines.append(f"- Command: `{command}`")
+            details.append(f"`{command}`")
         cwd = str(item.get("cwd") or "").strip()
         if cwd:
-            lines.append(f"- CWD: `{cwd}`")
+            details.append(f"cwd `{cwd}`")
         status = str(item.get("status") or "").strip()
         if status:
-            lines.append(f"- Status: `{status}`")
+            details.append(status)
         if item.get("exitCode") is not None:
-            lines.append(f"- Exit code: `{item.get('exitCode')}`")
+            details.append(f"exit {item.get('exitCode')}")
         if item.get("durationMs") is not None:
-            lines.append(f"- Duration: `{item.get('durationMs')} ms`")
+            details.append(f"{item.get('durationMs')} ms")
         output = self._first_line(item.get("aggregatedOutput"))
         if output:
-            lines.append(f"- Output: {output}")
-        return "\n".join(lines)
+            details.append(output)
+        return self._inline_operation_summary("Command execution", details)
 
     def _file_change_item_summary(self, item: dict[str, Any]) -> str:
-        lines = ["**File change**"]
+        details = []
         status = str(item.get("status") or "").strip()
         if status:
-            lines.append(f"- Status: `{status}`")
+            details.append(status)
 
         changes = item.get("changes")
         if not isinstance(changes, list):
             changes = []
-        lines.append(f"- Changes: `{len(changes)}`")
+        details.append(f"{len(changes)} changes")
+        paths = []
         for change in changes[:5]:
             if not isinstance(change, dict):
                 continue
             path = str(change.get("path") or "").strip()
             kind = str(change.get("kind") or "").strip()
             if path and kind:
-                lines.append(f"- `{path}` ({kind})")
+                paths.append(f"`{path}` ({kind})")
             elif path:
-                lines.append(f"- `{path}`")
+                paths.append(f"`{path}`")
+        if paths:
+            details.append(", ".join(paths))
         if len(changes) > 5:
-            lines.append(f"- ... and {len(changes) - 5} more")
-        return "\n".join(lines)
+            details.append(f"+{len(changes) - 5} more")
+        return self._inline_operation_summary("File change", details)
 
     def _mcp_tool_call_item_summary(self, item: dict[str, Any]) -> str:
-        lines = ["**MCP tool call**"]
+        details = []
         server = str(item.get("server") or "").strip()
         if server:
-            lines.append(f"- Server: `{server}`")
+            details.append(f"`{server}`")
         tool = str(item.get("tool") or "").strip()
         if tool:
-            lines.append(f"- Tool: `{tool}`")
+            details.append(f"`{tool}`")
         status = str(item.get("status") or "").strip()
         if status:
-            lines.append(f"- Status: `{status}`")
+            details.append(status)
         arguments = self._json_first_line(item.get("arguments"))
         if arguments:
-            lines.append(f"- Arguments: `{arguments}`")
+            details.append(f"args `{arguments}`")
         error = self._first_line(item.get("error"))
         if error:
-            lines.append(f"- Error: {error}")
-        return "\n".join(lines)
+            details.append(error)
+        return self._inline_operation_summary("MCP tool call", details)
+
+    def _inline_operation_summary(self, title: str, details: list[str]) -> str:
+        return title + (f" - {'; '.join(details)}" if details else "")
 
     def _format_command(self, command: Any) -> str:
         if isinstance(command, list):
