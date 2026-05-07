@@ -78,6 +78,7 @@ st.set_page_config(
 
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
+CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
 UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 LOGO_PATH = Path(__file__).parent / "ui_components" / "assets" / "logo.svg"
@@ -1194,7 +1195,7 @@ def extract_promptforms(content: str) -> tuple[str, list[dict], list[str]]:
     return stripped, forms, errors
 
 
-@st.fragment(run_every=1)
+@st.fragment(run_every=CHAT_HISTORY_POLL_INTERVAL_SECONDS)
 def chat_history_panel(
     client: CodexClient, project: Project | None, chat: ChatSession | None
 ) -> None:
