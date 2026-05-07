@@ -3160,9 +3160,10 @@ def append_pending_file_path_to_chat_input(message_key: str) -> None:
 
 
 def restore_pending_text_to_chat_input(chat: ChatSession | None) -> None:
-    pending = st.session_state.pop("pending_chat_input_restore", None)
+    pending = st.session_state.get("pending_chat_input_restore")
     if not isinstance(pending, dict) or not chat or pending.get("chat_id") != chat.id:
         return
+    st.session_state.pending_chat_input_restore = None
     text = str(pending.get("text") or "").strip()
     if not text:
         return
