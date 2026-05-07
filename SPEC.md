@@ -148,6 +148,10 @@ Codex may optimize the screen structure and UI details during implementation.
 - Keep persistent app settings minimal. `settings.json` should be limited to
   stable app-level configuration such as connection settings, not temporary UI
   state or per-run behavior.
+- Treat this app as a developer aid. Prefer simple Python constants for
+  internal flags, UI thresholds, debug switches, and polling intervals.
+- Add values to definition files only for formal project metadata, connection
+  settings, or user-facing preferences clearly worth persisting.
 - Runtime controls for Codex execution, such as model, reasoning effort,
   reasoning summary, verbosity, approval policy, and sandbox policy, should
   prefer chat/session/turn scoped overrides over modifying Codex config files.
