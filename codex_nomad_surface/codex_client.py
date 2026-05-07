@@ -3,9 +3,34 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+import tomllib
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
+
+
+def _client_title(name: str) -> str:
+    return name.replace("-", " ").replace("_", " ").title()
+
+
+with (Path(__file__).resolve().parents[1] / "pyproject.toml").open("rb") as handle:
+    PROJECT_METADATA = tomllib.load(handle)["project"]
+
+
+CODEX_CLIENT_INFO = {
+    "name": PROJECT_METADATA["name"],
+    "title": _client_title(PROJECT_METADATA["name"]),
+    "version": PROJECT_METADATA["version"],
+}
+CODEX_CLIENT_CAPABILITIES = {"experimentalApi": True}
+
+
+def _codex_initialize_params() -> dict[str, Any]:
+    return {
+        "clientInfo": CODEX_CLIENT_INFO.copy(),
+        "capabilities": CODEX_CLIENT_CAPABILITIES.copy(),
+    }
 
 
 @dataclass
@@ -274,14 +299,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output,
                     approvals,
                 )
@@ -444,14 +462,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output,
                     approvals,
                 )
@@ -490,14 +501,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output,
                     approvals,
                 )
@@ -535,14 +539,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output,
                     approvals,
                 )
@@ -585,14 +582,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output,
                     approvals,
                 )
@@ -618,14 +608,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output,
                     approvals,
                 )
@@ -659,14 +642,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output,
                     approvals,
                 )
@@ -1055,14 +1031,7 @@ class CodexClient:
                 await self._rpc_call(
                     websocket,
                     "initialize",
-                    {
-                        "clientInfo": {
-                            "name": "codex-nomad-surface",
-                            "title": "Codex Nomad Surface",
-                            "version": "0.1.0",
-                        },
-                        "capabilities": {"experimentalApi": True},
-                    },
+                    _codex_initialize_params(),
                     output_parts,
                     approvals,
                     output_callback,

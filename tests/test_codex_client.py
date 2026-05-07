@@ -1,13 +1,37 @@
 import asyncio
 import json
+import tomllib
 import unittest
+from pathlib import Path
 
-from codex_nomad_surface.codex_client import CodexClient, CodexTurnOutput
+from codex_nomad_surface.codex_client import (
+    CODEX_CLIENT_INFO,
+    CodexClient,
+    CodexTurnOutput,
+    _codex_initialize_params,
+)
 
 
 class CodexClientApprovalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = CodexClient("ws://127.0.0.1:1234")
+
+    def test_initialize_client_info_comes_from_project_metadata(self) -> None:
+        with Path("pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+
+        params = _codex_initialize_params()
+
+        self.assertEqual(params["clientInfo"]["name"], project["name"])
+        self.assertEqual(params["clientInfo"]["version"], project["version"])
+        self.assertEqual(params["clientInfo"]["title"], "Codex Nomad Surface")
+        self.assertEqual(params["clientInfo"], CODEX_CLIENT_INFO)
+
+    def test_initialize_params_return_copies(self) -> None:
+        params = _codex_initialize_params()
+        params["clientInfo"]["name"] = "changed"
+
+        self.assertEqual(CODEX_CLIENT_INFO["name"], "codex-nomad-surface")
 
     def test_model_list_result_reports_non_websocket_url(self) -> None:
         client = CodexClient("http://127.0.0.1:8080")
