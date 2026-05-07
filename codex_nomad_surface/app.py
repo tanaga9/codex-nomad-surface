@@ -85,6 +85,7 @@ CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 LOGO_PATH = Path(__file__).parent / "ui_components" / "assets" / "logo.svg"
 FILE_PATH_PICKER_MAX_OPTIONS = 500
 FILE_PATH_PICKER_MAX_VISITED = 20000
+SHOW_OTHER_OUTPUT = False
 INTERRUPT_DRAFT_PENDING = "pending"
 INTERRUPT_DRAFT_STEERED = "steered"
 INTERRUPT_DRAFT_RETURNED = "returned"
@@ -946,7 +947,7 @@ def render_codex_output_auxiliary(
         if segment.get("kind") not in known_kinds
         and segment.get("kind") not in {"commentary", "operation_event"}
     ]
-    if unknown_segments:
+    if unknown_segments and SHOW_OTHER_OUTPUT:
         with st.expander("Other output", expanded=False):
             for segment in unknown_segments:
                 if codex_output_is_low_priority_unknown(segment):
