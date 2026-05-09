@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+real_codex="/usr/local/bin/codex"
+
+if [ ! -x "$real_codex" ]; then
+  if ! command -v npm >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates nodejs npm
+    rm -rf /var/lib/apt/lists/*
+  fi
+
+  npm install -g @openai/codex
+fi
+
+exec "$real_codex" "$@"

@@ -1,0 +1,19 @@
+services:
+  app:
+    image: python:3.12-slim
+    working_dir: /app
+    ports:
+      - "8501:8501"
+    environment:
+      NOMAD_AUTH_SECRET: dev-secret
+    volumes:
+      - .:/app
+      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ./fixtures/codex-sessions/bootstrap:/root/.codex/sessions/bootstrap:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export PATH="$$PATH:/app/bin"
+        python -m pip install --no-cache-dir -e .
+        python -m streamlit run codex_nomad_surface/app.py
