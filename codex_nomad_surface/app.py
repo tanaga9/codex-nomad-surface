@@ -37,6 +37,7 @@ from codex_nomad_surface.http_gate import (
     cookie_auth_is_valid,
     sync_file_content_route_setting,
 )
+from codex_nomad_surface.markdown_rendering import markdown_with_soft_line_breaks
 from codex_nomad_surface.promptform_defs import (
     PromptFormDef,
     load_promptform_defs,
@@ -986,6 +987,10 @@ def codex_output_is_low_priority_unknown(segment: dict[str, Any]) -> bool:
     return text.startswith(("Unrecognized event:", "Unrecognized item:"))
 
 
+def render_chat_user_markdown(text: object) -> None:
+    st.markdown(markdown_with_soft_line_breaks(text))
+
+
 def render_codex_output_auxiliary(
     parts: dict[str, Any], expanded_until_final_answer: bool = False
 ) -> None:
@@ -1198,7 +1203,10 @@ def render_chat(
             if message.role == "assistant" and codex_output_has_auxiliary(output_parts):
                 render_codex_output_auxiliary(output_parts)
             if content:
-                st.markdown(content)
+                if message.role == "user":
+                    render_chat_user_markdown(content)
+                else:
+                    st.markdown(content)
             if (
                 message.metadata.get("kind") == "interrupt_draft"
                 and message.metadata.get("status") != INTERRUPT_DRAFT_PENDING
@@ -1347,7 +1355,7 @@ def render_pending_turn(
     drain_pending_turn_events(pending)
 
     with st.chat_message("user"):
-        st.markdown(pending["text"])
+        render_chat_user_markdown(pending["text"])
     with st.chat_message("assistant"):
         if pending.get("approval"):
             render_inline_approval(client, chat, pending)
@@ -1632,7 +1640,7 @@ def render_pending_interrupt_drafts(
             continue
         with st.chat_message("user"):
             st.caption(interrupt_draft_caption(message))
-            st.markdown(text)
+            render_chat_user_markdown(text)
         if (
             draft_id == active_draft_id
             and message.metadata.get("status") == INTERRUPT_DRAFT_PENDING
@@ -3009,12 +3017,15 @@ def render_ui_test_workspace(settings: AppSettings) -> None:
                     )
                 continue
             with st.chat_message(message.role):
-                st.markdown(message.content)
+                if message.role == "user":
+                    render_chat_user_markdown(message.content)
+                else:
+                    st.markdown(message.content)
 
         if skip_latest_user and isinstance(pending, dict):
             client = CodexClient(settings.app_server_url)
             with st.chat_message("user"):
-                st.markdown(str(pending.get("text") or ""))
+                render_chat_user_markdown(pending.get("text"))
             with st.chat_message("assistant"):
                 if pending.get("ui_test_id") == "no_thread_turn":
                     render_no_thread_turn_test(chat, pending)
