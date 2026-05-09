@@ -1446,7 +1446,7 @@ class CodexClient:
         if item_type and item_type != "userMessage":
             parts.append_block(
                 "other_event",
-                f"Unrecognized item: `{item_type}`",
+                f"Unrecognized item: {self._markdown_code_span(item_type)}",
             )
             return True
         return False
@@ -1465,10 +1465,10 @@ class CodexClient:
         details = []
         command = self._format_command(item.get("command"))
         if command:
-            details.append(f"`{command}`")
+            details.append(self._markdown_code_span(command))
         cwd = str(item.get("cwd") or "").strip()
         if cwd:
-            details.append(f"cwd `{cwd}`")
+            details.append(f"cwd {self._markdown_code_span(cwd)}")
         status = str(item.get("status") or "").strip()
         if status:
             details.append(status)
@@ -1478,7 +1478,7 @@ class CodexClient:
             details.append(f"{item.get('durationMs')} ms")
         output = self._first_line(item.get("aggregatedOutput"))
         if output:
-            details.append(output)
+            details.append(f"output {self._markdown_code_span(output)}")
         return self._inline_operation_summary("Command execution", details)
 
     def _file_change_item_summary(self, item: dict[str, Any]) -> str:
@@ -1498,9 +1498,9 @@ class CodexClient:
             path = str(change.get("path") or "").strip()
             kind = str(change.get("kind") or "").strip()
             if path and kind:
-                paths.append(f"`{path}` ({kind})")
+                paths.append(f"{self._markdown_code_span(path)} ({kind})")
             elif path:
-                paths.append(f"`{path}`")
+                paths.append(self._markdown_code_span(path))
         if paths:
             details.append(", ".join(paths))
         if len(changes) > 5:
@@ -1511,19 +1511,19 @@ class CodexClient:
         details = []
         server = str(item.get("server") or "").strip()
         if server:
-            details.append(f"`{server}`")
+            details.append(self._markdown_code_span(server))
         tool = str(item.get("tool") or "").strip()
         if tool:
-            details.append(f"`{tool}`")
+            details.append(self._markdown_code_span(tool))
         status = str(item.get("status") or "").strip()
         if status:
             details.append(status)
         arguments = self._json_first_line(item.get("arguments"))
         if arguments:
-            details.append(f"args `{arguments}`")
+            details.append(f"args {self._markdown_code_span(arguments)}")
         error = self._first_line(item.get("error"))
         if error:
-            details.append(error)
+            details.append(f"error {self._markdown_code_span(error)}")
         return self._inline_operation_summary("MCP tool call", details)
 
     def _inline_operation_summary(self, title: str, details: list[str]) -> str:
@@ -1533,6 +1533,21 @@ class CodexClient:
         if isinstance(command, list):
             return " ".join(shlex.quote(str(part)) for part in command)
         return str(command or "").strip()
+
+    def _markdown_code_span(self, value: Any) -> str:
+        text = str(value or "")
+        longest_backtick_run = 0
+        current_run = 0
+        for character in text:
+            if character == "`":
+                current_run += 1
+                longest_backtick_run = max(longest_backtick_run, current_run)
+            else:
+                current_run = 0
+        delimiter = "`" * (longest_backtick_run + 1)
+        if text.startswith("`") or text.endswith("`"):
+            text = f" {text} "
+        return f"{delimiter}{text}{delimiter}"
 
     def _json_first_line(self, value: Any, max_chars: int = 240) -> str:
         if value in (None, ""):

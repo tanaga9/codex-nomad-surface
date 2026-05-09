@@ -540,6 +540,42 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertIn("exit 0", parts.segments[0].text)
         self.assertNotIn("\n", parts.segments[0].text)
 
+    def test_command_execution_summary_wraps_arbitrary_output_as_code(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts_from_item(
+            {
+                "id": "item-1",
+                "type": "commandExecution",
+                "command": ["printf", "`**value**`"],
+                "aggregatedOutput": "**not bold**\n# not a heading",
+            },
+            parts,
+        )
+
+        self.assertTrue(changed)
+        text = parts.segments[0].text
+        self.assertIn("``printf '`**value**`'``", text)
+        self.assertIn("output `**not bold**`", text)
+        self.assertNotIn("# not a heading", text)
+
+    def test_command_execution_summary_truncates_long_output(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts_from_item(
+            {
+                "id": "item-1",
+                "type": "commandExecution",
+                "aggregatedOutput": "x" * 260,
+            },
+            parts,
+        )
+
+        self.assertTrue(changed)
+        text = parts.segments[0].text
+        self.assertIn("...", text)
+        self.assertLess(len(text), 290)
+
     def test_file_change_item_is_summarized(self) -> None:
         parts = CodexTurnOutput()
 
