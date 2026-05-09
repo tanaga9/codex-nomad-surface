@@ -423,6 +423,11 @@ class CodexClient:
             return []
         return asyncio.run(self._list_threads_ws())
 
+    def start_thread(self, cwd: str) -> CodexThread:
+        if not cwd or not self.base_url.startswith(("ws://", "wss://")):
+            raise ValueError("Codex App Server URL must use ws:// or wss://.")
+        return asyncio.run(self._start_thread_ws(cwd))
+
     def read_thread_messages(
         self, thread_id: str, limit: int = 40, cursor: str | None = None
     ) -> CodexThreadMessages:
@@ -592,6 +597,43 @@ class CodexClient:
                 return self._parse_threads(raw)
         except Exception:
             return []
+
+    async def _start_thread_ws(self, cwd: str) -> CodexThread:
+        try:
+            import websockets
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("`websockets` is not installed.") from exc
+
+        async with self._connect_ws(websockets) as websocket:
+            output: list[str] = []
+            approvals: list[dict[str, Any]] = []
+            await self._rpc_call(
+                websocket,
+                "initialize",
+                _codex_initialize_params(),
+                output,
+                approvals,
+            )
+            raw = await self._rpc_call(
+                websocket,
+                "thread/start",
+                {
+                    "cwd": cwd,
+                    "ephemeral": False,
+                    "sessionStartSource": "startup",
+                    "experimentalRawEvents": False,
+                    "persistExtendedHistory": True,
+                },
+                output,
+                approvals,
+            )
+        thread = raw.get("thread") if isinstance(raw, dict) else None
+        if not isinstance(thread, dict):
+            raise RuntimeError("Codex App Server did not return a thread.")
+        started = CodexThread.from_dict(thread)
+        if not started.id:
+            raise RuntimeError("Codex App Server returned a thread without an id.")
+        return started
 
     async def _read_thread_messages_ws(
         self, thread_id: str, limit: int, cursor: str | None

@@ -82,6 +82,7 @@ DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
 UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+NEW_PROJECT_KEY = "__new_project__"
 LOGO_PATH = Path(__file__).parent / "ui_components" / "assets" / "logo.svg"
 FILE_PATH_PICKER_MAX_OPTIONS = 500
 FILE_PATH_PICKER_MAX_VISITED = 20000
@@ -123,6 +124,7 @@ def init_state() -> None:
     st.session_state.setdefault("selected_chat_id", "")
     st.session_state.setdefault("draft_chat", None)
     st.session_state.setdefault("selected_project_key", "")
+    st.session_state.setdefault("project_select_version", 0)
     st.session_state.setdefault("last_query_chat_id", None)
     st.session_state.setdefault("chat_select_version", 0)
     st.session_state.setdefault("last_rendered_chat_id", "")
@@ -141,6 +143,8 @@ def init_state() -> None:
     st.session_state.setdefault("turn_worker_registry", {})
     st.session_state.setdefault("ui_test_chat", None)
     st.session_state.setdefault("ui_test_pending", None)
+    st.session_state.setdefault("new_project_path", "")
+    st.session_state.setdefault("manual_project_paths", [])
 
 
 def settings_state() -> AppSettings:
@@ -275,6 +279,12 @@ def available_project_paths(server_threads: list[CodexThread]) -> list[str]:
         paths.append(thread.cwd)
         seen.add(thread.cwd)
 
+    for path in st.session_state.get("manual_project_paths", []):
+        if not path or path in seen:
+            continue
+        paths.append(path)
+        seen.add(path)
+
     for path in archived_project_paths(str(CODEX_SESSIONS_DIR)):
         if path in seen:
             continue
@@ -282,6 +292,18 @@ def available_project_paths(server_threads: list[CodexThread]) -> list[str]:
         seen.add(path)
 
     return paths
+
+
+def remember_project_path(path: str) -> None:
+    path = path.strip()
+    if not path:
+        return
+    paths = [
+        item
+        for item in st.session_state.get("manual_project_paths", [])
+        if item and item != path
+    ]
+    st.session_state.manual_project_paths = [path] + paths
 
 
 def unique_project_name(path: str, used_names: set[str]) -> str:
@@ -312,19 +334,29 @@ def project_key(project: Project) -> str:
     return f"{project.name}\n{project.path}"
 
 
+def project_creation_selected() -> bool:
+    return selected_project_key() == NEW_PROJECT_KEY
+
+
 def project_label(project: Project, duplicate_names: set[str]) -> str:
     if project.name in duplicate_names:
         return f"{project.name} · {project.path}"
     return project.name
 
 
-def selected_project_index(projects: list[Project], selected: str) -> int:
+def selected_project_index(projects: list[Project], selected: str) -> int | None:
+    if selected == NEW_PROJECT_KEY:
+        return 0
+    if not selected and projects:
+        return 1
     for index, project in enumerate(projects):
         if selected == project_key(project):
-            return index
+            return index + 1
+        if selected == project.path:
+            return index + 1
     for index, project in enumerate(projects):
         if selected == project.name:
-            return index
+            return index + 1
     return 0
 
 
@@ -333,7 +365,23 @@ def selected_project_key() -> str:
 
 
 def set_selected_project_key(value: str) -> None:
+    if selected_project_key() != value:
+        st.session_state.project_select_version += 1
     st.session_state.selected_project_key = value
+
+
+def project_selection_matches(
+    selected_key: str, current_key: str, projects: list[Project]
+) -> bool:
+    if selected_key == current_key:
+        return True
+    for project in projects:
+        if selected_key == project_key(project) and current_key in {
+            project.path,
+            project.name,
+        }:
+            return True
+    return False
 
 
 def test_mode_enabled() -> bool:
@@ -526,6 +574,7 @@ def project_selector(
     server_threads: list[CodexThread], key_prefix: str
 ) -> Project | None:
     projects = project_options(server_threads)
+    options = [""] + [project_key(project) for project in projects]
     if projects:
         duplicate_names = {
             project.name
@@ -534,24 +583,51 @@ def project_selector(
         }
         selected_key = st.selectbox(
             "Project",
-            [project_key(project) for project in projects],
+            options,
             index=selected_project_index(projects, selected_project_key()),
-            key=f"{key_prefix}_project",
-            format_func=lambda key: project_label(
-                next(project for project in projects if project_key(project) == key),
-                duplicate_names,
+            key=f"{key_prefix}_project_{st.session_state.project_select_version}",
+            format_func=lambda key: (
+                ""
+                if not key
+                else project_label(
+                    next(
+                        project for project in projects if project_key(project) == key
+                    ),
+                    duplicate_names,
+                )
             ),
+            placeholder="New project...",
         )
-        if selected_key != selected_project_key():
+        selected_key = str(selected_key or NEW_PROJECT_KEY)
+        if not project_selection_matches(
+            selected_key, selected_project_key(), projects
+        ):
             discard_draft_chat()
             set_selected_project_key(selected_key)
+            st.session_state.selected_chat_id = ""
+            set_query_chat_id("")
+            st.session_state.chat_select_version += 1
+        if selected_key == NEW_PROJECT_KEY:
+            return None
         return next(
             project for project in projects if project_key(project) == selected_key
         )
 
-    st.warning(
-        "No projects or threads were returned by Codex App Server. Start a thread for the target project in Codex first."
+    selected_key = st.selectbox(
+        "Project",
+        options,
+        index=0,
+        key=f"{key_prefix}_project_{st.session_state.project_select_version}",
+        format_func=lambda key: "",
+        placeholder="New project...",
     )
+    selected_key = str(selected_key or NEW_PROJECT_KEY)
+    if selected_key != selected_project_key():
+        discard_draft_chat()
+        set_selected_project_key(selected_key)
+        st.session_state.selected_chat_id = ""
+        set_query_chat_id("")
+        st.session_state.chat_select_version += 1
     return None
 
 
@@ -713,8 +789,20 @@ def draft_or_selected_chat(project: Project, chat: ChatSession | None) -> ChatSe
 
 
 def select_chat(
-    project: Project | None, server_threads: list[CodexThread]
+    project: Project | None, server_threads: list[CodexThread], disabled: bool = False
 ) -> ChatSession | None:
+    if disabled:
+        st.selectbox(
+            "Chat",
+            [""],
+            index=None,
+            key=f"chat_list_{st.session_state.chat_select_version}_disabled",
+            format_func=lambda chat_id: "",
+            placeholder="New chat...",
+            disabled=True,
+        )
+        return None
+
     if not project:
         st.caption("Select a project.")
         return None
@@ -736,14 +824,16 @@ def select_chat(
             for chat in chats
         },
     }
-    selected_index = ids.index(selected_id)
+    selected_index = ids.index(selected_id) if selected_id else None
     selected_id = st.selectbox(
         "Chat",
         ids,
         index=selected_index,
         key=f"chat_list_{st.session_state.chat_select_version}",
         format_func=lambda chat_id: label_by_id[chat_id],
+        placeholder="New chat...",
     )
+    selected_id = str(selected_id or "")
     if selected_id != st.session_state.selected_chat_id:
         if selected_id:
             discard_draft_chat(project)
@@ -3257,6 +3347,44 @@ def chat_workspace(
     chat_composer(client, project, active_chat)
 
 
+def project_creation_workspace(client: CodexClient) -> None:
+    st.subheader("New Project")
+    with st.form("new_project_form"):
+        project_path = st.text_input(
+            "Project path",
+            value=st.session_state.get("new_project_path", ""),
+            placeholder="/path/to/project",
+        ).strip()
+        submitted = st.form_submit_button("Create project")
+
+    if not submitted:
+        return
+
+    st.session_state.new_project_path = project_path
+    if not project_path:
+        st.error("Project path is required.")
+        return
+    if not Path(project_path).is_absolute():
+        st.error("Project path must be absolute.")
+        return
+
+    try:
+        thread = client.start_thread(project_path)
+    except Exception as exc:
+        st.error(f"Could not create project: {exc}")
+        return
+
+    project_path = thread.cwd or project_path
+    remember_project_path(project_path)
+    set_selected_project_key(project_path)
+    st.session_state.selected_chat_id = f"thread:{thread.id}"
+    set_query_chat_id(st.session_state.selected_chat_id)
+    st.session_state.chat_select_version += 1
+    st.session_state.new_project_path = ""
+    st.success("Project created.")
+    st.rerun()
+
+
 def render_sidebar_home_title() -> None:
     with st.container(key="sidebar-home-title"):
         st.button(
@@ -3276,7 +3404,8 @@ def surface_sidebar(
         if st.button("Settings", key="open_settings_dialog"):
             settings_dialog(settings)
         project = project_selector(server_threads, "sidebar")
-        chat = select_chat(project, server_threads)
+        new_project = project_creation_selected()
+        chat = select_chat(project, server_threads, disabled=new_project)
         if st.button(
             "Run Overrides",
             key="open_run_overrides_dialog",
@@ -3608,6 +3737,9 @@ def main_screen() -> None:
     server_threads = server_threads_state(client)
     sync_chat_selection_from_url(server_threads)
     project, chat = surface_sidebar(settings, server_threads)
+    if project_creation_selected():
+        project_creation_workspace(client)
+        return
     chat = chat or draft_chat_for_project(project)
     cancel_pending_turn_if_needed(client, chat)
     hydrate_thread_chat(client, chat)

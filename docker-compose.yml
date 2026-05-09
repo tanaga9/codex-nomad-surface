@@ -9,7 +9,6 @@ services:
     volumes:
       - .:/app
       - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
-      - ./fixtures/codex-sessions/bootstrap:/root/.codex/sessions/bootstrap:ro
     command:
       - /bin/sh
       - -c
