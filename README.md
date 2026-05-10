@@ -60,6 +60,8 @@ NOMAD_AUTH_SECRET='your-secret' streamlit run codex_nomad_surface/app.py
 ```
 
 If the configured Codex App Server URL points to `127.0.0.1` and the app cannot connect, the connection screen can start Codex App Server for you.
+The launcher includes an optional OpenAI API key field. If filled, the key is
+passed only to the launched Codex App Server process as `OPENAI_API_KEY`.
 
 You can also start Codex App Server manually.
 

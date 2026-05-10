@@ -79,6 +79,7 @@ st.set_page_config(
 
 
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
+APP_SERVER_OPENAI_API_KEY_SESSION_KEY = "app_server_openai_api_key"
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
 UI_TEST_DELAY_SECONDS = 2.0
@@ -136,6 +137,7 @@ def init_state() -> None:
     st.session_state.setdefault("approval_action_queued", None)
     st.session_state.setdefault("app_server_launch_in_progress", False)
     st.session_state.setdefault("app_server_launch_failure_returncode", None)
+    st.session_state.setdefault(APP_SERVER_OPENAI_API_KEY_SESSION_KEY, "")
     st.session_state.setdefault("managed_app_server_process", None)
     st.session_state.setdefault("chat_history_autoscroll", False)
     st.session_state.setdefault("codex_run_controls_by_chat", {})
@@ -449,6 +451,15 @@ def can_start_local_app_server(settings: AppSettings, status: ConnectionStatus) 
     )
 
 
+def app_server_launch_environment(openai_api_key: str) -> dict[str, str] | None:
+    api_key = openai_api_key.strip()
+    if not api_key:
+        return None
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = api_key
+    return env
+
+
 def terminate_process_at_exit(process: subprocess.Popen[bytes]) -> None:
     def cleanup() -> None:
         if process.poll() is not None:
@@ -489,6 +500,7 @@ def stop_managed_app_server() -> tuple[bool, str]:
 
 def start_local_app_server(
     settings: AppSettings,
+    openai_api_key: str = "",
 ) -> tuple[bool, str, subprocess.Popen[bytes] | None]:
     command = ["codex", "app-server", "--listen", settings.app_server_url]
     if shutil.which(command[0]) is None:
@@ -497,6 +509,7 @@ def start_local_app_server(
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
+            env=app_server_launch_environment(openai_api_key),
         )
     except OSError as exc:
         return False, f"Could not start Codex App Server: {exc}", None
@@ -526,6 +539,12 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
     )
     if st.session_state.app_server_launch_in_progress:
         st.info("Starting Codex App Server...")
+    openai_api_key = st.text_input(
+        "OpenAI API key for launch",
+        type="password",
+        key=APP_SERVER_OPENAI_API_KEY_SESSION_KEY,
+        help="Optional. When set, this value is passed to the launched Codex App Server as OPENAI_API_KEY and is not saved to settings.json.",
+    )
     if st.button(
         "Start Codex App Server (WebSockets)",
         type="primary",
@@ -535,7 +554,7 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
         st.rerun()
 
     if st.session_state.app_server_launch_in_progress:
-        ok, message, process = start_local_app_server(settings)
+        ok, message, process = start_local_app_server(settings, openai_api_key)
         if not ok:
             st.session_state.app_server_launch_in_progress = False
             st.error(message)
