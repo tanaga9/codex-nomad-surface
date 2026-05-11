@@ -1,8 +1,6 @@
 import asyncio
 import json
-import tomllib
 import unittest
-from pathlib import Path
 
 from codex_nomad_surface.codex_client import (
     CODEX_CLIENT_INFO,
@@ -16,14 +14,11 @@ class CodexClientApprovalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = CodexClient("ws://127.0.0.1:1234")
 
-    def test_initialize_client_info_comes_from_project_metadata(self) -> None:
-        with Path("pyproject.toml").open("rb") as handle:
-            project = tomllib.load(handle)["project"]
-
+    def test_initialize_client_info_uses_hardcoded_project_metadata(self) -> None:
         params = _codex_initialize_params()
 
-        self.assertEqual(params["clientInfo"]["name"], project["name"])
-        self.assertEqual(params["clientInfo"]["version"], project["version"])
+        self.assertEqual(params["clientInfo"]["name"], "codex-nomad-surface")
+        self.assertEqual(params["clientInfo"]["version"], "0.1.0")
         self.assertEqual(params["clientInfo"]["title"], "Codex Nomad Surface")
         self.assertEqual(params["clientInfo"], CODEX_CLIENT_INFO)
 
