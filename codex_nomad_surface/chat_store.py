@@ -16,7 +16,7 @@ class ChatMessage:
 @dataclass
 class ChatSession:
     id: str
-    project_name: str
+    project_path: str
     title: str
     thread_id: str | None = None
     created_at: str = ""
@@ -24,11 +24,11 @@ class ChatSession:
     messages: list[ChatMessage] = field(default_factory=list)
 
     @classmethod
-    def new(cls, project_name: str) -> "ChatSession":
+    def new(cls, project_path: str) -> "ChatSession":
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return cls(
             id=str(uuid.uuid4()),
-            project_name=project_name,
+            project_path=project_path,
             title="New Chat",
             created_at=now,
             updated_at=now,
