@@ -80,6 +80,8 @@ st.set_page_config(
 
 APP_SERVER_STARTUP_CHECK_SECONDS = 1.5
 APP_SERVER_OPENAI_API_KEY_SESSION_KEY = "app_server_openai_api_key"
+APP_SERVER_BIN_ENV_VAR = "CODEX_APP_SERVER_BIN"
+DEFAULT_APP_SERVER_BIN = "codex"
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
 UI_TEST_DELAY_SECONDS = 2.0
@@ -460,6 +462,11 @@ def app_server_launch_environment(openai_api_key: str) -> dict[str, str] | None:
     return env
 
 
+def app_server_bin() -> str:
+    configured = os.environ.get(APP_SERVER_BIN_ENV_VAR, "").strip()
+    return configured or DEFAULT_APP_SERVER_BIN
+
+
 def terminate_process_at_exit(process: subprocess.Popen[bytes]) -> None:
     def cleanup() -> None:
         if process.poll() is not None:
@@ -502,9 +509,10 @@ def start_local_app_server(
     settings: AppSettings,
     openai_api_key: str = "",
 ) -> tuple[bool, str, subprocess.Popen[bytes] | None]:
-    command = ["codex", "app-server", "--listen", settings.app_server_url]
+    command_name = app_server_bin()
+    command = [command_name, "app-server", "--listen", settings.app_server_url]
     if shutil.which(command[0]) is None:
-        return False, "`codex` command was not found on this host.", None
+        return False, f"`{command_name}` command was not found on this host.", None
     try:
         process = subprocess.Popen(
             command,

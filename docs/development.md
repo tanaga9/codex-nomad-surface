@@ -39,6 +39,10 @@ PYTHONPATH=. .venv/bin/streamlit run codex_nomad_surface/app.py
 Restart Streamlit when dependencies, environment variables, or launch options
 change. A browser reload is usually enough for ordinary Python source edits.
 
+When the connection screen starts local Codex App Server, it runs `codex` by
+default. Set `CODEX_APP_SERVER_BIN` before starting Streamlit to use another
+command name or executable path.
+
 ## Tests And Checks
 
 Use test discovery from the repository root:
