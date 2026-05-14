@@ -6,7 +6,7 @@ import json
 import os
 import queue
 import re
-import shutil
+import shlex
 import subprocess
 import textwrap
 import threading
@@ -471,6 +471,14 @@ def app_server_bin() -> str:
     return configured or DEFAULT_APP_SERVER_BIN
 
 
+def app_server_launch_command(settings: AppSettings) -> list[str]:
+    return [app_server_bin(), "app-server", "--listen", settings.app_server_url]
+
+
+def format_app_server_launch_command(settings: AppSettings) -> str:
+    return shlex.join(app_server_launch_command(settings))
+
+
 def terminate_process_at_exit(process: subprocess.Popen[bytes]) -> None:
     def cleanup() -> None:
         if process.poll() is not None:
@@ -513,10 +521,7 @@ def start_local_app_server(
     settings: AppSettings,
     openai_api_key: str = "",
 ) -> tuple[bool, str, subprocess.Popen[bytes] | None]:
-    command_name = app_server_bin()
-    command = [command_name, "app-server", "--listen", settings.app_server_url]
-    if shutil.which(command[0]) is None:
-        return False, f"`{command_name}` command was not found on this host.", None
+    command = app_server_launch_command(settings)
     try:
         process = subprocess.Popen(
             command,
@@ -527,6 +532,11 @@ def start_local_app_server(
         return False, f"Could not start Codex App Server: {exc}", None
     terminate_process_at_exit(process)
     return True, "Starting Codex App Server...", process
+
+
+def render_app_server_launch_details(settings: AppSettings) -> None:
+    st.caption("Launch command")
+    st.code(format_app_server_launch_command(settings), language="bash")
 
 
 @st.dialog("Codex App Server launch status", width="large")
@@ -551,11 +561,13 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
     )
     if st.session_state.app_server_launch_in_progress:
         st.info("Starting Codex App Server...")
+    render_app_server_launch_details(settings)
     openai_api_key = st.text_input(
-        "OpenAI API key for launch",
+        "OpenAI API key for launch (optional)",
         type="password",
         key=APP_SERVER_OPENAI_API_KEY_SESSION_KEY,
         help="Optional. When set, this value is passed to the launched Codex App Server as OPENAI_API_KEY and is not saved to settings.json.",
+        disabled=start_disabled,
     )
     if st.button(
         "Start Codex App Server (WebSockets)",
@@ -598,7 +610,10 @@ def connection_gate_screen(settings: AppSettings, status: ConnectionStatus) -> N
     )
     st.caption("Chat cannot start until the connection is available.")
 
-    settings_screen(settings)
+    settings_screen(
+        settings,
+        disabled=st.session_state.app_server_launch_in_progress,
+    )
     local_app_server_launcher(settings, status)
 
 
@@ -3729,12 +3744,20 @@ def render_codex_run_overrides(
     st.caption("Changes apply automatically to this chat's future turns.")
 
 
-def settings_screen(settings: AppSettings, heading: bool = True) -> None:
+def settings_screen(
+    settings: AppSettings,
+    heading: bool = True,
+    disabled: bool = False,
+) -> None:
     if heading:
         st.subheader("Settings")
     with st.form("server_settings"):
-        url = st.text_input("Codex App Server URL", value=settings.app_server_url)
-        submitted = st.form_submit_button("Save")
+        url = st.text_input(
+            "Codex App Server URL",
+            value=settings.app_server_url,
+            disabled=disabled,
+        )
+        submitted = st.form_submit_button("Save", disabled=disabled)
     if submitted:
         settings.app_server_url = url.strip()
         st.session_state.app_server_launch_in_progress = False
