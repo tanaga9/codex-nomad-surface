@@ -729,6 +729,81 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(payload["params"]["expectedTurnId"], "turn-1")
         self.assertEqual(payload["params"]["input"][0]["text"], "Adjust course.")
         self.assertIn(payload["id"], runtime["control_request_ids"])
+        self.assertEqual(
+            runtime["control_request_actions"][payload["id"]], "turn/steer"
+        )
+
+    def test_interrupt_turn_uses_active_turn_rpc_shape(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+
+        websocket = FakeWebSocket()
+        runtime = {
+            "websocket": websocket,
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "control_request_ids": set(),
+        }
+
+        result = asyncio.run(self.client._send_turn_interrupt_ws(runtime))
+
+        self.assertTrue(result["ok"])
+        payload = json.loads(websocket.sent[0])
+        self.assertEqual(payload["method"], "turn/interrupt")
+        self.assertEqual(payload["params"]["threadId"], "thread-1")
+        self.assertEqual(payload["params"]["turnId"], "turn-1")
+        self.assertIn(payload["id"], runtime["control_request_ids"])
+        self.assertEqual(
+            runtime["control_request_actions"][payload["id"]], "turn/interrupt"
+        )
+
+    def test_interrupt_turn_rpc_error_marks_runtime(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.messages = [
+                    json.dumps(
+                        {
+                            "id": "request-1",
+                            "error": {"message": "turn is no longer active"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "method": "turn/completed",
+                            "params": {"threadId": "thread-1"},
+                        }
+                    ),
+                ]
+                self.closed = False
+
+            async def recv(self) -> str:
+                return self.messages.pop(0)
+
+            async def close(self) -> None:
+                self.closed = True
+
+        websocket = FakeWebSocket()
+        runtime = {
+            "websocket": websocket,
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "output_parts": CodexTurnOutput(),
+            "stream_items": {},
+            "approvals": [],
+            "control_request_ids": {"request-1"},
+            "control_request_actions": {"request-1": "turn/interrupt"},
+        }
+
+        result = asyncio.run(self.client._collect_chat_turn_ws(runtime))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(runtime["interrupt_error"], "turn is no longer active")
+        self.assertEqual(result["output_parts"]["errors"], "turn is no longer active")
+        self.assertTrue(websocket.closed)
 
 
 if __name__ == "__main__":

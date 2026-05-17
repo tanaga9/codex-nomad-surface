@@ -1519,12 +1519,14 @@ def render_pending_turn(
             return
         if pending.get("output_parts"):
             render_codex_stream_output(pending["output_parts"])
-        render_pending_turn_wait_indicator(pending)
+        render_pending_turn_wait_indicator(client, pending)
 
     render_pending_interrupt_drafts(client, chat, pending)
 
 
 def pending_turn_wait_message(pending: dict) -> str:
+    if pending.get("interrupt_requested"):
+        return "Cancellation requested..."
     status = str(pending.get("status") or TURN_RUN_RUNNING)
     if status == TURN_RUN_STARTING:
         return "Starting turn..."
@@ -1533,14 +1535,48 @@ def pending_turn_wait_message(pending: dict) -> str:
     return "Waiting for response..."
 
 
-def render_pending_turn_wait_indicator(pending: dict) -> None:
+def render_pending_turn_wait_indicator(client: CodexClient, pending: dict) -> None:
     if pending.get("status") not in {
         TURN_RUN_STARTING,
         TURN_RUN_RUNNING,
         TURN_RUN_RESPONDING_APPROVAL,
     }:
         return
-    st.status(pending_turn_wait_message(pending), state="running")
+    runtime = pending.get("runtime") if isinstance(pending.get("runtime"), dict) else {}
+    interrupt_error = runtime.get("interrupt_error") if runtime else None
+    if interrupt_error:
+        pending.pop("interrupt_requested", None)
+    can_interrupt = bool(
+        runtime
+        and runtime.get("thread_id")
+        and runtime.get("turn_id")
+        and not pending.get("interrupt_requested")
+    )
+    wait_panel = st.container(border=True)
+    with wait_panel:
+        message_col, action_col = st.columns([1, 0.28], vertical_alignment="center")
+        with message_col:
+            st.markdown(pending_turn_wait_message(pending))
+        with action_col:
+            cancel_clicked = st.button(
+                "Cancel turn",
+                key=f"cancel_turn_{pending.get('run_id') or pending.get('chat_id')}",
+                type="secondary",
+                disabled=not can_interrupt,
+                help="Request cancellation of the current response.",
+                use_container_width=True,
+            )
+        if pending.get("interrupt_requested"):
+            st.caption("Waiting for the turn to finish interrupting.")
+        if interrupt_error:
+            st.error(f"Cancellation request failed: {interrupt_error}")
+    if cancel_clicked:
+        result = client.interrupt_chat_turn(runtime)
+        if result.get("ok"):
+            pending["interrupt_requested"] = True
+            st.rerun()
+        else:
+            st.error(result.get("output") or "Could not cancel the turn.")
 
 
 def start_turn_run_worker(

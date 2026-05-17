@@ -358,6 +358,22 @@ class CodexClient:
         finally:
             asyncio.set_event_loop(None)
 
+    def interrupt_chat_turn(self, runtime: dict[str, Any]) -> dict[str, Any]:
+        loop = runtime.get("loop")
+        if not loop:
+            return {"ok": False, "output": "Active turn connection was not found."}
+        if loop.is_closed():
+            return {"ok": False, "output": "Active turn connection was already closed."}
+        coroutine = self._send_turn_interrupt_ws(runtime)
+        if loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            return future.result(timeout=max(self.timeout, 30.0))
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coroutine)
+        finally:
+            asyncio.set_event_loop(None)
+
     def respond_chat_turn(
         self,
         runtime: dict[str, Any],
@@ -1215,7 +1231,7 @@ class CodexClient:
         if not websocket or not thread_id or not turn_id:
             return {"ok": False, "output": "Active turn state was not found."}
         request_id = str(uuid.uuid4())
-        runtime.setdefault("control_request_ids", set()).add(request_id)
+        self._track_control_request(runtime, request_id, "turn/steer")
         await websocket.send(
             json.dumps(
                 {
@@ -1231,6 +1247,51 @@ class CodexClient:
                             }
                         ],
                         "expectedTurnId": turn_id,
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
+
+    def _track_control_request(
+        self, runtime: dict[str, Any], request_id: str, action: str
+    ) -> None:
+        runtime.setdefault("control_request_ids", set()).add(request_id)
+        runtime.setdefault("control_request_actions", {})[request_id] = action
+
+    def _pop_control_request_action(
+        self, runtime: dict[str, Any], request_id: Any
+    ) -> str | None:
+        if request_id is None:
+            return None
+        action = None
+        actions = runtime.get("control_request_actions")
+        if isinstance(actions, dict):
+            action = actions.pop(request_id, None)
+        request_ids = runtime.get("control_request_ids")
+        if isinstance(request_ids, set) and request_id in request_ids:
+            request_ids.discard(request_id)
+            return action or ""
+        return action
+
+    async def _send_turn_interrupt_ws(self, runtime: dict[str, Any]) -> dict[str, Any]:
+        websocket = runtime.get("websocket")
+        thread_id = runtime.get("thread_id")
+        turn_id = runtime.get("turn_id")
+        if not websocket or not thread_id or not turn_id:
+            return {"ok": False, "output": "Active turn state was not found."}
+        request_id = str(uuid.uuid4())
+        runtime.pop("interrupt_error", None)
+        self._track_control_request(runtime, request_id, "turn/interrupt")
+        await websocket.send(
+            json.dumps(
+                {
+                    "id": request_id,
+                    "method": "turn/interrupt",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
                     },
                 },
                 ensure_ascii=False,
@@ -1261,13 +1322,19 @@ class CodexClient:
 
             last_activity = loop.time()
             message = json.loads(raw_message)
-            if message.get("id") in runtime.get("control_request_ids", set()):
-                runtime["control_request_ids"].discard(message.get("id"))
+            control_action = self._pop_control_request_action(
+                runtime, message.get("id")
+            )
+            if control_action is not None:
                 if "error" in message:
+                    error_text = message["error"].get("message") or json.dumps(
+                        message["error"], ensure_ascii=False
+                    )
+                    if control_action == "turn/interrupt":
+                        runtime["interrupt_error"] = error_text
                     output_parts.append_block(
                         "error",
-                        message["error"].get("message")
-                        or json.dumps(message["error"], ensure_ascii=False),
+                        error_text,
                     )
                     if output_callback:
                         output_callback(self._output_parts_snapshot(output_parts))
