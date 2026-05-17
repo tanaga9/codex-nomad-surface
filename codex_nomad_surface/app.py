@@ -1363,8 +1363,7 @@ def extract_promptforms(content: str) -> tuple[str, list[dict], list[str]]:
     return stripped, forms, errors
 
 
-@st.fragment(run_every=CHAT_HISTORY_POLL_INTERVAL_SECONDS)
-def chat_history_panel(
+def render_chat_history_panel_contents(
     client: CodexClient, project: Project | None, chat: ChatSession | None
 ) -> None:
     load_older_history(client, chat)
@@ -1384,6 +1383,33 @@ def chat_history_panel(
         st.session_state.chat_history_autoscroll = False
 
 
+@st.fragment(run_every=CHAT_HISTORY_POLL_INTERVAL_SECONDS)
+def polling_chat_history_panel(
+    client: CodexClient, project: Project | None, chat: ChatSession | None
+) -> None:
+    render_chat_history_panel_contents(client, project, chat)
+
+
+def chat_history_panel(
+    client: CodexClient, project: Project | None, chat: ChatSession | None
+) -> None:
+    pending = st.session_state.get("pending_turn")
+    polling_statuses = {
+        TURN_RUN_STARTING,
+        TURN_RUN_RUNNING,
+        TURN_RUN_RESPONDING_APPROVAL,
+    }
+    if (
+        pending
+        and chat
+        and pending.get("chat_id") == chat.id
+        and pending.get("status") in polling_statuses
+    ):
+        polling_chat_history_panel(client, project, chat)
+        return
+    render_chat_history_panel_contents(client, project, chat)
+
+
 def render_pending_turn(
     client: CodexClient, project: Project, chat: ChatSession
 ) -> None:
@@ -1395,20 +1421,37 @@ def render_pending_turn(
     with st.chat_message("user"):
         render_chat_user_markdown(pending["text"])
     with st.chat_message("assistant"):
+        result = pending.pop("result", None)
+        if result:
+            handle_turn_result(chat, pending, result)
+            return
         if pending.get("approval"):
             render_inline_approval(client, chat, pending)
             return
         if pending.get("output_parts"):
             render_codex_stream_output(pending["output_parts"])
-        elif pending.get("worker_id"):
-            with st.spinner("Sending to Codex..."):
-                st.caption(f"Codex turn is {pending.get('status') or 'running'}.")
-        result = pending.pop("result", None)
+        render_pending_turn_wait_indicator(pending)
 
-        if result:
-            handle_turn_result(chat, pending, result)
-            return
     render_pending_interrupt_drafts(client, chat, pending)
+
+
+def pending_turn_wait_message(pending: dict) -> str:
+    status = str(pending.get("status") or TURN_RUN_RUNNING)
+    if status == TURN_RUN_STARTING:
+        return "Starting turn..."
+    if status == TURN_RUN_RESPONDING_APPROVAL:
+        return "Sending response and waiting..."
+    return "Waiting for response..."
+
+
+def render_pending_turn_wait_indicator(pending: dict) -> None:
+    if pending.get("status") not in {
+        TURN_RUN_STARTING,
+        TURN_RUN_RUNNING,
+        TURN_RUN_RESPONDING_APPROVAL,
+    }:
+        return
+    st.status(pending_turn_wait_message(pending), state="running")
 
 
 def start_turn_run_worker(

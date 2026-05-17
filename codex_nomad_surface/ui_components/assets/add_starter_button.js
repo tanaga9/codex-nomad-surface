@@ -5,12 +5,46 @@
   }
 
   const starter = __STARTER_JSON__;
+  const mountKey = button.dataset.codexAddStarterKey || starter;
   const referenceButtonSelectors = [
     '[data-testid="stBaseButton-secondary"]:not([data-codex-add-starter="true"])',
     '.stButton > button:not([data-codex-add-starter="true"])',
     'button[kind="secondary"]:not([data-codex-add-starter="true"])',
   ];
+  const manager = window.__codexNomadAddStarterButtonManager || {
+    mounts: new Map(),
+  };
+  window.__codexNomadAddStarterButtonManager = manager;
+
+  const cleanupMount = (record) => {
+    if (!record) {
+      return;
+    }
+    record.observers.forEach((observer) => observer.disconnect());
+    if (record.animationFrameId) {
+      window.cancelAnimationFrame(record.animationFrameId);
+    }
+    if (record.button instanceof HTMLButtonElement) {
+      record.button.onclick = null;
+    }
+  };
+
+  Array.from(manager.mounts.entries()).forEach(([key, record]) => {
+    const staleButton =
+      !(record.button instanceof HTMLButtonElement) || !record.button.isConnected;
+    if (key === mountKey || staleButton) {
+      cleanupMount(record);
+      manager.mounts.delete(key);
+    }
+  });
+
   const themeSyncObservers = [];
+  const mountRecord = {
+    button,
+    observers: themeSyncObservers,
+    animationFrameId: 0,
+  };
+  manager.mounts.set(mountKey, mountRecord);
 
   const syncButtonTheme = () => {
     const referenceButton = referenceButtonSelectors
@@ -71,7 +105,18 @@
         return;
       }
       const observer = new MutationObserver(() => {
-        window.requestAnimationFrame(syncButtonTheme);
+        if (mountRecord.animationFrameId) {
+          window.cancelAnimationFrame(mountRecord.animationFrameId);
+        }
+        mountRecord.animationFrameId = window.requestAnimationFrame(() => {
+          mountRecord.animationFrameId = 0;
+          if (!button.isConnected) {
+            cleanupMount(mountRecord);
+            manager.mounts.delete(mountKey);
+            return;
+          }
+          syncButtonTheme();
+        });
       });
       observer.observe(target, {
         attributes: true,
