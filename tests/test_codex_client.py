@@ -616,6 +616,40 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertIn("issues/list", parts.segments[0].text)
         self.assertNotIn("\n", parts.segments[0].text)
 
+    def test_thread_history_messages_preserve_server_ids(self) -> None:
+        result = self.client._thread_messages_from_turns_list(
+            {
+                "data": [
+                    {
+                        "id": "turn-1",
+                        "items": [
+                            {
+                                "id": "user-item-1",
+                                "type": "userMessage",
+                                "content": [{"text": "Hello"}],
+                            },
+                            {
+                                "id": "agent-item-1",
+                                "type": "agentMessage",
+                                "text": "Hi",
+                                "phase": "final_answer",
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(len(result.messages), 2)
+        self.assertEqual(
+            result.messages[0]["metadata"],
+            {"server_turn_id": "turn-1", "server_item_id": "user-item-1"},
+        )
+        self.assertEqual(result.messages[1]["metadata"]["server_turn_id"], "turn-1")
+        self.assertEqual(
+            result.messages[1]["metadata"]["server_item_ids"], ["agent-item-1"]
+        )
+
     def test_unknown_event_is_preserved_as_other_output(self) -> None:
         parts = CodexTurnOutput()
 

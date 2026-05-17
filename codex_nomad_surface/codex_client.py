@@ -1167,6 +1167,7 @@ class CodexClient:
             return {
                 "ok": False,
                 "thread_id": thread_id,
+                "turn_id": runtime.get("turn_id"),
                 "output": self._output_parts_snapshot(output_parts)["output"]
                 or text_output,
                 "output_parts": self._output_parts_snapshot(output_parts),
@@ -1291,6 +1292,7 @@ class CodexClient:
                 return {
                     "ok": True,
                     "thread_id": thread_id,
+                    "turn_id": runtime.get("turn_id"),
                     "output": snapshot["output"],
                     "output_parts": snapshot,
                     "approvals": approvals,
@@ -1304,6 +1306,7 @@ class CodexClient:
         return {
             "ok": False,
             "thread_id": thread_id,
+            "turn_id": runtime.get("turn_id"),
             "output": snapshot["output"],
             "output_parts": snapshot,
             "approvals": approvals,
@@ -1374,30 +1377,43 @@ class CodexClient:
         if not isinstance(turn, dict):
             return []
 
+        turn_id = str(turn.get("id") or "")
         items = turn.get("items")
         if isinstance(items, list):
             messages: list[dict[str, Any]] = []
             assistant_parts = self._empty_output_parts()
             for item in items:
-                message = self._thread_message_from_item(item)
+                message = self._thread_message_from_item(item, turn_id)
                 if message:
                     messages.append(message)
                     continue
                 self._update_output_parts_from_item(item, assistant_parts)
             assistant_snapshot = self._output_parts_snapshot(assistant_parts)
             if any(assistant_snapshot.values()):
+                item_ids = [
+                    str(segment.get("item_id") or "")
+                    for segment in assistant_snapshot.get("segments", [])
+                    if str(segment.get("item_id") or "")
+                ]
+                metadata: dict[str, Any] = {"codex_output": assistant_snapshot}
+                if turn_id:
+                    metadata["server_turn_id"] = turn_id
+                if item_ids:
+                    metadata["server_item_ids"] = item_ids
                 messages.append(
                     {
                         "role": "assistant",
                         "content": assistant_snapshot["output"],
-                        "metadata": {"codex_output": assistant_snapshot},
+                        "metadata": metadata,
                     }
                 )
             return messages
 
         return []
 
-    def _thread_message_from_item(self, item: Any) -> dict[str, Any] | None:
+    def _thread_message_from_item(
+        self, item: Any, turn_id: str = ""
+    ) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
 
@@ -1406,7 +1422,16 @@ class CodexClient:
             content = self._content_text(item.get("content")).strip()
             if not content:
                 return None
-            return {"role": "user", "content": content}
+            metadata = {}
+            item_id = str(item.get("id") or "")
+            if turn_id:
+                metadata["server_turn_id"] = turn_id
+            if item_id:
+                metadata["server_item_id"] = item_id
+            message = {"role": "user", "content": content}
+            if metadata:
+                message["metadata"] = metadata
+            return message
 
         return None
 

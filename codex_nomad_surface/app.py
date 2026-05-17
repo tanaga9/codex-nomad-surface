@@ -90,6 +90,8 @@ APP_SERVER_BIN_ENV_VAR = "CODEX_APP_SERVER_BIN"
 DEFAULT_APP_SERVER_BIN = "codex"
 DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
+CHAT_HISTORY_RECENT_MESSAGE_LIMIT = 50
+CHAT_HISTORY_LOAD_EARLIER_LIMIT = 40
 UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 NEW_PROJECT_KEY = "__new_project__"
@@ -906,6 +908,86 @@ def update_thread_history_state(thread_id: str, result: CodexThreadMessages) -> 
     st.session_state.thread_history_has_older[thread_id] = result.has_older
 
 
+def chat_message_identities(message: ChatMessage) -> list[tuple[str, ...]]:
+    metadata = message.metadata or {}
+    server_turn_id = str(metadata.get("server_turn_id") or "")
+    server_item_id = str(metadata.get("server_item_id") or "")
+    if server_item_id:
+        return [("server_item", server_item_id)]
+
+    server_item_ids = [
+        str(item_id)
+        for item_id in metadata.get("server_item_ids", [])
+        if str(item_id)
+    ]
+    if server_item_ids:
+        return [("server_items", server_turn_id, *server_item_ids)]
+    if server_turn_id:
+        return [("server_turn_role", server_turn_id, message.role)]
+    metadata = json.dumps(message.metadata or {}, sort_keys=True, ensure_ascii=False)
+    return [("content", message.role, message.content, metadata)]
+
+
+def chat_message_turn_role_identity(message: ChatMessage) -> tuple[str, ...] | None:
+    server_turn_id = str((message.metadata or {}).get("server_turn_id") or "")
+    if not server_turn_id:
+        return None
+    return ("server_turn_role", server_turn_id, message.role)
+
+
+def chat_message_has_server_item_identity(message: ChatMessage) -> bool:
+    metadata = message.metadata or {}
+    if str(metadata.get("server_item_id") or ""):
+        return True
+    return any(str(item_id) for item_id in metadata.get("server_item_ids", []))
+
+
+def merge_thread_history_messages(
+    existing: list[ChatMessage], loaded: list[ChatMessage]
+) -> list[ChatMessage]:
+    merged: list[ChatMessage] = []
+    seen: set[tuple[str, ...]] = set()
+    loaded_turn_roles: set[tuple[str, ...]] = set()
+    candidates = [
+        *[("loaded", message) for message in loaded],
+        *[("existing", message) for message in existing],
+    ]
+    for source, message in candidates:
+        identities = chat_message_identities(message)
+        if any(identity in seen for identity in identities):
+            continue
+        turn_role = chat_message_turn_role_identity(message)
+        if source == "existing" and turn_role in loaded_turn_roles:
+            continue
+        seen.update(identities)
+        if (
+            source == "loaded"
+            and chat_message_has_server_item_identity(message)
+            and turn_role
+        ):
+            loaded_turn_roles.add(turn_role)
+        merged.append(message)
+    return merged
+
+
+def trim_chat_history_if_needed(client: CodexClient, chat: ChatSession | None) -> None:
+    if not chat or not chat.thread_id or not st.session_state.chat_history_autoscroll:
+        return
+    if st.session_state.get("pending_turn"):
+        return
+    if len(chat.messages) <= CHAT_HISTORY_RECENT_MESSAGE_LIMIT:
+        return
+    result = client.read_thread_messages(
+        chat.thread_id, limit=CHAT_HISTORY_RECENT_MESSAGE_LIMIT
+    )
+    messages = thread_messages_from_result(result)
+    if not messages:
+        return
+    update_thread_history_state(chat.thread_id, result)
+    chat.messages = messages
+    chat.touch()
+
+
 def hydrate_thread_chat(client: CodexClient, chat: ChatSession | None) -> None:
     if not chat or not chat.thread_id or chat.messages:
         return
@@ -931,13 +1013,19 @@ def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
     if not st.session_state.thread_history_has_older.get(chat.thread_id):
         return
 
-    if st.button("Load older history", key=f"older_{chat.thread_id}"):
+    if st.button("Show previous messages", key=f"older_{chat.thread_id}"):
         cursor = st.session_state.thread_history_cursors.get(chat.thread_id)
-        result = client.read_thread_messages(chat.thread_id, limit=20, cursor=cursor)
+        if not cursor:
+            st.session_state.thread_history_has_older[chat.thread_id] = False
+            st.rerun()
+            return
+        result = client.read_thread_messages(
+            chat.thread_id, limit=CHAT_HISTORY_LOAD_EARLIER_LIMIT, cursor=cursor
+        )
         update_thread_history_state(chat.thread_id, result)
         messages = thread_messages_from_result(result)
         if messages:
-            chat.messages = messages + chat.messages
+            chat.messages = merge_thread_history_messages(chat.messages, messages)
             chat.touch()
         st.session_state.chat_history_autoscroll = False
         st.rerun()
@@ -1131,6 +1219,7 @@ def render_chat(
     skill_defs = load_available_skill_defs(
         client.base_url, project.path if project else ""
     )
+    trim_chat_history_if_needed(client, chat)
     if not chat.messages:
         if chat.thread_id:
             st.caption(
@@ -1148,8 +1237,8 @@ def render_chat(
         return
 
     pending = st.session_state.get("pending_turn") if skip_latest_user else None
-    messages = []
-    for message in chat.messages:
+    message_items = []
+    for index, message in enumerate(chat.messages):
         metadata = message.metadata or {}
         if (
             pending
@@ -1172,8 +1261,8 @@ def render_chat(
             and metadata.get("kind") != "interrupt_draft"
         ):
             continue
-        messages.append(message)
-    for index, message in enumerate(messages):
+        message_items.append((index, message))
+    for index, message in message_items:
         if message.role == "promptform_picker":
             picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
             with st.chat_message("promptform-picker", avatar="🧩"):
@@ -2121,6 +2210,15 @@ def handle_turn_result(
     if result.get("thread_id"):
         chat.thread_id = result["thread_id"]
         pending["thread_id"] = result["thread_id"]
+    turn_id = str(result.get("turn_id") or pending.get("turn_id") or "")
+    if turn_id:
+        for message in chat.messages:
+            if (
+                message.role == "user"
+                and message.metadata.get("run_id") == pending.get("run_id")
+            ):
+                message.metadata["server_turn_id"] = turn_id
+                break
 
     if result.get("status") == "approval" and result.get("approval"):
         pending["status"] = TURN_RUN_AWAITING_APPROVAL
@@ -2145,6 +2243,15 @@ def handle_turn_result(
     else:
         response_text = "The response was empty."
         metadata = {}
+    if turn_id:
+        metadata["server_turn_id"] = turn_id
+    item_ids = [
+        str(segment.get("item_id") or "")
+        for segment in output_parts.get("segments", [])
+        if str(segment.get("item_id") or "")
+    ]
+    if item_ids:
+        metadata["server_item_ids"] = item_ids
     chat.add_message("assistant", response_text, metadata=metadata)
     if pending_state_key == "pending_turn":
         restore_interrupt_draft_to_input_if_pending(chat)
