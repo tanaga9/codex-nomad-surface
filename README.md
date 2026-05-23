@@ -45,9 +45,19 @@ There is no CLI fallback. Prompt submission is disabled when Codex App Server is
 
 Python 3.12 or newer is required.
 
+macOS / Linux:
+
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
+pip install -e .
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -e .
 ```
 
@@ -55,8 +65,18 @@ pip install -e .
 
 Start the Streamlit app.
 
+macOS / Linux:
+
 ```bash
 NOMAD_AUTH_SECRET='your-secret' streamlit run codex_nomad_surface/app.py
+```
+
+Windows PowerShell:
+
+```powershell
+$env:NOMAD_AUTH_SECRET = "your-secret"
+$env:CODEX_APP_SERVER_BIN = "$env:APPDATA\npm\codex.cmd"
+streamlit run codex_nomad_surface/app.py
 ```
 
 If the configured Codex App Server URL points to `127.0.0.1` and the app cannot connect, the connection screen can start Codex App Server for you.
@@ -65,6 +85,8 @@ passed only to the launched Codex App Server process as `OPENAI_API_KEY`.
 By default, the launcher runs `codex app-server`. Set
 `CODEX_APP_SERVER_BIN` before starting Streamlit to use another command name or
 executable path in place of `codex`.
+On Windows with npm-installed Codex, use the command wrapper such as
+`/path/to/codex.cmd` rather than the PowerShell wrapper `codex.ps1`.
 
 You can also start Codex App Server manually.
 
