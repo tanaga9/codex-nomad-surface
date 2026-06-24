@@ -1494,6 +1494,10 @@ def chat_history_panel(
         and pending.get("chat_id") == chat.id
         and pending.get("status") in polling_statuses
     ):
+        drain_pending_turn_events(pending)
+        if pending.get("result") or pending.get("approval"):
+            render_chat_history_panel_contents(client, project, chat)
+            return
         polling_chat_history_panel(client, project, chat)
         return
     render_chat_history_panel_contents(client, project, chat)
