@@ -698,12 +698,46 @@ def query_chat_id() -> str:
     return str(value or "")
 
 
+def public_query_chat_id(chat_id: str) -> str:
+    return chat_id if chat_id.startswith("thread:") else ""
+
+
 def set_query_chat_id(chat_id: str) -> None:
+    chat_id = public_query_chat_id(chat_id)
     if chat_id:
         st.query_params["chat"] = chat_id
     elif "chat" in st.query_params:
         del st.query_params["chat"]
     st.session_state.last_query_chat_id = chat_id
+
+
+def promote_chat_to_thread_selection(chat: ChatSession, thread_id: str) -> None:
+    old_chat_id = chat.id
+    thread_chat_id = f"thread:{thread_id}"
+    if old_chat_id != thread_chat_id:
+        controls = run_controls_state()
+        if old_chat_id in controls and thread_chat_id not in controls:
+            controls[thread_chat_id] = controls.pop(old_chat_id)
+        elif old_chat_id in controls:
+            controls.pop(old_chat_id, None)
+        for state_key in (
+            "pending_turn",
+            "pending_interrupt_draft",
+            "pending_chat_input_restore",
+        ):
+            value = st.session_state.get(state_key)
+            if isinstance(value, dict) and value.get("chat_id") == old_chat_id:
+                value["chat_id"] = thread_chat_id
+        if st.session_state.get("last_rendered_chat_id") == old_chat_id:
+            st.session_state.last_rendered_chat_id = thread_chat_id
+        chat.id = thread_chat_id
+
+    selected_chat_id = st.session_state.get("selected_chat_id", "")
+    if selected_chat_id not in {"", old_chat_id, thread_chat_id}:
+        return
+    st.session_state.selected_chat_id = thread_chat_id
+    st.session_state[PENDING_CHAT_SELECT_KEY] = thread_chat_id
+    set_query_chat_id(thread_chat_id)
 
 
 def reset_home_view() -> None:
@@ -903,6 +937,20 @@ def thread_messages_from_result(result: CodexThreadMessages) -> list[ChatMessage
     ]
 
 
+def thread_status_is_active(status: object) -> bool:
+    normalized = str(status or "").strip().lower().replace("-", "").replace("_", "")
+    return normalized == "inprogress"
+
+
+def chat_thread_is_active(
+    chat: ChatSession | None, server_threads: list[CodexThread]
+) -> bool:
+    if not chat or not chat.thread_id:
+        return False
+    thread = next((item for item in server_threads if item.id == chat.thread_id), None)
+    return bool(thread and thread_status_is_active(thread.status))
+
+
 def update_thread_history_state(thread_id: str, result: CodexThreadMessages) -> None:
     st.session_state.thread_history_cursors[thread_id] = result.cursor
     st.session_state.thread_history_has_older[thread_id] = result.has_older
@@ -970,6 +1018,133 @@ def merge_thread_history_messages(
     return merged
 
 
+def codex_output_segment_identity(segment: dict[str, Any]) -> tuple[str, ...]:
+    item_id = str(segment.get("item_id") or "")
+    if item_id:
+        return (
+            "item",
+            str(segment.get("kind") or ""),
+            item_id,
+            str(segment.get("phase") or ""),
+        )
+    return (
+        "content",
+        str(segment.get("kind") or ""),
+        str(segment.get("phase") or ""),
+        str(segment.get("text") or ""),
+    )
+
+
+def merge_codex_output_segments(
+    existing_segments: list[dict[str, Any]], loaded_segments: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    merged = [segment.copy() for segment in existing_segments]
+    indexes = {
+        codex_output_segment_identity(segment): index
+        for index, segment in enumerate(merged)
+    }
+    for segment in loaded_segments:
+        copied = segment.copy()
+        identity = codex_output_segment_identity(copied)
+        if identity in indexes:
+            merged[indexes[identity]] = copied
+            continue
+        indexes[identity] = len(merged)
+        merged.append(copied)
+    return merged
+
+
+def merge_recent_assistant_message(
+    existing: ChatMessage, loaded: ChatMessage
+) -> ChatMessage:
+    if existing.role != "assistant" or loaded.role != "assistant":
+        return loaded
+
+    existing_parts = normalize_codex_output_parts(
+        existing.metadata.get("codex_output"), existing.content
+    )
+    loaded_parts = normalize_codex_output_parts(
+        loaded.metadata.get("codex_output"), loaded.content
+    )
+    existing_segments = existing_parts.get("segments", [])
+    loaded_segments = loaded_parts.get("segments", [])
+    if not existing_segments or not loaded_segments:
+        return loaded
+
+    merged_segments = merge_codex_output_segments(existing_segments, loaded_segments)
+    merged_parts = normalize_codex_output_parts({"segments": merged_segments})
+    metadata = {**existing.metadata, **loaded.metadata, "codex_output": merged_parts}
+
+    item_ids = []
+    for item_id in [
+        *existing.metadata.get("server_item_ids", []),
+        *loaded.metadata.get("server_item_ids", []),
+    ]:
+        item_id = str(item_id or "")
+        if item_id and item_id not in item_ids:
+            item_ids.append(item_id)
+    if item_ids:
+        metadata["server_item_ids"] = item_ids
+
+    content = merged_parts["output"] or loaded.content or existing.content
+    return ChatMessage(role=loaded.role, content=content, metadata=metadata)
+
+
+def merge_recent_loaded_messages(
+    existing_overlap: list[ChatMessage], loaded_recent: list[ChatMessage]
+) -> list[ChatMessage]:
+    existing_by_turn_role = {
+        turn_role: message
+        for message in existing_overlap
+        if (turn_role := chat_message_turn_role_identity(message))
+    }
+    return [
+        merge_recent_assistant_message(existing_by_turn_role[turn_role], message)
+        if (turn_role := chat_message_turn_role_identity(message))
+        and turn_role in existing_by_turn_role
+        else message
+        for message in loaded_recent
+    ]
+
+
+def merge_recent_thread_history_messages(
+    existing: list[ChatMessage], loaded_recent: list[ChatMessage]
+) -> list[ChatMessage]:
+    if not existing:
+        return loaded_recent
+    if not loaded_recent:
+        return existing
+
+    loaded_identities = {
+        identity
+        for message in loaded_recent
+        for identity in chat_message_identities(message)
+    }
+    loaded_turn_roles = {
+        turn_role
+        for message in loaded_recent
+        if (turn_role := chat_message_turn_role_identity(message))
+    }
+
+    def overlaps_loaded(message: ChatMessage) -> bool:
+        if any(
+            identity in loaded_identities
+            for identity in chat_message_identities(message)
+        ):
+            return True
+        turn_role = chat_message_turn_role_identity(message)
+        return bool(turn_role and turn_role in loaded_turn_roles)
+
+    first_overlap = next(
+        (index for index, message in enumerate(existing) if overlaps_loaded(message)),
+        None,
+    )
+    if first_overlap is None:
+        return existing + loaded_recent
+    merged_recent = merge_recent_loaded_messages(existing[first_overlap:], loaded_recent)
+    return existing[:first_overlap] + merged_recent
+
+
 def trim_chat_history_if_needed(client: CodexClient, chat: ChatSession | None) -> bool:
     if not chat or not chat.thread_id or not st.session_state.chat_history_autoscroll:
         return False
@@ -1006,6 +1181,26 @@ def hydrate_thread_chat(client: CodexClient, chat: ChatSession | None) -> None:
     if chat.messages:
         chat.touch()
         st.session_state.chat_history_autoscroll = True
+
+
+def refresh_active_thread_history(client: CodexClient, chat: ChatSession | None) -> bool:
+    if not chat or not chat.thread_id or st.session_state.get("pending_turn"):
+        return False
+    result = client.read_thread_messages(
+        chat.thread_id, limit=CHAT_HISTORY_RECENT_MESSAGE_LIMIT
+    )
+    messages = thread_messages_from_result(result)
+    if not messages:
+        return False
+
+    update_thread_history_state(chat.thread_id, result)
+    merged = merge_recent_thread_history_messages(chat.messages, messages)
+    if merged == chat.messages:
+        return False
+    chat.messages = merged
+    chat.touch()
+    st.session_state.chat_history_autoscroll = True
+    return True
 
 
 def load_older_history(client: CodexClient, chat: ChatSession | None) -> None:
@@ -1453,8 +1648,13 @@ def extract_promptforms(content: str) -> tuple[str, list[dict], list[str]]:
 
 
 def render_chat_history_panel_contents(
-    client: CodexClient, project: Project | None, chat: ChatSession | None
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession | None,
+    refresh_active_thread: bool = False,
 ) -> None:
+    if refresh_active_thread:
+        refresh_active_thread_history(client, chat)
     load_older_history(client, chat)
     trimmed_history = trim_chat_history_if_needed(client, chat)
     autoscroll = bool(st.session_state.chat_history_autoscroll) and not trimmed_history
@@ -1475,13 +1675,21 @@ def render_chat_history_panel_contents(
 
 @st.fragment(run_every=CHAT_HISTORY_POLL_INTERVAL_SECONDS)
 def polling_chat_history_panel(
-    client: CodexClient, project: Project | None, chat: ChatSession | None
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession | None,
+    refresh_active_thread: bool = False,
 ) -> None:
-    render_chat_history_panel_contents(client, project, chat)
+    render_chat_history_panel_contents(
+        client, project, chat, refresh_active_thread=refresh_active_thread
+    )
 
 
 def chat_history_panel(
-    client: CodexClient, project: Project | None, chat: ChatSession | None
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession | None,
+    active_thread: bool = False,
 ) -> None:
     pending = st.session_state.get("pending_turn")
     polling_statuses = {
@@ -1500,6 +1708,11 @@ def chat_history_panel(
             render_chat_history_panel_contents(client, project, chat)
             return
         polling_chat_history_panel(client, project, chat)
+        return
+    if active_thread and chat and chat.thread_id:
+        polling_chat_history_panel(
+            client, project, chat, refresh_active_thread=True
+        )
         return
     render_chat_history_panel_contents(client, project, chat)
 
@@ -2292,6 +2505,8 @@ def handle_turn_result(
     if result.get("thread_id"):
         chat.thread_id = result["thread_id"]
         pending["thread_id"] = result["thread_id"]
+        if pending_state_key == "pending_turn":
+            promote_chat_to_thread_selection(chat, result["thread_id"])
     turn_id = str(result.get("turn_id") or pending.get("turn_id") or "")
     if turn_id:
         for message in chat.messages:
@@ -3613,6 +3828,7 @@ def chat_workspace(
     client: CodexClient,
     project: Project | None,
     chat: ChatSession | None,
+    active_thread: bool = False,
 ) -> None:
     active_chat = chat or (draft_chat(project) if project else None)
     # Keep the native st.chat_input UI, while separating the append bridge
@@ -3620,7 +3836,7 @@ def chat_workspace(
     inject_compact_chat_input_style()
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
-    chat_history_panel(client, project, active_chat)
+    chat_history_panel(client, project, active_chat, active_thread=active_thread)
     chat_composer(client, project, active_chat)
 
 
@@ -4032,7 +4248,12 @@ def main_screen() -> None:
     if chat and chat.id != st.session_state.last_rendered_chat_id:
         st.session_state.last_rendered_chat_id = chat.id
 
-    chat_workspace(client, project, chat)
+    chat_workspace(
+        client,
+        project,
+        chat,
+        active_thread=chat_thread_is_active(chat, server_threads),
+    )
 
 
 def main() -> None:
