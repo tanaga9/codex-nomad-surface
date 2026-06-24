@@ -3473,22 +3473,10 @@ def append_pending_skill_to_chat_input(message_key: str) -> None:
     if not marker:
         return
     nonce = str(pending.get("nonce") or uuid.uuid4())
-    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", f"skill-append-{message_key}-{nonce}")
-    st.html(
-        f"""
-        <span id="{dom_id}"></span>
-        <script>
-        (() => {{
-          const marker = {json.dumps(marker)};
-          const appendToChatInput = window.codexNomadSurface?.appendToChatInput;
-          if (typeof appendToChatInput !== "function") {{
-            return;
-          }}
-          appendToChatInput(marker, {{ spacing: "line" }});
-        }})();
-        </script>
-        """,
-        unsafe_allow_javascript=True,
+    render_append_once_to_chat_input(
+        f"skill-append-{message_key}-{nonce}",
+        marker,
+        spacing="line",
     )
 
 
@@ -3502,21 +3490,41 @@ def append_pending_file_path_to_chat_input(message_key: str) -> None:
         return
     marker = f'"{path}"' if any(char.isspace() for char in path) else f"@{path}"
     nonce = str(pending.get("nonce") or uuid.uuid4())
-    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", f"file-path-append-{message_key}-{nonce}")
-    st.html(
-        f"""
+    render_append_once_to_chat_input(
+        f"file-path-append-{message_key}-{nonce}",
+        marker,
+        spacing="line",
+    )
+
+
+def append_once_chat_input_html(token: str, text: str, spacing: str) -> str:
+    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", token)
+    state_key = "codexNomadChatInputAppendTokens"
+    return f"""
         <span id="{dom_id}"></span>
         <script>
         (() => {{
-          const path = {json.dumps(marker)};
+          const token = {json.dumps(dom_id)};
+          const text = {json.dumps(text)};
           const appendToChatInput = window.codexNomadSurface?.appendToChatInput;
+          window.{state_key} = window.{state_key} || new Set();
+          if (window.{state_key}.has(token)) {{
+            return;
+          }}
           if (typeof appendToChatInput !== "function") {{
             return;
           }}
-          appendToChatInput(path, {{ spacing: "line" }});
+          if (appendToChatInput(text, {{ spacing: {json.dumps(spacing)} }})) {{
+            window.{state_key}.add(token);
+          }}
         }})();
         </script>
-        """,
+        """
+
+
+def render_append_once_to_chat_input(token: str, text: str, spacing: str) -> None:
+    st.html(
+        append_once_chat_input_html(token, text, spacing),
         unsafe_allow_javascript=True,
     )
 
@@ -3530,22 +3538,10 @@ def restore_pending_text_to_chat_input(chat: ChatSession | None) -> None:
     if not text:
         return
     nonce = str(pending.get("nonce") or uuid.uuid4())
-    dom_id = re.sub(r"[^a-zA-Z0-9_-]", "-", f"restore-input-{chat.id}-{nonce}")
-    st.html(
-        f"""
-        <span id="{dom_id}"></span>
-        <script>
-        (() => {{
-          const text = {json.dumps(text)};
-          const appendToChatInput = window.codexNomadSurface?.appendToChatInput;
-          if (typeof appendToChatInput !== "function") {{
-            return;
-          }}
-          appendToChatInput(text, {{ spacing: "paragraph" }});
-        }})();
-        </script>
-        """,
-        unsafe_allow_javascript=True,
+    render_append_once_to_chat_input(
+        f"restore-input-{chat.id}-{nonce}",
+        text,
+        spacing="paragraph",
     )
 
 
