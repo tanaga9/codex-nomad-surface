@@ -626,6 +626,26 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertIn("...", text)
         self.assertLess(len(text), 290)
 
+    def test_command_execution_summary_truncates_long_command(self) -> None:
+        parts = CodexTurnOutput()
+        long_argument = "x" * 500
+
+        changed = self.client._update_output_parts_from_item(
+            {
+                "id": "item-1",
+                "type": "commandExecution",
+                "command": ["python3", "-c", long_argument],
+            },
+            parts,
+        )
+
+        self.assertTrue(changed)
+        text = parts.segments[0].text
+        self.assertIn("Command execution", text)
+        self.assertIn("...", text)
+        self.assertNotIn(long_argument, text)
+        self.assertLess(len(text), 170)
+
     def test_file_change_item_is_summarized(self) -> None:
         parts = CodexTurnOutput()
 

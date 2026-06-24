@@ -1549,7 +1549,7 @@ class CodexClient:
 
     def _command_execution_item_summary(self, item: dict[str, Any]) -> str:
         details = []
-        command = self._format_command(item.get("command"))
+        command = self._format_command(item.get("command"), max_chars=120)
         if command:
             details.append(self._markdown_code_span(command))
         cwd = str(item.get("cwd") or "").strip()
@@ -1615,10 +1615,14 @@ class CodexClient:
     def _inline_operation_summary(self, title: str, details: list[str]) -> str:
         return title + (f" - {'; '.join(details)}" if details else "")
 
-    def _format_command(self, command: Any) -> str:
+    def _format_command(self, command: Any, max_chars: int | None = None) -> str:
         if isinstance(command, list):
-            return " ".join(shlex.quote(str(part)) for part in command)
-        return str(command or "").strip()
+            text = " ".join(shlex.quote(str(part)) for part in command)
+        else:
+            text = str(command or "").strip()
+        if max_chars is not None and len(text) > max_chars:
+            return f"{text[:max_chars].rstrip()}..."
+        return text
 
     def _markdown_code_span(self, value: Any) -> str:
         text = str(value or "")
