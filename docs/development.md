@@ -48,7 +48,7 @@ command name or executable path.
 Use test discovery from the repository root:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests
+.venv/bin/python -m pytest tests
 ```
 
 For a quick syntax check of touched Python files:
@@ -57,10 +57,9 @@ For a quick syntax check of touched Python files:
 python3 -m py_compile codex_nomad_surface/app.py codex_nomad_surface/codex_client.py
 ```
 
-Avoid plain `python3 -m unittest` for this repository unless the active Python
-environment has all app dependencies installed. Test discovery can otherwise
-attempt to import application packages outside `tests/` and fail before running
-the intended test suite.
+Avoid plain `python3 -m pytest` for this repository unless the active Python
+environment has all app dependencies installed. The repository virtual
+environment should be created with `pip install -e ".[test]"`.
 
 ## UI Test Mode
 

@@ -61,6 +61,12 @@ py -3.12 -m venv .venv
 pip install -e .
 ```
 
+To run tests with pytest, install the test extra:
+
+```bash
+pip install -e ".[test]"
+```
+
 ## Run
 
 Start the Streamlit app.
