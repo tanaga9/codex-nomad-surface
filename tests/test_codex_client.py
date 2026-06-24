@@ -135,6 +135,61 @@ class CodexClientApprovalTests(unittest.TestCase):
             },
         )
 
+    def test_command_approval_detail_is_human_readable(self) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "reason": "Needs network access for dependency download.",
+                    "command": ["npm", "install"],
+                    "cwd": "/path/to/project",
+                    "availableDecisions": ["accept", "decline"],
+                },
+            }
+        )
+
+        self.assertIn(
+            "Reason: Needs network access for dependency download.",
+            approval["detail"],
+        )
+        self.assertIn("Command: npm install", approval["detail"])
+        self.assertIn("Directory: /path/to/project", approval["detail"])
+        self.assertIn("Choices: Accept, Decline", approval["detail"])
+        self.assertNotIn("{", approval["detail"])
+
+    def test_permission_approval_detail_summarizes_permissions(self) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "reason": "Allow browser connector.",
+                    "permissions": {"apps": {"browser": "allow"}},
+                },
+            }
+        )
+
+        self.assertIn("Reason: Allow browser connector.", approval["detail"])
+        self.assertIn("Permissions: apps=browser=allow", approval["detail"])
+        self.assertNotIn("{", approval["detail"])
+
+    def test_file_change_approval_detail_includes_grant_root(self) -> None:
+        approval = self.client._approval_from_message(
+            {
+                "method": "item/fileChange/requestApproval",
+                "params": {
+                    "approvalId": "approval-1",
+                    "reason": "Allow writing generated files.",
+                    "grantRoot": "/path/to/project/generated",
+                },
+            }
+        )
+
+        self.assertIn("Reason: Allow writing generated files.", approval["detail"])
+        self.assertIn("Grant root: /path/to/project/generated", approval["detail"])
+        self.assertNotIn("{", approval["detail"])
+
     def test_permissions_approval_exposes_dynamic_scope_options(self) -> None:
         approval = self.client._approval_from_message(
             {

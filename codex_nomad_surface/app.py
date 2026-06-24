@@ -1936,9 +1936,7 @@ def render_inline_approval(
         or "Codex is waiting for a user response"
     )
     st.markdown(f"**{title}**")
-    st.code(
-        str(approval.get("detail") or approval.get("body") or approval), language="text"
-    )
+    render_approval_detail(approval)
     response_options = approval.get("options")
     if approval.get("kind") == "tool_user_input_request" and isinstance(
         approval.get("questions"), list
@@ -2020,6 +2018,49 @@ def render_inline_approval(
     process_queued_approval_action(
         client, chat, pending, approval, key, update_stream, pending_state_key
     )
+
+
+def render_approval_detail(approval: dict[str, Any]) -> None:
+    detail = str(approval.get("detail") or approval.get("body") or "").strip()
+    if detail:
+        lines = [line.strip() for line in detail.splitlines() if line.strip()]
+        if lines:
+            rendered_lines = []
+            for line in lines[:8]:
+                label, separator, value = line.partition(":")
+                if separator and label and value:
+                    rendered_lines.append(
+                        f"- **{html.escape(label.strip())}:** "
+                        f"{approval_detail_value_markdown(value.strip())}"
+                    )
+                else:
+                    rendered_lines.append(f"- {html.escape(line)}")
+            if len(lines) > 8:
+                rendered_lines.append(f"- +{len(lines) - 8} more")
+            st.markdown("\n".join(rendered_lines))
+
+def approval_detail_value_markdown(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 120 and "\n" not in value:
+        return markdown_code_span(value)
+    return html.escape(value)
+
+
+def markdown_code_span(value: str) -> str:
+    text = str(value)
+    longest_backtick_run = 0
+    current_run = 0
+    for character in text:
+        if character == "`":
+            current_run += 1
+            longest_backtick_run = max(longest_backtick_run, current_run)
+        else:
+            current_run = 0
+    delimiter = "`" * (longest_backtick_run + 1)
+    if text.startswith("`") or text.endswith("`"):
+        text = f" {text} "
+    return f"{delimiter}{text}{delimiter}"
 
 
 def queue_approval_action(key: str, decision: str) -> None:

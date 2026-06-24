@@ -1604,7 +1604,7 @@ class CodexClient:
         status = str(item.get("status") or "").strip()
         if status:
             details.append(status)
-        arguments = self._json_first_line(item.get("arguments"))
+        arguments = self._compact_mapping_summary(item.get("arguments"))
         if arguments:
             details.append(f"args {self._markdown_code_span(arguments)}")
         error = self._first_line(item.get("error"))
@@ -1652,6 +1652,44 @@ class CodexClient:
         if len(line) <= max_chars:
             return line
         return f"{line[:max_chars].rstrip()}..."
+
+    def _compact_mapping_summary(self, value: Any, max_chars: int = 240) -> str:
+        if value in (None, ""):
+            return ""
+        if isinstance(value, dict):
+            parts = []
+            for key in sorted(value.keys(), key=str):
+                formatted = self._compact_value_summary(value[key], 80)
+                if formatted:
+                    parts.append(f"{key}={formatted}")
+                if len(parts) >= 4:
+                    remaining = len(value) - len(parts)
+                    if remaining > 0:
+                        parts.append(f"+{remaining} more")
+                    break
+            return self._first_line(", ".join(parts), max_chars)
+        return self._json_first_line(value, max_chars)
+
+    def _compact_value_summary(self, value: Any, max_chars: int = 120) -> str:
+        if value in (None, ""):
+            return ""
+        if isinstance(value, str):
+            return self._first_line(value, max_chars)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, int | float):
+            return str(value)
+        if isinstance(value, list):
+            items = [
+                self._compact_value_summary(item, 40)
+                for item in value[:3]
+                if item not in (None, "")
+            ]
+            suffix = f", +{len(value) - 3} more" if len(value) > 3 else ""
+            return self._first_line(", ".join(items) + suffix, max_chars)
+        if isinstance(value, dict):
+            return self._compact_mapping_summary(value, max_chars)
+        return self._first_line(value, max_chars)
 
     def _reasoning_summary_text(self, summary: Any) -> str:
         if isinstance(summary, str):
@@ -1706,12 +1744,158 @@ class CodexClient:
             "method": method,
             "params": params,
             "title": self._tool_request_user_input_title(questions) or method,
-            "detail": self._tool_request_user_input_detail(questions)
-            if questions
-            else self._json_preview(params),
+            "detail": self._approval_detail(method, params, questions),
             "questions": questions,
             "options": self._known_request_options(method, params, questions),
         }
+
+    def _approval_detail(
+        self, method: str, params: dict[str, Any], questions: list[dict[str, Any]]
+    ) -> str:
+        if questions:
+            return self._tool_request_user_input_detail(questions)
+        if not isinstance(params, dict) or not params:
+            return ""
+
+        if self._is_mcp_elicitation_method(method):
+            message = self._first_text_value(params, ("message", "prompt", "reason"))
+            return message or self._generic_request_detail(params)
+
+        lines: list[str] = []
+        if method == "item/permissions/requestApproval":
+            self._append_detail_line(lines, "Reason", params, ("reason", "message"))
+            permissions = params.get("permissions")
+            if isinstance(permissions, dict) and permissions:
+                lines.append(f"Permissions: {self._compact_mapping_summary(permissions)}")
+            self._append_available_decisions(lines, params)
+            return "\n".join(lines) if lines else self._generic_request_detail(params)
+
+        if method == "item/fileChange/requestApproval":
+            self._append_detail_line(lines, "Reason", params, ("reason", "message"))
+            self._append_detail_line(lines, "Grant root", params, ("grantRoot",))
+            self._append_available_decisions(lines, params)
+            return "\n".join(lines) if lines else self._generic_request_detail(params)
+
+        if method == "item/commandExecution/requestApproval":
+            self._append_detail_line(lines, "Reason", params, ("reason", "message"))
+            command = params.get("command")
+            if command:
+                lines.append(f"Command: {self._format_command(command)}")
+            self._append_detail_line(lines, "Directory", params, ("cwd", "workdir"))
+            network_context = params.get("networkApprovalContext")
+            if isinstance(network_context, dict) and network_context:
+                lines.append(f"Network: {self._compact_mapping_summary(network_context)}")
+            command_actions = params.get("commandActions")
+            if command_actions:
+                lines.append(
+                    f"Actions: {self._compact_value_summary(command_actions, 240)}"
+                )
+            amendment = params.get("proposedExecpolicyAmendment")
+            if amendment:
+                lines.append(
+                    f"Policy change: {self._compact_value_summary(amendment, 240)}"
+                )
+            additional_permissions = params.get("additionalPermissions")
+            if additional_permissions:
+                lines.append(
+                    "Additional permissions: "
+                    + self._compact_value_summary(additional_permissions, 240)
+                )
+            self._append_available_decisions(lines, params)
+            return "\n".join(lines) if lines else self._generic_request_detail(params)
+
+        return self._generic_request_detail(params)
+
+    def _append_detail_line(
+        self,
+        lines: list[str],
+        label: str,
+        params: dict[str, Any],
+        keys: tuple[str, ...],
+    ) -> None:
+        value = self._first_text_value(params, keys)
+        if value:
+            lines.append(f"{label}: {value}")
+
+    def _first_text_value(self, params: dict[str, Any], keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = params.get(key)
+            if value in (None, ""):
+                continue
+            if isinstance(value, str):
+                return self._first_line(value, 500)
+            return self._compact_value_summary(value, 500)
+        return ""
+
+    def _append_available_decisions(
+        self, lines: list[str], params: dict[str, Any]
+    ) -> None:
+        decisions = params.get("availableDecisions")
+        if isinstance(decisions, list) and decisions:
+            labels = [
+                self._available_decision_label(decision)
+                for decision in decisions
+                if self._available_decision_label(decision)
+            ]
+            if labels:
+                lines.append(f"Choices: {', '.join(labels)}")
+
+    def _generic_request_detail(self, params: dict[str, Any]) -> str:
+        preferred_keys = (
+            "message",
+            "reason",
+            "command",
+            "cwd",
+            "permissions",
+            "availableDecisions",
+            "availableResponses",
+            "options",
+        )
+        lines: list[str] = []
+        used: set[str] = set()
+        for key in preferred_keys:
+            if key not in params:
+                continue
+            value = self._compact_value_summary(params.get(key), 500)
+            if value:
+                lines.append(f"{self._humanize_key(key)}: {value}")
+                used.add(key)
+        for key in sorted(params.keys(), key=str):
+            if key in used or key in {
+                "id",
+                "requestId",
+                "approvalId",
+                "threadId",
+                "turnId",
+                "itemId",
+            }:
+                continue
+            value = self._compact_value_summary(params.get(key), 240)
+            if value:
+                lines.append(f"{self._humanize_key(str(key))}: {value}")
+            if len(lines) >= 6:
+                remaining = len([name for name in params if name not in used]) - 6
+                if remaining > 0:
+                    lines.append(f"+{remaining} more fields")
+                break
+        return "\n".join(lines)
+
+    def _humanize_key(self, key: str) -> str:
+        words: list[str] = []
+        current = ""
+        for character in key.replace("_", " ").replace("-", " "):
+            if character.isupper() and current and not current[-1].isupper():
+                words.append(current)
+                current = character
+            elif character == " ":
+                if current:
+                    words.append(current)
+                    current = ""
+            else:
+                current += character
+        if current:
+            words.append(current)
+        return " ".join(word.capitalize() for word in words)
 
     def _tool_request_user_input_questions(
         self, params: dict[str, Any]
