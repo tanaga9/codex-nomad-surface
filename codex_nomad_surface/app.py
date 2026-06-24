@@ -970,22 +970,23 @@ def merge_thread_history_messages(
     return merged
 
 
-def trim_chat_history_if_needed(client: CodexClient, chat: ChatSession | None) -> None:
+def trim_chat_history_if_needed(client: CodexClient, chat: ChatSession | None) -> bool:
     if not chat or not chat.thread_id or not st.session_state.chat_history_autoscroll:
-        return
+        return False
     if st.session_state.get("pending_turn"):
-        return
+        return False
     if len(chat.messages) <= CHAT_HISTORY_RECENT_MESSAGE_LIMIT:
-        return
+        return False
     result = client.read_thread_messages(
         chat.thread_id, limit=CHAT_HISTORY_RECENT_MESSAGE_LIMIT
     )
     messages = thread_messages_from_result(result)
     if not messages:
-        return
+        return False
     update_thread_history_state(chat.thread_id, result)
     chat.messages = messages
     chat.touch()
+    return True
 
 
 def hydrate_thread_chat(client: CodexClient, chat: ChatSession | None) -> None:
@@ -1219,7 +1220,6 @@ def render_chat(
     skill_defs = load_available_skill_defs(
         client.base_url, project.path if project else ""
     )
-    trim_chat_history_if_needed(client, chat)
     if not chat.messages:
         if chat.thread_id:
             st.caption(
@@ -1456,7 +1456,8 @@ def render_chat_history_panel_contents(
     client: CodexClient, project: Project | None, chat: ChatSession | None
 ) -> None:
     load_older_history(client, chat)
-    autoscroll = bool(st.session_state.chat_history_autoscroll)
+    trimmed_history = trim_chat_history_if_needed(client, chat)
+    autoscroll = bool(st.session_state.chat_history_autoscroll) and not trimmed_history
     with st.container(
         height="stretch", autoscroll=autoscroll, key="chat-history-panel"
     ):
@@ -1468,7 +1469,7 @@ def render_chat_history_panel_contents(
         )
         if project and chat:
             render_pending_turn(client, project, chat)
-    if autoscroll:
+    if autoscroll or trimmed_history:
         st.session_state.chat_history_autoscroll = False
 
 
