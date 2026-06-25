@@ -28,6 +28,35 @@ class CodexClientApprovalTests(unittest.TestCase):
 
         self.assertEqual(CODEX_CLIENT_INFO["name"], "codex-nomad-surface")
 
+    def test_initialize_ws_acknowledges_with_initialized_notification(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+
+            async def recv(self) -> str:
+                request = json.loads(self.sent[0])
+                return json.dumps({"id": request["id"], "result": {"ok": True}})
+
+        websocket = FakeWebSocket()
+
+        result = asyncio.run(self.client._initialize_ws(websocket, [], []))
+
+        self.assertEqual(result, {"ok": True})
+        sent_messages = [json.loads(payload) for payload in websocket.sent]
+        self.assertEqual(sent_messages[0]["method"], "initialize")
+        self.assertIn("id", sent_messages[0])
+        self.assertEqual(
+            sent_messages[0]["params"]["clientInfo"]["name"],
+            "codex-nomad-surface",
+        )
+        self.assertEqual(
+            sent_messages[1],
+            {"method": "initialized", "params": {}},
+        )
+
     def test_model_list_result_reports_non_websocket_url(self) -> None:
         client = CodexClient("http://127.0.0.1:8080")
 

@@ -239,6 +239,30 @@ class CodexClient:
             self.base_url, open_timeout=self.timeout, max_size=self.WS_MAX_SIZE
         )
 
+    async def _initialize_ws(
+        self,
+        websocket: Any,
+        output: list[str] | OutputState,
+        approvals: list[dict[str, Any]],
+        output_callback: OutputCallback | None = None,
+        approval_handler: Any | None = None,
+        stream_items: dict[str, dict[str, str]] | None = None,
+    ) -> Any:
+        result = await self._rpc_call(
+            websocket,
+            "initialize",
+            _codex_initialize_params(),
+            output,
+            approvals,
+            output_callback,
+            approval_handler,
+            stream_items,
+        )
+        await websocket.send(
+            json.dumps({"method": "initialized", "params": {}}, ensure_ascii=False)
+        )
+        return result
+
     def _empty_output_parts(self) -> OutputState:
         return CodexTurnOutput()
 
@@ -290,13 +314,7 @@ class CodexClient:
             async with self._connect_ws(websockets) as websocket:
                 output: list[str] = []
                 approvals: list[dict[str, Any]] = []
-                await self._rpc_call(
-                    websocket,
-                    "initialize",
-                    _codex_initialize_params(),
-                    output,
-                    approvals,
-                )
+                await self._initialize_ws(websocket, output, approvals)
                 return True
         except Exception:
             return False
@@ -474,13 +492,7 @@ class CodexClient:
             async with self._connect_ws(websockets) as websocket:
                 output: list[str] = []
                 approvals: list[dict[str, Any]] = []
-                await self._rpc_call(
-                    websocket,
-                    "initialize",
-                    _codex_initialize_params(),
-                    output,
-                    approvals,
-                )
+                await self._initialize_ws(websocket, output, approvals)
                 raw = await self._rpc_call(
                     websocket, "config/read", {}, output, approvals
                 )
@@ -513,13 +525,7 @@ class CodexClient:
             async with self._connect_ws(websockets) as websocket:
                 output: list[str] = []
                 approvals: list[dict[str, Any]] = []
-                await self._rpc_call(
-                    websocket,
-                    "initialize",
-                    _codex_initialize_params(),
-                    output,
-                    approvals,
-                )
+                await self._initialize_ws(websocket, output, approvals)
                 raw = await self._rpc_call(
                     websocket,
                     "model/list",
@@ -551,13 +557,7 @@ class CodexClient:
             async with self._connect_ws(websockets) as websocket:
                 output: list[str] = []
                 approvals: list[dict[str, Any]] = []
-                await self._rpc_call(
-                    websocket,
-                    "initialize",
-                    _codex_initialize_params(),
-                    output,
-                    approvals,
-                )
+                await self._initialize_ws(websocket, output, approvals)
                 raw = await self._rpc_call(
                     websocket,
                     "skills/list",
@@ -594,13 +594,7 @@ class CodexClient:
             async with self._connect_ws(websockets) as websocket:
                 output: list[str] = []
                 approvals: list[dict[str, Any]] = []
-                await self._rpc_call(
-                    websocket,
-                    "initialize",
-                    _codex_initialize_params(),
-                    output,
-                    approvals,
-                )
+                await self._initialize_ws(websocket, output, approvals)
                 raw = await self._rpc_call(
                     websocket, "thread/list", {}, output, approvals
                 )
@@ -617,13 +611,7 @@ class CodexClient:
         async with self._connect_ws(websockets) as websocket:
             output: list[str] = []
             approvals: list[dict[str, Any]] = []
-            await self._rpc_call(
-                websocket,
-                "initialize",
-                _codex_initialize_params(),
-                output,
-                approvals,
-            )
+            await self._initialize_ws(websocket, output, approvals)
             raw = await self._rpc_call(
                 websocket,
                 "thread/start",
@@ -657,13 +645,7 @@ class CodexClient:
             async with self._connect_ws(websockets) as websocket:
                 output: list[str] = []
                 approvals: list[dict[str, Any]] = []
-                await self._rpc_call(
-                    websocket,
-                    "initialize",
-                    _codex_initialize_params(),
-                    output,
-                    approvals,
-                )
+                await self._initialize_ws(websocket, output, approvals)
                 params: dict[str, Any] = {
                     "threadId": thread_id,
                     "limit": max(1, limit),
@@ -691,13 +673,7 @@ class CodexClient:
             async with self._connect_ws(websockets) as websocket:
                 output: list[str] = []
                 approvals: list[dict[str, Any]] = []
-                await self._rpc_call(
-                    websocket,
-                    "initialize",
-                    _codex_initialize_params(),
-                    output,
-                    approvals,
-                )
+                await self._initialize_ws(websocket, output, approvals)
                 raw = await self._rpc_call(
                     websocket,
                     "thread/resume",
@@ -1080,10 +1056,8 @@ class CodexClient:
                     approvals.append(runtime["approval"])
                     raise ApprovalRequired
 
-                await self._rpc_call(
+                await self._initialize_ws(
                     websocket,
-                    "initialize",
-                    _codex_initialize_params(),
                     output_parts,
                     approvals,
                     output_callback,
