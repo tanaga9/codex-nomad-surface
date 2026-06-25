@@ -98,7 +98,17 @@ NEW_PROJECT_KEY = "__new_project__"
 LOGO_PATH = Path(__file__).parent / "ui_components" / "assets" / "logo.svg"
 FILE_PATH_PICKER_MAX_OPTIONS = 500
 FILE_PATH_PICKER_MAX_VISITED = 20000
-SHOW_OTHER_OUTPUT = False
+CODEX_OUTPUT_AUXILIARY_LABELS = {
+    "reasoning_summary": "Reasoning summary",
+    "plan": "Plan",
+    "approval_request": "Approval",
+    "error": "Errors",
+}
+CODEX_OUTPUT_NON_OTHER_KINDS = set(CODEX_OUTPUT_AUXILIARY_LABELS) | {
+    "final_answer",
+    "commentary",
+    "operation_event",
+}
 INTERRUPT_DRAFT_PENDING = "pending"
 INTERRUPT_DRAFT_STEERED = "steered"
 INTERRUPT_DRAFT_RETURNED = "returned"
@@ -1161,6 +1171,16 @@ def codex_output_is_low_priority_unknown(segment: dict[str, Any]) -> bool:
     return text.startswith(("Unrecognized event:", "Unrecognized item:"))
 
 
+def codex_output_other_segments(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        segment
+        for segment in segments
+        if segment.get("kind") not in CODEX_OUTPUT_NON_OTHER_KINDS
+    ]
+
+
 def render_chat_user_markdown(text: object) -> None:
     st.markdown(markdown_with_soft_line_breaks(text))
 
@@ -1193,13 +1213,7 @@ def render_codex_output_auxiliary(
                 st.markdown(str(segment.get("text") or ""))
             render_progress_operation_segments(operation_segments)
 
-    labels = {
-        "reasoning_summary": "Reasoning summary",
-        "plan": "Plan",
-        "approval_request": "Approval",
-        "error": "Errors",
-    }
-    for kind, label in labels.items():
+    for kind, label in CODEX_OUTPUT_AUXILIARY_LABELS.items():
         text = codex_output_text_for_kind(segments, kind)
         if not text:
             continue
@@ -1209,16 +1223,10 @@ def render_codex_output_auxiliary(
             with st.expander(label, expanded=False):
                 st.markdown(text)
 
-    known_kinds = set(labels) | {"final_answer"}
-    unknown_segments = [
-        segment
-        for segment in segments
-        if segment.get("kind") not in known_kinds
-        and segment.get("kind") not in {"commentary", "operation_event"}
-    ]
-    if unknown_segments and SHOW_OTHER_OUTPUT:
-        with st.expander("Other output", expanded=False):
-            for segment in unknown_segments:
+    other_segments = codex_output_other_segments(segments)
+    if other_segments:
+        with st.expander("Other output", expanded=expanded_until_final_answer):
+            for segment in other_segments:
                 if codex_output_is_low_priority_unknown(segment):
                     st.caption(str(segment.get("text") or ""))
                     continue

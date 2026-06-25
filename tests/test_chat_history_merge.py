@@ -2,6 +2,7 @@ import unittest
 
 from codex_nomad_surface.app import (
     codex_output_is_progress_only,
+    codex_output_other_segments,
     merge_thread_history_messages,
 )
 from codex_nomad_surface.chat_store import ChatMessage
@@ -80,6 +81,23 @@ class ChatHistoryMergeTests(unittest.TestCase):
                     ],
                 }
             )
+        )
+
+    def test_codex_output_other_segments_keeps_unknown_events_visible(self) -> None:
+        segments = [
+            {"kind": "final_answer", "text": "Done"},
+            {"kind": "commentary", "text": "Working"},
+            {"kind": "operation_event", "text": "Ran command"},
+            {"kind": "other_event", "text": "Unrecognized event: `future/event`"},
+            {"kind": "future_widget", "text": "New output shape"},
+        ]
+
+        self.assertEqual(
+            codex_output_other_segments(segments),
+            [
+                {"kind": "other_event", "text": "Unrecognized event: `future/event`"},
+                {"kind": "future_widget", "text": "New output shape"},
+            ],
         )
 
 
