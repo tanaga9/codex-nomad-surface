@@ -1531,12 +1531,24 @@ class CodexClient:
             parts.append_block("operation_event", recognized_summary, item_id)
             return True
         if item_type and item_type != "userMessage":
-            parts.append_block(
-                "other_event",
+            self._set_repeated_observed_summary(
+                parts,
+                f"unknown-item:{item_type}",
                 f"Unrecognized item: {self._markdown_code_span(item_type)}",
             )
             return True
         return False
+
+    def _set_repeated_observed_summary(
+        self, parts: OutputState, item_id: str, text: str
+    ) -> None:
+        segment = parts._find_segment("other_event", item_id)
+        count = 1
+        if segment:
+            count = int(segment.metadata.get("observed_count") or 1) + 1
+        metadata = {"observed_count": count}
+        suffix = f" (repeated {count} times)" if count > 1 else ""
+        parts.set_segment("other_event", f"{text}{suffix}", item_id, metadata=metadata)
 
     def _recognized_item_summary(self, item: dict[str, Any]) -> str:
         item_type = str(item.get("type") or "")
@@ -2117,8 +2129,9 @@ class CodexClient:
                 return True
             return False
         if classification.kind == "unknown_observed" and method:
-            parts.append_block(
-                "other_event",
+            self._set_repeated_observed_summary(
+                parts,
+                f"unknown-event:{method}",
                 f"Unrecognized event: `{method}`",
             )
             return True

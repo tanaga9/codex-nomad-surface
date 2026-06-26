@@ -584,6 +584,22 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(parts.segments[0].kind, "other_event")
         self.assertIn("futureWidget", parts.segments[0].text)
 
+    def test_repeated_unknown_item_is_summarized_once(self) -> None:
+        parts = CodexTurnOutput()
+
+        for _ in range(3):
+            changed = self.client._update_output_parts_from_item(
+                {"id": "item-1", "type": "futureWidget"},
+                parts,
+            )
+
+            self.assertTrue(changed)
+
+        self.assertEqual(len(parts.segments), 1)
+        self.assertEqual(parts.segments[0].kind, "other_event")
+        self.assertEqual(parts.segments[0].metadata["observed_count"], 3)
+        self.assertIn("repeated 3 times", parts.segments[0].text)
+
     def test_reasoning_item_without_summary_is_recognized(self) -> None:
         parts = CodexTurnOutput()
 
@@ -766,6 +782,23 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(parts.segments[0].kind, "other_event")
         self.assertIn("future/event", parts.segments[0].text)
+
+    def test_repeated_unknown_event_is_summarized_once(self) -> None:
+        parts = CodexTurnOutput()
+
+        for _ in range(4):
+            changed = self.client._update_output_parts(
+                {"method": "future/event", "params": {"value": 1}},
+                parts,
+                approvals=[],
+            )
+
+            self.assertTrue(changed)
+
+        self.assertEqual(len(parts.segments), 1)
+        self.assertEqual(parts.segments[0].kind, "other_event")
+        self.assertEqual(parts.segments[0].metadata["observed_count"], 4)
+        self.assertIn("repeated 4 times", parts.segments[0].text)
 
     def test_started_unknown_item_is_preserved_as_other_output(self) -> None:
         parts = CodexTurnOutput()
