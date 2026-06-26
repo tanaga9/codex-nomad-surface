@@ -8,6 +8,7 @@ import queue
 import re
 import shlex
 import subprocess
+import tempfile
 import textwrap
 import threading
 import time
@@ -92,6 +93,15 @@ DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
 CHAT_HISTORY_RECENT_MESSAGE_LIMIT = 50
 CHAT_HISTORY_LOAD_EARLIER_LIMIT = 40
+CHAT_INPUT_IMAGE_FILE_TYPES = ("png", "jpg", "jpeg", "webp", "gif")
+CHAT_INPUT_IMAGE_MIME_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+}
+CHAT_INPUT_IMAGE_MAX_MB = 20
+CHAT_INPUT_IMAGE_TEMP_DIR = Path(tempfile.gettempdir()) / "codex-nomad-surface-uploads"
 UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 NEW_PROJECT_KEY = "__new_project__"
@@ -1185,6 +1195,145 @@ def render_chat_user_markdown(text: object) -> None:
     st.markdown(markdown_with_soft_line_breaks(text))
 
 
+def render_chat_attachment_summary(metadata: dict[str, Any]) -> None:
+    attachments = metadata.get("attachments")
+    if not isinstance(attachments, list) or not attachments:
+        return
+    names = [
+        str(item.get("name") or "").strip()
+        for item in attachments
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+    if names:
+        st.caption("Attached images: " + ", ".join(names))
+
+
+def chat_input_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("text") or "")
+    text = getattr(value, "text", "")
+    return str(text or "")
+
+
+def chat_input_files(value: object) -> list[Any]:
+    if isinstance(value, dict):
+        files = value.get("files")
+        if files is None:
+            return []
+        return files if isinstance(files, list) else list(files)
+    files = getattr(value, "files", None)
+    if files is None:
+        return []
+    if isinstance(files, list):
+        return files
+    return list(files)
+
+
+def uploaded_image_metadata(files: list[Any]) -> list[dict[str, Any]]:
+    metadata: list[dict[str, Any]] = []
+    for file in files:
+        metadata.append(
+            {
+                "name": str(getattr(file, "name", "") or "image"),
+                "type": str(getattr(file, "type", "") or ""),
+                "size": int(getattr(file, "size", 0) or 0),
+            }
+        )
+    return metadata
+
+
+def safe_uploaded_filename(name: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(name or "image").name).strip(".-")
+    return stem or "image"
+
+
+def save_uploaded_chat_images(files: list[Any], run_id: str) -> tuple[list[str], str]:
+    if not files:
+        return [], ""
+    target_dir = CHAT_INPUT_IMAGE_TEMP_DIR / run_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[str] = []
+    for index, file in enumerate(files):
+        mime_type = str(getattr(file, "type", "") or "").lower()
+        if mime_type and mime_type not in CHAT_INPUT_IMAGE_MIME_TYPES:
+            return [], f"Unsupported image type: {mime_type}"
+        filename = (
+            f"{index + 1:02d}-"
+            f"{safe_uploaded_filename(getattr(file, 'name', 'image'))}"
+        )
+        path = target_dir / filename
+        path.write_bytes(file.getvalue())
+        saved_paths.append(str(path))
+    return saved_paths, ""
+
+
+def uploaded_chat_image_paths(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(path) for path in value if str(path or "").strip()]
+
+
+def cleanup_uploaded_chat_images(local_images: Any) -> None:
+    root = CHAT_INPUT_IMAGE_TEMP_DIR.resolve(strict=False)
+    parent_dirs: set[Path] = set()
+    for image_path in uploaded_chat_image_paths(local_images):
+        try:
+            path = Path(image_path).resolve(strict=False)
+            path.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
+        parent_dirs.add(path.parent)
+    for directory in sorted(parent_dirs, key=lambda path: len(path.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            continue
+
+
+def remember_uploaded_chat_image_cleanup(pending: dict, local_images: Any) -> None:
+    paths = uploaded_chat_image_paths(local_images)
+    if not paths:
+        return
+    cleanup_paths = uploaded_chat_image_paths(pending.get("local_image_cleanup_paths"))
+    for path in paths:
+        if path not in cleanup_paths:
+            cleanup_paths.append(path)
+    pending["local_image_cleanup_paths"] = cleanup_paths
+
+
+def cleanup_pending_uploaded_chat_images(pending: dict) -> None:
+    cleanup_uploaded_chat_images(pending.get("local_images"))
+    cleanup_uploaded_chat_images(pending.get("local_image_cleanup_paths"))
+    pending.pop("local_images", None)
+    pending.pop("local_image_cleanup_paths", None)
+
+
+def prompt_with_local_image_references(
+    text: str, attachments: list[dict[str, Any]], local_images: list[str]
+) -> str:
+    if not local_images:
+        return text
+    lines = ["Files mentioned by the user:", ""]
+    for index, path in enumerate(local_images):
+        attachment = attachments[index] if index < len(attachments) else {}
+        name = (
+            str(attachment.get("name") or "").strip()
+            if isinstance(attachment, dict)
+            else ""
+        )
+        lines.append(f"- {name or Path(path).name}: {path}")
+    lines.extend(
+        ["", "My request for Codex:", text or "Please inspect the attached image."]
+    )
+    return "\n".join(lines)
+
+
 def render_codex_output_auxiliary(
     parts: dict[str, Any], expanded_until_final_answer: bool = False
 ) -> None:
@@ -1394,6 +1543,8 @@ def render_chat(
                     render_chat_user_markdown(content)
                 else:
                     st.markdown(content)
+            if message.role == "user":
+                render_chat_attachment_summary(message.metadata)
             if (
                 message.metadata.get("kind") == "interrupt_draft"
                 and message.metadata.get("status") != INTERRUPT_DRAFT_PENDING
@@ -1574,6 +1725,7 @@ def render_pending_turn(
 
     with st.chat_message("user"):
         render_chat_user_markdown(pending["text"])
+        render_chat_attachment_summary(pending)
     with st.chat_message("assistant"):
         result = pending.pop("result", None)
         if result:
@@ -1688,8 +1840,9 @@ def start_turn_run_worker(
         try:
             result = client.start_chat_turn(
                 project.path,
-                pending["text"],
+                pending.get("prompt_text") or pending["text"],
                 chat.thread_id,
+                local_images=pending.get("local_images"),
                 thread_overrides=pending.get("thread_overrides"),
                 turn_overrides=pending.get("turn_overrides"),
                 approval_policy=pending.get("approval_policy"),
@@ -1821,6 +1974,8 @@ def render_pending_interrupt_draft_controls(
     pending: dict,
     draft_id: str,
     text: str,
+    local_images: list[str] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> None:
     runtime_ready = bool(pending.get("runtime") and pending["runtime"].get("turn_id"))
     col_steer, col_restore = st.columns(2)
@@ -1831,9 +1986,23 @@ def render_pending_interrupt_draft_controls(
             disabled=not runtime_ready,
             use_container_width=True,
         ):
-            result = client.steer_chat_turn(pending["runtime"], text)
+            prompt_text = prompt_with_local_image_references(
+                text,
+                attachments or [],
+                local_images or [],
+            )
+            result = client.steer_chat_turn(
+                pending["runtime"], prompt_text, local_images
+            )
             if result.get("ok"):
                 pending.setdefault("steered_inputs", []).append(text)
+                draft_message = find_interrupt_draft_message(chat, draft_id)
+                if draft_message:
+                    remember_uploaded_chat_image_cleanup(
+                        pending, draft_message.metadata.get("local_images")
+                    )
+                    draft_message.metadata.pop("local_images", None)
+                    draft_message.metadata.pop("prompt_text", None)
                 update_interrupt_draft_message(
                     chat,
                     draft_id,
@@ -1857,6 +2026,11 @@ def render_pending_interrupt_draft_controls(
                 "text": text,
                 "nonce": str(uuid.uuid4()),
             }
+            draft_message = find_interrupt_draft_message(chat, draft_id)
+            if draft_message:
+                cleanup_uploaded_chat_images(draft_message.metadata.get("local_images"))
+                draft_message.metadata.pop("local_images", None)
+                draft_message.metadata.pop("prompt_text", None)
             update_interrupt_draft_message(
                 chat,
                 draft_id,
@@ -1905,6 +2079,12 @@ def render_pending_interrupt_drafts(
             continue
         text = message.content.strip()
         draft_id = str(message.metadata.get("draft_id") or "")
+        local_images = message.metadata.get("local_images")
+        if not isinstance(local_images, list):
+            local_images = []
+        attachments = message.metadata.get("attachments")
+        if not isinstance(attachments, list):
+            attachments = []
         if not text:
             if draft_id == active_draft_id:
                 st.session_state.pending_interrupt_draft = None
@@ -1912,12 +2092,13 @@ def render_pending_interrupt_drafts(
         with st.chat_message("user"):
             st.caption(interrupt_draft_caption(message))
             render_chat_user_markdown(text)
+            render_chat_attachment_summary(message.metadata)
         if (
             draft_id == active_draft_id
             and message.metadata.get("status") == INTERRUPT_DRAFT_PENDING
         ):
             render_pending_interrupt_draft_controls(
-                client, chat, pending, draft_id, text
+                client, chat, pending, draft_id, text, local_images, attachments
             )
         else:
             render_disabled_interrupt_draft_buttons(
@@ -1942,6 +2123,10 @@ def restore_interrupt_draft_to_input_if_pending(chat: ChatSession) -> None:
         "text": text,
         "nonce": str(uuid.uuid4()),
     }
+    if draft_message:
+        cleanup_uploaded_chat_images(draft_message.metadata.get("local_images"))
+        draft_message.metadata.pop("local_images", None)
+        draft_message.metadata.pop("prompt_text", None)
     update_interrupt_draft_message(
         chat,
         draft_id,
@@ -1956,6 +2141,13 @@ def cancel_interrupt_draft_if_pending(chat_id: str | None) -> None:
         return
     draft_chat = chat_by_id(chat_id)
     if draft_chat:
+        draft_message = find_interrupt_draft_message(
+            draft_chat, str(draft.get("draft_id") or "")
+        )
+        if draft_message:
+            cleanup_uploaded_chat_images(draft_message.metadata.get("local_images"))
+            draft_message.metadata.pop("local_images", None)
+            draft_message.metadata.pop("prompt_text", None)
         update_interrupt_draft_message(
             draft_chat,
             str(draft.get("draft_id") or ""),
@@ -2399,6 +2591,7 @@ def handle_turn_result(
     chat.add_message("assistant", response_text, metadata=metadata)
     if pending_state_key == "pending_turn":
         restore_interrupt_draft_to_input_if_pending(chat)
+    cleanup_pending_uploaded_chat_images(pending)
     st.session_state[pending_state_key] = None
     st.session_state.approval_action_in_progress = ""
     st.session_state.approval_action_queued = None
@@ -2419,13 +2612,18 @@ def cancel_pending_turn_if_needed(
         client.close_chat_turn(runtime)
     cancel_interrupt_draft_if_pending(str(pending.get("chat_id") or ""))
     cleanup_pending_turn_worker(pending)
+    cleanup_pending_uploaded_chat_images(pending)
     st.session_state.pending_turn = None
     st.session_state.approval_action_in_progress = ""
     st.session_state.approval_action_queued = None
 
 
 def queue_user_turn(
-    client: CodexClient, project: Project, chat: ChatSession | None, user_text: str
+    client: CodexClient,
+    project: Project,
+    chat: ChatSession | None,
+    user_text: str,
+    image_files: list[Any] | None = None,
 ) -> None:
     pending = st.session_state.get("pending_turn")
     if pending and pending.get("status") not in {
@@ -2445,16 +2643,34 @@ def queue_user_turn(
         remember_new_chat_run_control_defaults(controls)
         ensure_start_run_overrides_message(chat, controls)
     run_id = str(uuid.uuid4())
+    local_images, image_error = save_uploaded_chat_images(image_files or [], run_id)
+    if image_error:
+        st.error(image_error)
+        return
+    attachments = uploaded_image_metadata(image_files or [])
+    display_text = user_text or ("Attached image" if attachments else "")
+    if not display_text:
+        return
+    prompt_text = prompt_with_local_image_references(
+        user_text, attachments, local_images
+    )
     chat.add_message(
         "user",
-        user_text,
-        metadata={"kind": "turn_prompt", "run_id": run_id},
+        display_text,
+        metadata={
+            "kind": "turn_prompt",
+            "run_id": run_id,
+            "attachments": attachments,
+        },
     )
     pending = {
         "run_id": run_id,
         "chat_id": chat.id,
         "status": TURN_RUN_STARTING,
-        "text": user_text,
+        "text": display_text,
+        "prompt_text": prompt_text,
+        "local_images": local_images,
+        "attachments": attachments,
         "thread_overrides": thread_overrides,
         "turn_overrides": build_turn_overrides(controls),
         "approval_policy": controls.get("approval_policy", "").strip() or None,
@@ -2465,26 +2681,51 @@ def queue_user_turn(
     st.rerun()
 
 
-def queue_interrupt_draft(chat: ChatSession | None, user_text: str) -> None:
+def queue_interrupt_draft(
+    chat: ChatSession | None, user_text: str, image_files: list[Any] | None = None
+) -> None:
     if not chat:
         return
     pending = st.session_state.get("pending_turn") or {}
     active_draft = st.session_state.get("pending_interrupt_draft")
     if isinstance(active_draft, dict) and active_draft.get("chat_id") == chat.id:
+        active_draft_message = find_interrupt_draft_message(
+            chat, str(active_draft.get("draft_id") or "")
+        )
+        if active_draft_message:
+            cleanup_uploaded_chat_images(
+                active_draft_message.metadata.get("local_images")
+            )
+            active_draft_message.metadata.pop("local_images", None)
+            active_draft_message.metadata.pop("prompt_text", None)
         update_interrupt_draft_message(
             chat,
             str(active_draft.get("draft_id") or ""),
             INTERRUPT_DRAFT_REPLACED,
         )
     draft_id = str(uuid.uuid4())
+    local_images, image_error = save_uploaded_chat_images(image_files or [], draft_id)
+    if image_error:
+        st.error(image_error)
+        return
+    attachments = uploaded_image_metadata(image_files or [])
+    display_text = user_text or ("Attached image" if attachments else "")
+    if not display_text:
+        return
+    prompt_text = prompt_with_local_image_references(
+        user_text, attachments, local_images
+    )
     chat.add_message(
         "user",
-        user_text,
+        display_text,
         metadata={
             "kind": "interrupt_draft",
             "draft_id": draft_id,
             "status": INTERRUPT_DRAFT_PENDING,
             "run_id": pending.get("run_id"),
+            "local_images": local_images,
+            "attachments": attachments,
+            "prompt_text": prompt_text,
         },
     )
     st.session_state.pending_interrupt_draft = {
@@ -3655,16 +3896,22 @@ def chat_composer(
     chat: ChatSession | None,
 ) -> None:
     prompt_disabled = not project
-    prompt = st.chat_input(
-        "Message Codex", key="chat_prompt_input", disabled=prompt_disabled
+    prompt_value = st.chat_input(
+        "Message Codex",
+        key="chat_prompt_input",
+        disabled=prompt_disabled,
+        accept_file="multiple",
+        file_type=CHAT_INPUT_IMAGE_FILE_TYPES,
+        max_upload_size=CHAT_INPUT_IMAGE_MAX_MB,
     )
-    if prompt and project:
-        user_text = prompt.strip()
-        if user_text:
+    if prompt_value is not None and project:
+        user_text = chat_input_text(prompt_value).strip()
+        image_files = chat_input_files(prompt_value)
+        if user_text or image_files:
             if st.session_state.get("pending_turn"):
-                queue_interrupt_draft(chat, user_text)
+                queue_interrupt_draft(chat, user_text, image_files)
             else:
-                queue_user_turn(client, project, chat, user_text)
+                queue_user_turn(client, project, chat, user_text, image_files)
 
     if not project:
         st.caption("Select a project and enter a message before sending.")

@@ -324,6 +324,7 @@ class CodexClient:
         project_path: str,
         prompt: str,
         thread_id: str | None,
+        local_images: list[str] | None = None,
         thread_overrides: dict[str, Any] | None = None,
         turn_overrides: dict[str, Any] | None = None,
         approval_policy: str | None = None,
@@ -343,6 +344,7 @@ class CodexClient:
                     project_path,
                     prompt,
                     thread_id,
+                    local_images,
                     thread_overrides,
                     turn_overrides,
                     approval_policy,
@@ -360,13 +362,18 @@ class CodexClient:
         finally:
             asyncio.set_event_loop(None)
 
-    def steer_chat_turn(self, runtime: dict[str, Any], prompt: str) -> dict[str, Any]:
+    def steer_chat_turn(
+        self,
+        runtime: dict[str, Any],
+        prompt: str,
+        local_images: list[str] | None = None,
+    ) -> dict[str, Any]:
         loop = runtime.get("loop")
         if not loop:
             return {"ok": False, "output": "Active turn connection was not found."}
         if loop.is_closed():
             return {"ok": False, "output": "Active turn connection was already closed."}
-        coroutine = self._send_turn_steer_ws(runtime, prompt)
+        coroutine = self._send_turn_steer_ws(runtime, prompt, local_images)
         if loop.is_running():
             future = asyncio.run_coroutine_threadsafe(coroutine, loop)
             return future.result(timeout=max(self.timeout, 30.0))
@@ -1018,6 +1025,7 @@ class CodexClient:
         project_path: str,
         prompt: str,
         thread_id: str | None,
+        local_images: list[str] | None,
         thread_overrides: dict[str, Any] | None = None,
         turn_overrides: dict[str, Any] | None = None,
         approval_policy: str | None = None,
@@ -1109,13 +1117,8 @@ class CodexClient:
                 turn_params: dict[str, Any] = {
                     "threadId": thread_id,
                     "cwd": project_path,
-                    "input": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                            "text_elements": [],
-                        }
-                    ],
+                    "input": self._turn_text_input(prompt, local_images),
+                    **self._turn_image_params(local_images),
                 }
                 if approval_policy:
                     turn_params["approvalPolicy"] = approval_policy
@@ -1197,7 +1200,10 @@ class CodexClient:
             }
 
     async def _send_turn_steer_ws(
-        self, runtime: dict[str, Any], prompt: str
+        self,
+        runtime: dict[str, Any],
+        prompt: str,
+        local_images: list[str] | None = None,
     ) -> dict[str, Any]:
         websocket = runtime.get("websocket")
         thread_id = runtime.get("thread_id")
@@ -1213,13 +1219,8 @@ class CodexClient:
                     "method": "turn/steer",
                     "params": {
                         "threadId": thread_id,
-                        "input": [
-                            {
-                                "type": "text",
-                                "text": prompt,
-                                "text_elements": [],
-                            }
-                        ],
+                        "input": self._turn_text_input(prompt, local_images),
+                        **self._turn_image_params(local_images),
                         "expectedTurnId": turn_id,
                     },
                 },
@@ -1227,6 +1228,32 @@ class CodexClient:
             )
         )
         return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
+
+    def _turn_text_input(
+        self, prompt: str, local_images: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        image_paths = self._local_image_paths(local_images)
+        return [
+            {
+                "type": "text",
+                "text": prompt,
+                "text_elements": [],
+                "images": [],
+                "local_images": image_paths,
+            }
+        ]
+
+    def _turn_image_params(
+        self, local_images: list[str] | None = None
+    ) -> dict[str, Any]:
+        return {
+            "images": [],
+            "local_images": self._local_image_paths(local_images),
+            "text_elements": [],
+        }
+
+    def _local_image_paths(self, local_images: list[str] | None = None) -> list[str]:
+        return [str(path) for path in (local_images or []) if path]
 
     def _track_control_request(
         self, runtime: dict[str, Any], request_id: str, action: str

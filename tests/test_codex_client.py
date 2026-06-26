@@ -832,10 +832,45 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(payload["params"]["threadId"], "thread-1")
         self.assertEqual(payload["params"]["expectedTurnId"], "turn-1")
         self.assertEqual(payload["params"]["input"][0]["text"], "Adjust course.")
+        self.assertEqual(payload["params"]["input"][0]["local_images"], [])
+        self.assertEqual(payload["params"]["local_images"], [])
         self.assertIn(payload["id"], runtime["control_request_ids"])
         self.assertEqual(
             runtime["control_request_actions"][payload["id"]], "turn/steer"
         )
+
+    def test_send_turn_steer_includes_local_images(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+
+        websocket = FakeWebSocket()
+        runtime = {
+            "websocket": websocket,
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "control_request_ids": set(),
+        }
+
+        result = asyncio.run(
+            self.client._send_turn_steer_ws(
+                runtime, "Inspect this.", ["/tmp/example.png"]
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        payload = json.loads(websocket.sent[0])
+        self.assertEqual(payload["params"]["input"][0]["text"], "Inspect this.")
+        self.assertEqual(payload["params"]["input"][0]["text_elements"], [])
+        self.assertEqual(
+            payload["params"]["input"][0]["local_images"], ["/tmp/example.png"]
+        )
+        self.assertEqual(payload["params"]["local_images"], ["/tmp/example.png"])
+        self.assertEqual(payload["params"]["images"], [])
+        self.assertEqual(payload["params"]["text_elements"], [])
 
     def test_interrupt_turn_uses_active_turn_rpc_shape(self) -> None:
         class FakeWebSocket:
