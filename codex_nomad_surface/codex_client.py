@@ -2142,18 +2142,30 @@ class CodexClient:
         renderers = {
             "thread/started": self._silent_event_summary,
             "thread/status/changed": self._silent_event_summary,
+            "thread/settings/updated": self._silent_event_summary,
             "turn/started": self._silent_event_summary,
+            "remoteControl/status/changed": self._silent_event_summary,
             "mcpServer/startupStatus/updated": self._silent_event_summary,
             "skills/changed": self._silent_event_summary,
             "account/rateLimits/updated": self._silent_event_summary,
             "thread/tokenUsage/updated": self._silent_event_summary,
             "serverRequest/resolved": self._silent_event_summary,
+            "warning": self._warning_event_summary,
         }
         renderer = renderers.get(method)
         return renderer(message) if renderer else None
 
     def _silent_event_summary(self, message: dict[str, Any]) -> str:
         return ""
+
+    def _warning_event_summary(self, message: dict[str, Any]) -> str:
+        params = message.get("params")
+        if not isinstance(params, dict):
+            return "Warning"
+        text = self._first_text_value(params, ("message", "warning", "detail"))
+        if text:
+            return f"Warning - {text}"
+        return f"Warning - {self._compact_mapping_summary(params)}"
 
     def _update_stream_item(
         self,

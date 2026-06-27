@@ -841,6 +841,64 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(parts.segments, [])
 
+    def test_remote_control_status_event_is_handled_without_output(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts(
+            {
+                "method": "remoteControl/status/changed",
+                "params": {"status": "disabled"},
+            },
+            parts,
+            approvals=[],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(parts.segments, [])
+
+    def test_thread_settings_updated_event_is_handled_without_output(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts(
+            {
+                "method": "thread/settings/updated",
+                "params": {
+                    "threadSettings": {
+                        "model": "gemma4:12b",
+                        "modelProvider": "local_ollama",
+                    }
+                },
+            },
+            parts,
+            approvals=[],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(parts.segments, [])
+
+    def test_warning_event_preserves_warning_message(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts(
+            {
+                "method": "warning",
+                "params": {
+                    "message": (
+                        "Model metadata for `gemma4:12b` not found. "
+                        "Defaulting to fallback metadata."
+                    )
+                },
+            },
+            parts,
+            approvals=[],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(parts.segments[0].kind, "operation_event")
+        self.assertIn("Warning", parts.segments[0].text)
+        self.assertIn("gemma4:12b", parts.segments[0].text)
+        self.assertNotIn("Unrecognized event", parts.segments[0].text)
+
     def test_send_turn_steer_uses_active_turn_rpc_shape(self) -> None:
         class FakeWebSocket:
             def __init__(self) -> None:

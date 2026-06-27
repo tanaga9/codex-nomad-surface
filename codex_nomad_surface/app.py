@@ -3064,6 +3064,33 @@ def model_effort_options(
     return options
 
 
+def model_metadata_warning(
+    model_provider: str,
+    model: str,
+    app_server_models: list[dict],
+    model_list_error: str = "",
+) -> str:
+    provider = model_provider.strip()
+    selected_model = model.strip()
+    if not provider or provider == "openai" or not selected_model:
+        return ""
+    if model_list_error.strip():
+        return (
+            "Could not verify Codex App Server metadata for "
+            f"`{selected_model}`. The turn may run with fallback metadata and fail "
+            "or return an empty response."
+        )
+    app_server_model_ids = {
+        codex_model_id(item) for item in app_server_models if codex_model_id(item)
+    }
+    if selected_model in app_server_model_ids:
+        return ""
+    return (
+        f"Codex App Server did not return metadata for `{selected_model}`. The turn "
+        "may run with fallback metadata and fail or return an empty response."
+    )
+
+
 def model_provider_options(config: dict, selected: str, current: str) -> list[str]:
     options = ["", "openai"]
     providers = config.get("model_providers")
@@ -4082,11 +4109,7 @@ def render_codex_run_overrides(
     )
     effective_model_provider = model_provider or current_model_provider
     use_discovered_model_options = effective_model_provider in {"", "openai"}
-    model_list_result = (
-        load_codex_model_list(app_server_url)
-        if use_discovered_model_options
-        else CodexModelListResult([])
-    )
+    model_list_result = load_codex_model_list(app_server_url)
     models = model_list_result.models
     model_list_error = model_list_result.error.strip()
     model_options = [
@@ -4199,6 +4222,12 @@ def render_codex_run_overrides(
             placeholder="Model name",
             disabled=disabled,
         ).strip()
+
+    metadata_warning = model_metadata_warning(
+        effective_model_provider, model, models, model_list_error
+    )
+    if metadata_warning:
+        st.warning(metadata_warning, icon="⚠️")
 
     effort_source_model = model or (
         current_model if use_discovered_model_options else ""
