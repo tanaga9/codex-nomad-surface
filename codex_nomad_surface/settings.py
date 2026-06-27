@@ -10,6 +10,7 @@ from typing import Any
 APP_DIR = Path(".nomad_surface")
 SETTINGS_PATH = APP_DIR / "settings.json"
 DEFAULT_APP_SERVER_URL = "ws://127.0.0.1:8080"
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -61,3 +62,10 @@ def save_settings(settings: AppSettings) -> None:
 
 def configured_secret() -> str:
     return os.environ.get("NOMAD_AUTH_SECRET", "dev-secret")
+
+
+def auth_dummy_username_field_enabled() -> bool:
+    return (
+        os.environ.get("NOMAD_AUTH_DUMMY_USERNAME_FIELD", "").strip().lower()
+        in TRUE_ENV_VALUES
+    )

@@ -16,6 +16,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from codex_nomad_surface.settings import (
     AppSettings,
+    auth_dummy_username_field_enabled,
     configured_secret,
     load_settings,
 )
@@ -348,6 +349,12 @@ class FileContentMiddleware:
         message_html = (
             f'<div class="error">{html.escape(message)}</div>' if message else ""
         )
+        username_html = (
+            '<input name="username" type="text" autocomplete="username" '
+            'placeholder="Username" value="codex" aria-label="Username">'
+            if auth_dummy_username_field_enabled()
+            else ""
+        )
         body = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -424,6 +431,7 @@ class FileContentMiddleware:
     <p>Unlock this local operation surface.</p>
     {message_html}
     <form method="post" action="/_nomad_auth/login">
+      {username_html}
       <input name="secret" type="password" autocomplete="current-password" placeholder="Enter the local secret" autofocus>
       <button type="submit">Unlock</button>
     </form>
