@@ -691,6 +691,21 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertNotIn(long_argument, text)
         self.assertLess(len(text), 170)
 
+    def test_command_execution_output_delta_is_handled_without_output(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts(
+            {
+                "method": "item/commandExecution/outputDelta",
+                "params": {"itemId": "item-1", "delta": "partial output"},
+            },
+            parts,
+            approvals=[],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(parts.segments, [])
+
     def test_file_change_item_is_summarized(self) -> None:
         parts = CodexTurnOutput()
 
@@ -868,6 +883,21 @@ class CodexClientApprovalTests(unittest.TestCase):
                         "modelProvider": "local_ollama",
                     }
                 },
+            },
+            parts,
+            approvals=[],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(parts.segments, [])
+
+    def test_thread_goal_updated_event_is_handled_without_output(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts(
+            {
+                "method": "thread/goal/updated",
+                "params": {"goal": {"status": "in_progress"}},
             },
             parts,
             approvals=[],

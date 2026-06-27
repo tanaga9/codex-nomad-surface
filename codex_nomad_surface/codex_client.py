@@ -2102,6 +2102,8 @@ class CodexClient:
             item_id = str(params.get("itemId") or params.get("item_id") or "")
             parts.append_delta("reasoning_summary", "\n\n", item_id)
             return True
+        if method == "item/commandExecution/outputDelta":
+            return True
         if method == "item/completed":
             item = params.get("item") if isinstance(params, dict) else None
             if self._update_stream_item(item, parts, stream_items):
@@ -2143,6 +2145,7 @@ class CodexClient:
             "thread/started": self._silent_event_summary,
             "thread/status/changed": self._silent_event_summary,
             "thread/settings/updated": self._silent_event_summary,
+            "thread/goal/updated": self._silent_event_summary,
             "turn/started": self._silent_event_summary,
             "remoteControl/status/changed": self._silent_event_summary,
             "mcpServer/startupStatus/updated": self._silent_event_summary,
