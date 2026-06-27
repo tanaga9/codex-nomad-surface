@@ -2151,6 +2151,7 @@ class CodexClient:
             "thread/tokenUsage/updated": self._silent_event_summary,
             "serverRequest/resolved": self._silent_event_summary,
             "warning": self._warning_event_summary,
+            "configWarning": self._warning_event_summary,
         }
         renderer = renderers.get(method)
         return renderer(message) if renderer else None

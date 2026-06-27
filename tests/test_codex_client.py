@@ -899,6 +899,24 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertIn("gemma4:12b", parts.segments[0].text)
         self.assertNotIn("Unrecognized event", parts.segments[0].text)
 
+    def test_config_warning_event_preserves_warning_message(self) -> None:
+        parts = CodexTurnOutput()
+
+        changed = self.client._update_output_parts(
+            {
+                "method": "configWarning",
+                "params": {"message": "Config entry was ignored."},
+            },
+            parts,
+            approvals=[],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(parts.segments[0].kind, "operation_event")
+        self.assertIn("Warning", parts.segments[0].text)
+        self.assertIn("Config entry was ignored.", parts.segments[0].text)
+        self.assertNotIn("Unrecognized event", parts.segments[0].text)
+
     def test_send_turn_steer_uses_active_turn_rpc_shape(self) -> None:
         class FakeWebSocket:
             def __init__(self) -> None:
