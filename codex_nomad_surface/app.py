@@ -1532,8 +1532,12 @@ def render_chat(
                     content
                 )
             if message.role == "assistant" and codex_output_has_auxiliary(output_parts):
-                render_codex_output_auxiliary(output_parts)
-                if codex_output_is_progress_only(output_parts):
+                progress_only = codex_output_is_progress_only(output_parts)
+                render_codex_output_auxiliary(
+                    output_parts,
+                    expanded_until_final_answer=progress_only,
+                )
+                if progress_only:
                     st.info(
                         "Live progress updates are not attached after browser reload. "
                         "Refresh this thread after the turn finishes to load the final response."
