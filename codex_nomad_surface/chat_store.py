@@ -6,6 +6,18 @@ from datetime import datetime
 from typing import Any
 
 
+CHAT_TITLE_MAX_CHARS = 48
+
+
+def chat_title_from_text(text: str, fallback: str = "New Chat") -> str:
+    title = text.strip().splitlines()[0] if text.strip() else ""
+    if not title:
+        return fallback
+    if len(title) <= CHAT_TITLE_MAX_CHARS:
+        return title
+    return f"{title[: CHAT_TITLE_MAX_CHARS - 3].rstrip()}..."
+
+
 @dataclass
 class ChatMessage:
     role: str
@@ -44,5 +56,5 @@ class ChatSession:
             ChatMessage(role=role, content=content, metadata=metadata or {})
         )
         if self.title == "New Chat" and role == "user":
-            self.title = content.strip().splitlines()[0][:48] or "New Chat"
+            self.title = chat_title_from_text(content)
         self.touch()

@@ -17,14 +17,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 import streamlit as st
 from starlette.middleware import Middleware
 from streamlit.starlette import App
 
-from codex_nomad_surface.chat_store import ChatMessage, ChatSession
+from codex_nomad_surface.chat_store import (
+    ChatMessage,
+    ChatSession,
+    chat_title_from_text,
+)
 from codex_nomad_surface.codex_client import (
     CodexClient,
     CodexModelListResult,
@@ -102,6 +106,7 @@ CHAT_INPUT_IMAGE_MIME_TYPES = {
 }
 CHAT_INPUT_IMAGE_MAX_MB = 20
 CHAT_INPUT_IMAGE_TEMP_DIR = Path(tempfile.gettempdir()) / "codex-nomad-surface-uploads"
+RECENT_THREAD_LIMIT = 6
 UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 NEW_PROJECT_KEY = "__new_project__"
@@ -780,6 +785,7 @@ def sync_chat_selection_from_url(server_threads: list[CodexThread]) -> None:
             discard_draft_chat()
         st.session_state.selected_chat_id = chat_id
         st.session_state[PENDING_CHAT_SELECT_KEY] = chat_id
+        st.session_state.chat_history_autoscroll = bool(chat_id)
     if chat_id:
         select_project_for_chat_id(server_threads, chat_id)
 
@@ -812,7 +818,7 @@ def select_project_for_chat_id(server_threads: list[CodexThread], chat_id: str) 
 def server_thread_chat(project: Project, thread: CodexThread) -> ChatSession:
     created_at = format_thread_time(thread.created_at)
     updated_at = format_thread_time(thread.updated_at)
-    title = thread.preview.strip().splitlines()[0][:48] or "New Chat"
+    title = chat_title_from_text(thread.preview)
     return ChatSession(
         id=f"thread:{thread.id}",
         project_path=project.path,
@@ -821,6 +827,32 @@ def server_thread_chat(project: Project, thread: CodexThread) -> ChatSession:
         created_at=created_at,
         updated_at=updated_at or created_at,
     )
+
+
+def recent_thread_chats(
+    server_threads: list[CodexThread],
+    projects: list[Project],
+    limit: int = RECENT_THREAD_LIMIT,
+) -> list[tuple[Project, ChatSession]]:
+    project_by_path = {project.path: project for project in projects}
+    recent: list[tuple[Project, ChatSession]] = []
+    seen_thread_ids: set[str] = set()
+    sorted_threads = sorted(
+        server_threads,
+        key=lambda thread: thread.updated_at or thread.created_at,
+        reverse=True,
+    )
+    for thread in sorted_threads:
+        if not thread.id or thread.id in seen_thread_ids:
+            continue
+        project = project_by_path.get(thread.cwd)
+        if not project:
+            continue
+        recent.append((project, server_thread_chat(project, thread)))
+        seen_thread_ids.add(thread.id)
+        if len(recent) >= limit:
+            break
+    return recent
 
 
 def project_chats(
@@ -3964,7 +3996,126 @@ def chat_workspace(
     chat_composer(client, project, active_chat)
 
 
-def project_creation_workspace(client: CodexClient) -> None:
+def render_recent_threads(server_threads: list[CodexThread]) -> None:
+    projects = project_options(server_threads)
+    recent = recent_thread_chats(server_threads, projects)
+    if not recent:
+        return
+
+    rows = []
+    for project, chat in recent:
+        project_name = html.escape(project.name)
+        updated_at = html.escape(chat.updated_at or chat.created_at)
+        title = html.escape(chat.title)
+        href = f"?chat={quote(chat.id, safe='')}"
+        rows.append(
+            f"""
+            <a class="recent-thread-row" href="{href}">
+              <span class="recent-thread-title">{title}</span>
+              <span class="recent-thread-meta">
+                <span class="recent-thread-project">{project_name}</span>
+                <span class="recent-thread-time">{updated_at}</span>
+              </span>
+              <span class="recent-thread-chevron" aria-hidden="true">&rsaquo;</span>
+            </a>
+            """
+        )
+
+    st.html(
+        f"""
+        <style>
+        .recent-thread-section {{
+          margin-top: 1.15rem;
+        }}
+
+        .recent-thread-heading {{
+          margin: 0 0 0.45rem;
+          font-size: 1rem;
+          font-weight: 700;
+        }}
+
+        .recent-thread-list {{
+          border: 1px solid rgba(148, 163, 184, 0.26);
+          border-radius: 8px;
+          overflow: hidden;
+          background: rgba(15, 23, 42, 0.16);
+        }}
+
+        .recent-thread-row {{
+          position: relative;
+          display: block;
+          padding: 0.72rem 2.35rem 0.72rem 0.9rem;
+          color: inherit;
+          text-decoration: none;
+        }}
+
+        .recent-thread-row + .recent-thread-row {{
+          border-top: 1px solid rgba(148, 163, 184, 0.16);
+        }}
+
+        .recent-thread-row:hover {{
+          background: rgba(148, 163, 184, 0.09);
+        }}
+
+        .recent-thread-title {{
+          font-weight: 650;
+          line-height: 1.32;
+          overflow-wrap: anywhere;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }}
+
+        .recent-thread-meta {{
+          display: flex;
+          align-items: center;
+          gap: 0.45rem;
+          flex-wrap: wrap;
+          margin-top: 0.25rem;
+          font-size: 0.82rem;
+          line-height: 1.25;
+        }}
+
+        .recent-thread-project {{
+          display: inline-flex;
+          max-width: 100%;
+          border: 1px solid rgba(148, 163, 184, 0.24);
+          border-radius: 999px;
+          padding: 0.08rem 0.45rem;
+          color: rgba(248, 250, 252, 0.88);
+          background: rgba(148, 163, 184, 0.10);
+          font-weight: 700;
+          overflow-wrap: anywhere;
+        }}
+
+        .recent-thread-time {{
+          color: rgba(229, 231, 235, 0.48);
+        }}
+
+        .recent-thread-chevron {{
+          position: absolute;
+          right: 0.9rem;
+          top: 50%;
+          transform: translateY(-50%);
+          color: rgba(229, 231, 235, 0.44);
+          font-size: 1.35rem;
+          line-height: 1;
+        }}
+        </style>
+        <div class="recent-thread-section">
+          <div class="recent-thread-heading">Recent Chats</div>
+          <div class="recent-thread-list">
+            {''.join(rows)}
+          </div>
+        </div>
+        """
+    )
+
+
+def project_creation_workspace(
+    client: CodexClient, server_threads: list[CodexThread]
+) -> None:
     st.subheader("New Project")
     with st.form("new_project_form"):
         project_path = st.text_input(
@@ -3973,6 +4124,8 @@ def project_creation_workspace(client: CodexClient) -> None:
             placeholder="/path/to/project",
         ).strip()
         submitted = st.form_submit_button("Create project")
+
+    render_recent_threads(server_threads)
 
     if not submitted:
         return
@@ -4366,7 +4519,7 @@ def main_screen() -> None:
     sync_chat_selection_from_url(server_threads)
     project, chat = surface_sidebar(settings, server_threads)
     if project_creation_selected():
-        project_creation_workspace(client)
+        project_creation_workspace(client, server_threads)
         return
     chat = chat or draft_chat_for_project(project)
     cancel_pending_turn_if_needed(client, chat)
