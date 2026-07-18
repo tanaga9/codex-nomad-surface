@@ -70,3 +70,12 @@ Server to be connected.
 
 UI Test state is kept separate from normal Codex chat state. Normal turns use
 `pending_turn`; UI tests use `ui_test_pending` and `ui_test_chat`.
+
+## Streamlit Upgrade Smoke Test
+
+After updating Streamlit, verify these browser flows before release:
+
+- Confirm unauthenticated users cannot view the operation screen or file links.
+- In UI Test mode, exercise an approval and a multi-question user response.
+- At a phone-sized viewport, append a Prompt Form, Skill, and file path to the
+  native chat input, then send a message with an image attachment.
