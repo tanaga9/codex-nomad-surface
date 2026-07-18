@@ -1820,7 +1820,7 @@ def render_pending_turn_wait_indicator(client: CodexClient, pending: dict) -> No
                 type="secondary",
                 disabled=not can_interrupt,
                 help="Request cancellation of the current response.",
-                use_container_width=True,
+                width="stretch",
             )
         if pending.get("interrupt_requested"):
             st.caption("Waiting for the turn to finish interrupting.")
@@ -1996,14 +1996,14 @@ def render_disabled_interrupt_draft_buttons(key_prefix: str) -> None:
             "turn/steer",
             key=f"{key_prefix}-steer",
             disabled=True,
-            use_container_width=True,
+            width="stretch",
         )
     with col_restore:
         st.button(
             "Return to input",
             key=f"{key_prefix}-restore",
             disabled=True,
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -2023,7 +2023,7 @@ def render_pending_interrupt_draft_controls(
             "turn/steer",
             key=f"pending-draft-steer-{chat.id}-{draft_id}",
             disabled=not runtime_ready,
-            use_container_width=True,
+            width="stretch",
         ):
             prompt_text = prompt_with_local_image_references(
                 text,
@@ -2058,7 +2058,7 @@ def render_pending_interrupt_draft_controls(
         if st.button(
             "Return to input",
             key=f"pending-draft-restore-{chat.id}-{draft_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.pending_chat_input_restore = {
                 "chat_id": chat.id,
@@ -2267,7 +2267,7 @@ def render_inline_approval(
                     ),
                     on_click=queue_approval_action,
                     args=(key, decision),
-                    use_container_width=True,
+                    width="stretch",
                 )
     else:
         allow_for_thread = False
@@ -2294,7 +2294,7 @@ def render_inline_approval(
                 disabled=in_progress,
                 on_click=queue_approval_action,
                 args=(key, "reject"),
-                use_container_width=True,
+                width="stretch",
             )
         with approve_column:
             st.button(
@@ -2304,7 +2304,7 @@ def render_inline_approval(
                 type="primary",
                 on_click=queue_approval_action,
                 args=(key, approve_decision),
-                use_container_width=True,
+                width="stretch",
             )
 
     process_queued_approval_action(
@@ -3526,7 +3526,7 @@ def sidebar_promptform_actions(
     project: Project | None, chat: ChatSession | None
 ) -> None:
     disabled = not project or bool(st.session_state.get("pending_turn"))
-    if st.button("Add Prompt Form", disabled=disabled, use_container_width=True):
+    if st.button("Add Prompt Form", disabled=disabled, width="stretch"):
         add_draftable_chat_message(
             project,
             chat,
@@ -3541,7 +3541,7 @@ def sidebar_promptform_actions(
 
 def sidebar_skill_actions(project: Project | None, chat: ChatSession | None) -> None:
     disabled = not project or bool(st.session_state.get("pending_turn"))
-    if st.button("Use Skill", disabled=disabled, use_container_width=True):
+    if st.button("Use Skill", disabled=disabled, width="stretch"):
         add_draftable_chat_message(
             project,
             chat,
@@ -3556,7 +3556,7 @@ def sidebar_skill_actions(project: Project | None, chat: ChatSession | None) -> 
 
 def sidebar_file_path_actions(project: Project | None, chat: ChatSession | None) -> None:
     disabled = not project or bool(st.session_state.get("pending_turn"))
-    if st.button("Add File Path", disabled=disabled, use_container_width=True):
+    if st.button("Add File Path", disabled=disabled, width="stretch"):
         add_draftable_chat_message(
             project,
             chat,
@@ -3599,7 +3599,7 @@ def sidebar_ui_test_action() -> None:
         "Start Test",
         key="start_ui_test",
         disabled=disabled,
-        use_container_width=True,
+        width="stretch",
     ):
         add_ui_test_launcher_message()
 
@@ -4187,7 +4187,7 @@ def surface_sidebar(
             or not chat
             or not chat.thread_id
             or bool(st.session_state.get("pending_turn")),
-            use_container_width=True,
+            width="stretch",
         ):
             add_run_overrides_message(project, chat)
         if st.button(
@@ -4197,7 +4197,7 @@ def surface_sidebar(
             or not chat
             or not chat.thread_id
             or bool(st.session_state.get("pending_turn")),
-            use_container_width=True,
+            width="stretch",
         ):
             append_server_thread_info_message(settings, project, chat)
         st.divider()
