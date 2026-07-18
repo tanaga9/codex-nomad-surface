@@ -464,7 +464,8 @@ def connection_card(
 @st.fragment(run_every=DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS)
 def disconnected_connection_status(app_server_url: str) -> None:
     client = CodexClient(app_server_url)
-    status = client.status()
+    with st.skeleton():
+        status = client.status()
     connection_card(client, status)
     if status.ok:
         st.rerun()
@@ -610,7 +611,8 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
             st.session_state.app_server_launch_in_progress = False
             st.error(message)
             return
-        time.sleep(APP_SERVER_STARTUP_CHECK_SECONDS)
+        with st.skeleton():
+            time.sleep(APP_SERVER_STARTUP_CHECK_SECONDS)
         st.session_state.app_server_launch_in_progress = False
         returncode = process.poll() if process else -1
         if returncode is None:
@@ -1081,7 +1083,8 @@ def hydrate_thread_chat(client: CodexClient, chat: ChatSession | None) -> None:
     if chat.thread_id in st.session_state.loaded_thread_ids:
         return
 
-    result = client.read_thread_messages(chat.thread_id, limit=5)
+    with st.skeleton(height=120):
+        result = client.read_thread_messages(chat.thread_id, limit=5)
     update_thread_history_state(chat.thread_id, result)
     messages = thread_messages_from_result(result)
     if not messages:
@@ -4509,7 +4512,8 @@ def main_screen() -> None:
         return
 
     client = CodexClient(settings.app_server_url)
-    status = client.status()
+    with st.skeleton():
+        status = client.status()
 
     if not status.ok:
         connection_gate_screen(settings, status)
