@@ -1,0 +1,4 @@
+interface:
+  display_name: "Streamlit Current Maintainer"
+  short_description: "Audit and modernize Streamlit usage safely."
+  default_prompt: "Use $streamlit-current-maintainer to audit this app against current Streamlit documentation, compare installed and latest releases, and propose or implement focused improvements."
