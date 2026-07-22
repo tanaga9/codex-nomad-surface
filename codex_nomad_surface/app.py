@@ -75,9 +75,12 @@ from codex_nomad_surface.turn_run import (
     turn_run_can_start_worker,
 )
 from codex_nomad_surface.ui_components import (
+    clear_chat_input_outbox,
     inject_compact_chat_input_style,
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
+    inject_chat_input_outbox,
+    render_copy_text_button,
     render_promptform,
 )
 
@@ -634,6 +637,7 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
 def connection_gate_screen(settings: AppSettings, status: ConnectionStatus) -> None:
     st.title("Codex Nomad Surface")
     disconnected_connection_status(settings.app_server_url)
+    render_disconnected_pending_turn_recovery()
     st.warning(
         "Codex is not connected, so the operation screen is unavailable. Start App Server and confirm the connection URL."
     )
@@ -644,6 +648,29 @@ def connection_gate_screen(settings: AppSettings, status: ConnectionStatus) -> N
         disabled=st.session_state.app_server_launch_in_progress,
     )
     local_app_server_launcher(settings, status)
+
+
+def render_disconnected_pending_turn_recovery() -> None:
+    """Keep an unacknowledged prompt recoverable when the connection gate replaces chat."""
+    pending = st.session_state.get("pending_turn")
+    if not isinstance(pending, dict) or pending.get("delivery_confirmed"):
+        return
+    drain_pending_turn_events(pending)
+    text = str(pending.get("text") or "")
+    if not text:
+        return
+    st.error("Message delivery to Codex Server was not confirmed.")
+    with st.container(border=True):
+        message_col, copy_col = st.columns([1, 0.18], vertical_alignment="center")
+        with message_col:
+            st.markdown("**Unconfirmed message**")
+            render_chat_user_markdown(text)
+            st.caption("Copy this message before reconnecting or retrying.")
+        with copy_col:
+            render_copy_text_button(
+                text,
+                f"copy-disconnected-{pending.get('run_id') or pending.get('chat_id')}",
+            )
 
 
 def project_selector(
@@ -1230,6 +1257,31 @@ def render_chat_user_markdown(text: object) -> None:
     st.markdown(markdown_with_soft_line_breaks(text))
 
 
+def user_message_needs_copy_backup(metadata: dict[str, Any]) -> bool:
+    return metadata.get("delivery_status") in {"sending", "failed"}
+
+
+def render_user_turn_message(
+    text: object, metadata: dict[str, Any], message_key: str
+) -> None:
+    """Show locally queued prompts with a copyable recovery path.
+
+    A turn is only marked delivered after the App Server returns a turn ID.
+    """
+    if not user_message_needs_copy_backup(metadata):
+        render_chat_user_markdown(text)
+        return
+    content_col, copy_col = st.columns([1, 0.18], vertical_alignment="top")
+    with content_col:
+        render_chat_user_markdown(text)
+        if metadata.get("delivery_status") == "failed":
+            st.caption("Delivery was not confirmed. Copy this message before retrying.")
+        else:
+            st.caption("Sending to Codex Server. You can copy this message until delivery is confirmed.")
+    with copy_col:
+        render_copy_text_button(text, f"copy-unsent-{message_key}")
+
+
 def render_chat_attachment_summary(metadata: dict[str, Any]) -> None:
     attachments = metadata.get("attachments")
     if not isinstance(attachments, list) or not attachments:
@@ -1579,7 +1631,9 @@ def render_chat(
                     )
             if content:
                 if message.role == "user":
-                    render_chat_user_markdown(content)
+                    render_user_turn_message(
+                        content, message.metadata, f"{chat.id}-{index}"
+                    )
                 else:
                     st.markdown(content)
             if message.role == "user":
@@ -1777,6 +1831,11 @@ def render_pending_turn(
             render_codex_stream_output(pending["output_parts"])
         render_pending_turn_wait_indicator(client, pending)
 
+    if pending.get("delivery_confirmed"):
+        clear_chat_input_outbox(
+            pending.get("input_text"), pending.get("outbox_scope")
+        )
+
     render_pending_interrupt_drafts(client, chat, pending)
 
 
@@ -1810,9 +1869,17 @@ def render_pending_turn_wait_indicator(client: CodexClient, pending: dict) -> No
     )
     wait_panel = st.container(border=True)
     with wait_panel:
-        message_col, action_col = st.columns([1, 0.28], vertical_alignment="center")
+        message_col, copy_col, action_col = st.columns(
+            [1, 0.18, 0.28], vertical_alignment="center"
+        )
         with message_col:
             st.markdown(pending_turn_wait_message(pending))
+        with copy_col:
+            if not pending.get("delivery_confirmed"):
+                render_copy_text_button(
+                    pending.get("text") or "",
+                    f"copy-unsent-{pending.get('run_id') or pending.get('chat_id')}",
+                )
         with action_col:
             cancel_clicked = st.button(
                 "Cancel turn",
@@ -1865,7 +1932,8 @@ def start_turn_run_worker(
     pending["worker_queue"] = event_queue
     pending["worker_cancel_event"] = cancel_event
     pending["worker_started_at"] = time.time()
-    pending["status"] = TURN_RUN_RUNNING
+    # Keep the prompt recoverable until the App Server acknowledges turn/start.
+    pending["status"] = TURN_RUN_STARTING
 
     def output_callback(output_parts: dict[str, Any]) -> None:
         event_queue.put({"type": "output", "output_parts": output_parts})
@@ -1901,6 +1969,22 @@ def start_turn_run_worker(
     worker.start()
 
 
+def set_user_turn_delivery_status(
+    chat: ChatSession, run_id: object, delivery_status: str
+) -> None:
+    """Update the locally rendered prompt matched to a turn run."""
+    if not run_id:
+        return
+    for message in chat.messages:
+        if (
+            message.role == "user"
+            and message.metadata.get("run_id") == run_id
+            and message.metadata.get("kind") == "turn_prompt"
+        ):
+            message.metadata["delivery_status"] = delivery_status
+            return
+
+
 def drain_pending_turn_events(pending: dict) -> None:
     if pending.get("approval"):
         return
@@ -1921,6 +2005,8 @@ def drain_pending_turn_events(pending: dict) -> None:
             if isinstance(runtime, dict):
                 pending["thread_id"] = runtime.get("thread_id")
                 pending["turn_id"] = runtime.get("turn_id")
+                if runtime.get("turn_id"):
+                    pending["delivery_confirmed"] = True
             if pending.get("status") == TURN_RUN_STARTING:
                 pending["status"] = TURN_RUN_RUNNING
         elif event_type == "result":
@@ -2580,6 +2666,14 @@ def handle_turn_result(
     pending_state_key: str = "pending_turn",
 ) -> None:
     cleanup_pending_turn_worker(pending)
+    if not pending.get("delivery_confirmed"):
+        set_user_turn_delivery_status(chat, pending.get("run_id"), "failed")
+        restore_unsent_turn_to_chat_input(chat, pending.get("input_text"))
+    else:
+        set_user_turn_delivery_status(chat, pending.get("run_id"), "delivered")
+        clear_chat_input_outbox(
+            pending.get("input_text"), pending.get("outbox_scope")
+        )
     if result.get("thread_id"):
         chat.thread_id = result["thread_id"]
         pending["thread_id"] = result["thread_id"]
@@ -2657,6 +2751,17 @@ def cancel_pending_turn_if_needed(
     st.session_state.approval_action_queued = None
 
 
+def restore_unsent_turn_to_chat_input(chat: ChatSession, text: object) -> None:
+    text = str(text or "").strip()
+    if not text:
+        return
+    st.session_state.pending_chat_input_restore = {
+        "chat_id": chat.id,
+        "text": text,
+        "nonce": str(uuid.uuid4()),
+    }
+
+
 def queue_user_turn(
     client: CodexClient,
     project: Project,
@@ -2669,6 +2774,9 @@ def queue_user_turn(
         TURN_RUN_COMPLETED,
         TURN_RUN_FAILED,
     }:
+        return
+    display_text = user_text or ("Attached image" if image_files else "")
+    if not display_text:
         return
     starting_new_thread = not chat or not chat.thread_id
     chat = materialize_chat(project, chat)
@@ -2687,9 +2795,6 @@ def queue_user_turn(
         st.error(image_error)
         return
     attachments = uploaded_image_metadata(image_files or [])
-    display_text = user_text or ("Attached image" if attachments else "")
-    if not display_text:
-        return
     prompt_text = prompt_with_local_image_references(
         user_text, attachments, local_images
     )
@@ -2700,6 +2805,7 @@ def queue_user_turn(
             "kind": "turn_prompt",
             "run_id": run_id,
             "attachments": attachments,
+            "delivery_status": "sending",
         },
     )
     pending = {
@@ -2707,6 +2813,8 @@ def queue_user_turn(
         "chat_id": chat.id,
         "status": TURN_RUN_STARTING,
         "text": display_text,
+        "input_text": user_text,
+        "outbox_scope": chat.id,
         "prompt_text": prompt_text,
         "local_images": local_images,
         "attachments": attachments,
@@ -3995,6 +4103,7 @@ def chat_workspace(
     inject_compact_chat_input_style()
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
+    inject_chat_input_outbox(active_chat.id if active_chat else "")
     chat_history_panel(client, project, active_chat)
     chat_composer(client, project, active_chat)
 

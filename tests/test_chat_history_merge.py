@@ -4,8 +4,10 @@ from codex_nomad_surface.app import (
     codex_output_is_progress_only,
     codex_output_other_segments,
     merge_thread_history_messages,
+    set_user_turn_delivery_status,
+    user_message_needs_copy_backup,
 )
-from codex_nomad_surface.chat_store import ChatMessage
+from codex_nomad_surface.chat_store import ChatMessage, ChatSession
 
 
 class ChatHistoryMergeTests(unittest.TestCase):
@@ -99,6 +101,27 @@ class ChatHistoryMergeTests(unittest.TestCase):
                 {"kind": "future_widget", "text": "New output shape"},
             ],
         )
+
+    def test_unconfirmed_user_turn_keeps_copy_backup_available(self) -> None:
+        self.assertTrue(user_message_needs_copy_backup({"delivery_status": "sending"}))
+        self.assertTrue(user_message_needs_copy_backup({"delivery_status": "failed"}))
+        self.assertFalse(user_message_needs_copy_backup({"delivery_status": "delivered"}))
+
+    def test_delivery_status_is_updated_for_the_matching_turn(self) -> None:
+        chat = ChatSession.new("/project")
+        chat.add_message(
+            "user",
+            "Keep this prompt",
+            metadata={
+                "kind": "turn_prompt",
+                "run_id": "run-1",
+                "delivery_status": "sending",
+            },
+        )
+
+        set_user_turn_delivery_status(chat, "run-1", "delivered")
+
+        self.assertEqual(chat.messages[0].metadata["delivery_status"], "delivered")
 
 
 if __name__ == "__main__":

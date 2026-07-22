@@ -209,6 +209,28 @@ def inject_chat_input_bridge() -> None:
     )
 
 
+def inject_chat_input_outbox(scope: object) -> None:
+    st.html(
+        f"""
+        <div id="chat-input-outbox" style="display:none"></div>
+        <script>{load_asset_text("chat_input_outbox.js")}</script>
+        <script>window.codexNomadSurface?.setChatOutboxScope?.({json.dumps(str(scope or ""))});</script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
+def clear_chat_input_outbox(text: object, scope: object) -> None:
+    st.html(
+        f"""
+        <script>
+        window.codexNomadSurface?.clearPendingChatMessage?.({json.dumps(str(text or ""))}, {json.dumps(str(scope or ""))});
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
 def inject_compact_chat_input_style() -> None:
     st.html(
         """
@@ -224,6 +246,47 @@ def inject_compact_chat_input_style() -> None:
         }
         </style>
         """
+    )
+
+
+def render_copy_text_button(text: object, button_id: str) -> None:
+    """Render a browser-local clipboard button without sending text to Python."""
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "-", button_id)
+    st.html(
+        f"""
+        <button
+          id="{_escape_attr(safe_id)}"
+          type="button"
+          title="Copy message"
+          aria-label="Copy message"
+          style="width:100%; min-width:2.5rem; padding:0.35rem;"
+        >Copy</button>
+        <script>
+        (() => {{
+          const button = document.getElementById({json.dumps(safe_id)});
+          if (!(button instanceof HTMLButtonElement)) return;
+          const text = {json.dumps(str(text))};
+          button.addEventListener("click", async () => {{
+            try {{
+              await navigator.clipboard.writeText(text);
+            }} catch (_) {{
+              const area = document.createElement("textarea");
+              area.value = text;
+              area.style.position = "fixed";
+              area.style.opacity = "0";
+              document.body.appendChild(area);
+              area.select();
+              document.execCommand("copy");
+              area.remove();
+            }}
+            const label = button.textContent;
+            button.textContent = "Copied";
+            window.setTimeout(() => {{ button.textContent = label; }}, 1200);
+          }});
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
     )
 
 
