@@ -33,6 +33,31 @@ def test_set_query_chat_id_omits_local_chat_ids(monkeypatch) -> None:
     assert session_state.last_query_chat_id == ""
 
 
+def test_reset_home_view_clears_project_and_chat_selection(monkeypatch) -> None:
+    session_state = SessionStateStub(
+        {
+            "selected_project_key": "/path/to/repo",
+            "selected_chat_id": "thread:old",
+            "draft_chat": ChatSession.new("/path/to/repo"),
+            "last_rendered_chat_id": "thread:old",
+            "chat_history_autoscroll": True,
+            "last_query_chat_id": "thread:old",
+        }
+    )
+    query_params = {"chat": "thread:old"}
+    monkeypatch.setattr(app.st, "session_state", session_state)
+    monkeypatch.setattr(app.st, "query_params", query_params)
+
+    app.reset_home_view()
+
+    assert session_state.selected_project_key == app.NEW_PROJECT_KEY
+    assert session_state[app.PENDING_PROJECT_SELECT_KEY] == ""
+    assert session_state.selected_chat_id == ""
+    assert session_state[app.PENDING_CHAT_SELECT_KEY] == ""
+    assert session_state.draft_chat is None
+    assert query_params == {}
+
+
 def test_url_chat_selection_enables_autoscroll(monkeypatch) -> None:
     session_state = SessionStateStub(
         {

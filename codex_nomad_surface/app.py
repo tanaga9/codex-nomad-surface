@@ -790,6 +790,8 @@ def promote_chat_to_thread_selection(chat: ChatSession, thread_id: str) -> None:
 
 
 def reset_home_view() -> None:
+    set_selected_project_key(NEW_PROJECT_KEY)
+    st.session_state[PENDING_PROJECT_SELECT_KEY] = ""
     st.session_state.selected_chat_id = ""
     st.session_state[PENDING_CHAT_SELECT_KEY] = ""
     st.session_state.draft_chat = None
