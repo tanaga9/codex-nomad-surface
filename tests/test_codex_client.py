@@ -798,6 +798,46 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(parts.segments[0].kind, "other_event")
         self.assertIn("future/event", parts.segments[0].text)
 
+    def test_unknown_request_with_response_id_requires_user_response(self) -> None:
+        parts = CodexTurnOutput()
+        approvals: list[dict] = []
+
+        changed = self.client._update_output_parts(
+            {
+                "id": "future-request-1",
+                "method": "future/request",
+                "params": {"prompt": "Continue?"},
+            },
+            parts,
+            approvals,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(approvals[0]["id"], "future-request-1")
+        self.assertEqual(approvals[0]["kind"], "generic_user_response_request")
+        self.assertEqual(
+            parts.to_snapshot()["approval_request"],
+            "Codex is waiting for a user response",
+        )
+
+    def test_request_id_takes_priority_over_known_silent_event(self) -> None:
+        parts = CodexTurnOutput()
+        approvals: list[dict] = []
+
+        changed = self.client._update_output_parts(
+            {
+                "id": "request-1",
+                "method": "thread/started",
+                "params": {"thread": {"id": "thread-1"}},
+            },
+            parts,
+            approvals,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(approvals[0]["id"], "request-1")
+        self.assertEqual(approvals[0]["kind"], "generic_user_response_request")
+
     def test_repeated_unknown_event_is_summarized_once(self) -> None:
         parts = CodexTurnOutput()
 

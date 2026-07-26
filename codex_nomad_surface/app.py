@@ -122,11 +122,6 @@ CODEX_OUTPUT_AUXILIARY_LABELS = {
     "approval_request": "Approval",
     "error": "Errors",
 }
-CODEX_OUTPUT_NON_OTHER_KINDS = set(CODEX_OUTPUT_AUXILIARY_LABELS) | {
-    "final_answer",
-    "commentary",
-    "operation_event",
-}
 INTERRUPT_DRAFT_PENDING = "pending"
 INTERRUPT_DRAFT_STEERED = "steered"
 INTERRUPT_DRAFT_RETURNED = "returned"
@@ -1217,7 +1212,8 @@ def codex_output_text_for_kind(segments: list[dict[str, Any]], kind: str) -> str
 
 def codex_output_has_auxiliary(parts: dict[str, Any]) -> bool:
     return any(
-        segment.get("kind") != "final_answer"
+        segment.get("kind")
+        in {"commentary", "operation_event", *CODEX_OUTPUT_AUXILIARY_LABELS}
         for segment in parts.get("segments", [])
         if isinstance(segment, dict)
     )
@@ -1234,23 +1230,6 @@ def codex_output_is_progress_only(parts: dict[str, Any]) -> bool:
         and str(segment.get("text") or "").strip()
         for segment in segments
     )
-
-
-def codex_output_is_low_priority_unknown(segment: dict[str, Any]) -> bool:
-    if segment.get("kind") != "other_event":
-        return False
-    text = str(segment.get("text") or "").strip()
-    return text.startswith(("Unrecognized event:", "Unrecognized item:"))
-
-
-def codex_output_other_segments(
-    segments: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    return [
-        segment
-        for segment in segments
-        if segment.get("kind") not in CODEX_OUTPUT_NON_OTHER_KINDS
-    ]
 
 
 def render_chat_user_markdown(text: object) -> None:
@@ -1458,17 +1437,6 @@ def render_codex_output_auxiliary(
         else:
             with st.expander(label, expanded=False):
                 st.markdown(text)
-
-    other_segments = codex_output_other_segments(segments)
-    if other_segments:
-        with st.expander("Other output", expanded=expanded_until_final_answer):
-            for segment in other_segments:
-                if codex_output_is_low_priority_unknown(segment):
-                    st.caption(str(segment.get("text") or ""))
-                    continue
-                st.markdown(f"**{segment.get('kind') or 'unknown'}**")
-                st.markdown(str(segment.get("text") or ""))
-
 
 def render_progress_operation_segments(operation_segments: list[dict[str, Any]]) -> None:
     if not operation_segments:

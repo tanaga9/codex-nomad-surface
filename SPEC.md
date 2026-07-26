@@ -195,10 +195,13 @@ The long-lived policy is:
 - Incoming App Server messages should be classified first by user-visible
   behavior: response-required, known output, known silent status, or unknown
   observed event. This keeps protocol drift from turning into invisible waits.
-- If Codex App Server sends any assistant-side event or item, the app should
-  reflect it somewhere in the UI. Unknown event types should be preserved in a
-  generic output area rather than silently ignored. Item lifecycle events should
-  follow the same rule at both start and completion.
+- App Server requests with a top-level JSON-RPC ID must always receive
+  actionable UI, even when their method is not yet recognized. Recognized
+  request methods may use their documented request-specific response ID.
+  Unknown notifications and item types without a response ID should be retained
+  in the turn data for diagnosis, but must not take space in the normal chat
+  surface. Item lifecycle events follow the same rule at both start and
+  completion.
 - If Codex App Server sends any request that appears to require a user response
   outside the prompt body, the app should display an actionable response UI.
   The user should not be left waiting on an invisible request.

@@ -761,6 +761,8 @@ class CodexClient:
         method = str(message.get("method") or "")
         if not method:
             return AppServerMessageClassification("unknown_observed", method)
+        if message.get("id") is not None:
+            return AppServerMessageClassification("response_required", method)
         recognized_summary = self._recognized_event_summary(message)
         if recognized_summary is not None:
             kind = "known_output" if recognized_summary else "known_silent"
@@ -769,8 +771,6 @@ class CodexClient:
             if self._message_response_id(message) is not None:
                 return AppServerMessageClassification("response_required", method)
             return AppServerMessageClassification("unknown_observed", method)
-        if message.get("id") is not None:
-            return AppServerMessageClassification("response_required", method)
         if self._is_known_output_message(message):
             return AppServerMessageClassification("known_output", method)
         return AppServerMessageClassification("unknown_observed", method)

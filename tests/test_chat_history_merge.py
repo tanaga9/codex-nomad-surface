@@ -2,7 +2,6 @@ import unittest
 
 from codex_nomad_surface.app import (
     codex_output_is_progress_only,
-    codex_output_other_segments,
     merge_thread_history_messages,
     set_user_turn_delivery_status,
     user_message_needs_copy_backup,
@@ -83,23 +82,6 @@ class ChatHistoryMergeTests(unittest.TestCase):
                     ],
                 }
             )
-        )
-
-    def test_codex_output_other_segments_keeps_unknown_events_visible(self) -> None:
-        segments = [
-            {"kind": "final_answer", "text": "Done"},
-            {"kind": "commentary", "text": "Working"},
-            {"kind": "operation_event", "text": "Ran command"},
-            {"kind": "other_event", "text": "Unrecognized event: `future/event`"},
-            {"kind": "future_widget", "text": "New output shape"},
-        ]
-
-        self.assertEqual(
-            codex_output_other_segments(segments),
-            [
-                {"kind": "other_event", "text": "Unrecognized event: `future/event`"},
-                {"kind": "future_widget", "text": "New output shape"},
-            ],
         )
 
     def test_unconfirmed_user_turn_keeps_copy_backup_available(self) -> None:
