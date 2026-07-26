@@ -11,6 +11,8 @@ APP_DIR = Path(".nomad_surface")
 SETTINGS_PATH = APP_DIR / "settings.json"
 DEFAULT_APP_SERVER_URL = "ws://127.0.0.1:8080"
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+DEFAULT_AUTH_SESSION_DAYS = 180
+MAX_AUTH_SESSION_DAYS = 365
 
 
 @dataclass
@@ -69,3 +71,13 @@ def auth_dummy_username_field_enabled() -> bool:
         os.environ.get("NOMAD_AUTH_DUMMY_USERNAME_FIELD", "").strip().lower()
         in TRUE_ENV_VALUES
     )
+
+
+def auth_session_days() -> int:
+    """Return a bounded, browser-persistent authentication lifetime."""
+    raw = os.environ.get("NOMAD_AUTH_SESSION_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else DEFAULT_AUTH_SESSION_DAYS
+    except ValueError:
+        return DEFAULT_AUTH_SESSION_DAYS
+    return min(max(days, 1), MAX_AUTH_SESSION_DAYS)

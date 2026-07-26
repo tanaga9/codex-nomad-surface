@@ -78,3 +78,22 @@ def test_login_post_ignores_dummy_username(monkeypatch: pytest.MonkeyPatch) -> N
     assert start["status"] == 303
     assert headers[b"location"] == b"/"
     assert b"set-cookie" in headers
+
+
+def test_auth_cookie_is_secure_behind_an_https_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NOMAD_AUTH_SECRET", "expected-secret")
+    monkeypatch.delenv("NOMAD_AUTH_SESSION_DAYS", raising=False)
+    middleware = FileContentMiddleware(app=None)
+
+    cookie = middleware._auth_cookie_header(
+        {
+            "scheme": "http",
+            "headers": [(b"x-forwarded-proto", b"https")],
+        }
+    )
+
+    assert b"Max-Age=15552000" in cookie
+    assert b"Expires=" in cookie
+    assert b"; Secure" in cookie

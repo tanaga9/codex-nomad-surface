@@ -7,6 +7,8 @@ import mimetypes
 import re
 import secrets
 import time
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -17,13 +19,13 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from codex_nomad_surface.settings import (
     AppSettings,
     auth_dummy_username_field_enabled,
+    auth_session_days,
     configured_secret,
     load_settings,
 )
 
 
 AUTH_COOKIE_NAME = "codex_nomad_auth"
-AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 14
 AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
 AUTH_RATE_LIMIT_MAX_FAILURES = 5
 AUTH_RATE_LIMIT_LOCK_SECONDS = 60
@@ -38,6 +40,10 @@ STREAMLIT_RESERVED_PATH_PREFIXES = (
 
 def auth_required() -> bool:
     return configured_secret() != ""
+
+
+def auth_cookie_max_age_seconds() -> int:
+    return 60 * 60 * 24 * auth_session_days()
 
 
 def app_server_url_allows_file_content_route(app_server_url: str) -> bool:
@@ -108,7 +114,7 @@ def valid_auth_session_token(token: str | None) -> bool:
     try:
         payload = auth_serializer().loads(
             token,
-            max_age=AUTH_COOKIE_MAX_AGE_SECONDS,
+            max_age=auth_cookie_max_age_seconds(),
         )
     except (BadSignature, SignatureExpired):
         return False
@@ -174,6 +180,16 @@ def rate_limit_key_from_scope(scope: dict[str, Any]) -> str:
     if isinstance(client, tuple) and client:
         return str(client[0] or "unknown")
     return "unknown"
+
+
+def request_uses_https(scope: dict[str, Any]) -> bool:
+    if scope.get("scheme") == "https":
+        return True
+    headers = dict(scope.get("headers") or [])
+    forwarded_proto = headers.get(b"x-forwarded-proto", b"").decode(
+        "latin-1"
+    )
+    return forwarded_proto.split(",", 1)[0].strip().lower() == "https"
 
 
 async def request_body(receive: Any, max_bytes: int = 4096) -> bytes:
@@ -441,10 +457,14 @@ class FileContentMiddleware:
         await self._send_response(send, body, "text/html; charset=utf-8")
 
     def _auth_cookie_header(self, scope: dict[str, Any]) -> bytes:
-        secure = "; Secure" if scope.get("scheme") == "https" else ""
+        max_age = auth_cookie_max_age_seconds()
+        expires = format_datetime(
+            datetime.now(UTC) + timedelta(seconds=max_age), usegmt=True
+        )
+        secure = "; Secure" if request_uses_https(scope) else ""
         return (
             f"{AUTH_COOKIE_NAME}={create_auth_session_token()}; "
-            f"Max-Age={AUTH_COOKIE_MAX_AGE_SECONDS}; Path=/; "
+            f"Max-Age={max_age}; Expires={expires}; Path=/; "
             f"SameSite=Lax; HttpOnly{secure}"
         ).encode("latin-1")
 

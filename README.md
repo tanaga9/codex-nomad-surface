@@ -102,16 +102,19 @@ codex app-server --listen ws://127.0.0.1:8080
 
 Set `NOMAD_AUTH_SECRET` to a real local secret before exposing the app on a network. If it is omitted, the app uses the development default `dev-secret`.
 
-Set `NOMAD_AUTH_DUMMY_USERNAME_FIELD=1` to show a dummy username field on the
-login page for browsers or password managers that only autofill username /
-password pairs. The username value is ignored by authentication.
+Set `NOMAD_AUTH_DUMMY_USERNAME_FIELD=1` to show a fixed, dummy username
+(`codex`) field on the login page for browsers or password managers that only
+autofill username / password pairs. The username value is ignored by
+authentication.
 
 Open the Streamlit URL in a browser. After authentication, confirm the Codex App Server URL in Settings. The default App Server URL is `ws://127.0.0.1:8080`.
 
-Authentication uses a signed browser cookie that persists for 14 days, so
-closing the browser does not immediately end the authenticated session. Failed
-password attempts are rate-limited in memory: five failures from the same client
-within one minute temporarily block login for one minute.
+Authentication uses a signed browser cookie that persists for 180 days by
+default, including across app-process restarts, provided `NOMAD_AUTH_SECRET`
+remains the same. Set `NOMAD_AUTH_SESSION_DAYS` to a value from 1 to 365 to
+shorten that period. Failed password attempts are rate-limited in memory: five
+failures from the same client within one minute temporarily block login for one
+minute.
 
 ## Layout
 

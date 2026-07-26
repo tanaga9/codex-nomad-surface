@@ -6,6 +6,7 @@ from codex_nomad_surface import settings
 from codex_nomad_surface.settings import (
     AppSettings,
     auth_dummy_username_field_enabled,
+    auth_session_days,
     load_settings,
     save_settings,
 )
@@ -45,3 +46,17 @@ def test_auth_dummy_username_field_env_flag(
 
     monkeypatch.setenv("NOMAD_AUTH_DUMMY_USERNAME_FIELD", "0")
     assert not auth_dummy_username_field_enabled()
+
+
+def test_auth_session_days_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NOMAD_AUTH_SESSION_DAYS", raising=False)
+    assert auth_session_days() == 180
+
+    monkeypatch.setenv("NOMAD_AUTH_SESSION_DAYS", "0")
+    assert auth_session_days() == 1
+
+    monkeypatch.setenv("NOMAD_AUTH_SESSION_DAYS", "999")
+    assert auth_session_days() == 365
+
+    monkeypatch.setenv("NOMAD_AUTH_SESSION_DAYS", "not-a-number")
+    assert auth_session_days() == 180
