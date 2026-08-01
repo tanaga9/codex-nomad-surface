@@ -462,8 +462,7 @@ def connection_card(
 @st.fragment(run_every=DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS)
 def disconnected_connection_status(app_server_url: str) -> None:
     client = CodexClient(app_server_url)
-    with st.skeleton():
-        status = client.status()
+    status = client.status()
     connection_card(client, status)
     if status.ok:
         st.rerun()
