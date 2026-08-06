@@ -1598,6 +1598,9 @@ def render_chat(
                         "Live progress updates are not attached after browser reload. "
                         "Refresh this thread after the turn finishes to load the final response."
                     )
+                    render_pending_action_recovery_button(
+                        chat, message_key=f"{chat.id}-{index}"
+                    )
             if content:
                 if message.role == "user":
                     render_user_turn_message(
@@ -1621,6 +1624,24 @@ def render_chat(
                 )
             for error in embedded_form_errors:
                 st.warning(f"Prompt Form parse error: {error}", icon="⚠️")
+
+
+def render_pending_action_recovery_button(chat: ChatSession, message_key: str) -> None:
+    """Offer a no-message rerun when a live turn may have reached a response request."""
+    pending = st.session_state.get("pending_turn")
+    if not isinstance(pending, dict) or pending.get("chat_id") != chat.id:
+        return
+    if st.button(
+        "Show pending action",
+        key=(
+            f"recover-pending-action-"
+            f"{pending.get('run_id') or chat.id}-{message_key}"
+        ),
+        help="Check the current turn for an approval or other response request.",
+    ):
+        drain_pending_turn_events(pending)
+        st.session_state.chat_history_autoscroll = True
+        st.rerun()
 
 
 def normalize_embedded_form_option(option: object) -> dict:
