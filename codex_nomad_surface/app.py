@@ -179,6 +179,7 @@ def init_state() -> None:
     st.session_state.setdefault("pending_interrupt_draft", None)
     st.session_state.setdefault("pending_chat_input_restore", None)
     st.session_state.setdefault("turn_worker_registry", {})
+    st.session_state.setdefault("pending_action_recovery_results", {})
     st.session_state.setdefault("ui_test_chat", None)
     st.session_state.setdefault("ui_test_pending", None)
     st.session_state.setdefault("new_project_path", "")
@@ -1233,6 +1234,26 @@ def codex_output_is_progress_only(parts: dict[str, Any]) -> bool:
     )
 
 
+def latest_progress_only_message_index(
+    message_items: list[tuple[int, ChatMessage]],
+) -> int | None:
+    latest_index = None
+    for index, message in message_items:
+        if message.role != "assistant":
+            continue
+        output_parts = normalize_codex_output_parts(
+            message.metadata.get("codex_output"), message.content
+        )
+        if str(output_parts.get("output") or "").strip():
+            latest_index = None
+        elif (
+            codex_output_has_auxiliary(output_parts)
+            and codex_output_is_progress_only(output_parts)
+        ):
+            latest_index = index
+    return latest_index
+
+
 def render_chat_user_markdown(text: object) -> None:
     st.markdown(markdown_with_soft_line_breaks(text))
 
@@ -1522,6 +1543,7 @@ def render_chat(
         ):
             continue
         message_items.append((index, message))
+    latest_progress_only_index = latest_progress_only_message_index(message_items)
     for index, message in message_items:
         if message.role == "promptform_picker":
             picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
@@ -1595,12 +1617,17 @@ def render_chat(
                 )
                 if progress_only:
                     st.info(
-                        "Live progress updates are not attached after browser reload. "
-                        "Refresh this thread after the turn finishes to load the final response."
+                        "Live progress updates stopped when the browser reloaded. "
+                        "Check this turn for a pending action, or refresh it after "
+                        "the turn finishes."
                     )
-                    render_pending_action_recovery_button(
-                        chat, message_key=f"{chat.id}-{index}"
-                    )
+                    if index == latest_progress_only_index:
+                        render_pending_action_recovery_button(
+                            client,
+                            project,
+                            chat,
+                            message_key=f"{chat.id}-{index}",
+                        )
             if content:
                 if message.role == "user":
                     render_user_turn_message(
@@ -1626,22 +1653,123 @@ def render_chat(
                 st.warning(f"Prompt Form parse error: {error}", icon="⚠️")
 
 
-def render_pending_action_recovery_button(chat: ChatSession, message_key: str) -> None:
-    """Offer a no-message rerun when a live turn may have reached a response request."""
+def render_pending_action_recovery_button(
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession,
+    message_key: str,
+) -> None:
+    """Rejoin an existing App Server turn without sending a user message."""
     pending = st.session_state.get("pending_turn")
-    if not isinstance(pending, dict) or pending.get("chat_id") != chat.id:
-        return
-    if st.button(
-        "Show pending action",
-        key=(
-            f"recover-pending-action-"
-            f"{pending.get('run_id') or chat.id}-{message_key}"
-        ),
-        help="Check the current turn for an approval or other response request.",
-    ):
+    if isinstance(pending, dict) and pending.get("chat_id") == chat.id:
+        if not pending.get("recovery_only"):
+            return
         drain_pending_turn_events(pending)
+        result = pending.pop("result", None)
+        if result:
+            handle_pending_action_recovery_result(client, chat, pending, result)
+            return
+        if pending.get("approval"):
+            render_inline_approval(client, chat, pending)
+            return
+        if pending.get("output_parts"):
+            render_codex_stream_output(pending["output_parts"])
+        st.caption("Checking this turn for a pending action...")
+        if st.button(
+            "Stop checking",
+            key=f"stop-pending-action-recovery-{pending.get('run_id') or chat.id}",
+            help="Close this recovery connection without cancelling the server turn.",
+        ):
+            runtime = pending.get("runtime")
+            if isinstance(runtime, dict):
+                client.close_chat_turn(runtime)
+            cleanup_pending_turn_worker(pending)
+            st.session_state.pending_action_recovery_results[chat.id] = {
+                "ok": True,
+                "output": "Stopped checking this turn.",
+            }
+            st.session_state.pending_turn = None
+            st.session_state.approval_action_in_progress = ""
+            st.session_state.approval_action_queued = None
+            st.session_state.chat_history_autoscroll = True
+            st.rerun()
+        return
+    if pending or not project or not chat.thread_id:
+        return
+
+    recovery_results = st.session_state.setdefault(
+        "pending_action_recovery_results", {}
+    )
+    previous_result = recovery_results.get(chat.id)
+    if isinstance(previous_result, dict):
+        message = str(previous_result.get("output") or "").strip()
+        if previous_result.get("ok"):
+            st.caption(message or "No pending action was found.")
+        else:
+            st.error(message or "Could not check this turn for a pending action.")
+    if st.button(
+        "Check for a pending action",
+        key=f"recover-pending-action-{chat.id}-{message_key}",
+        help="Reconnect to this turn without sending a message.",
+    ):
+        recovery_results.pop(chat.id, None)
+        pending = {
+            "run_id": str(uuid.uuid4()),
+            "chat_id": chat.id,
+            "thread_id": chat.thread_id,
+            "status": TURN_RUN_STARTING,
+            "recovery_only": True,
+        }
+        st.session_state.pending_turn = pending
+        start_pending_action_recovery_worker(client, project, chat, pending)
         st.session_state.chat_history_autoscroll = True
         st.rerun()
+
+
+def handle_pending_action_recovery_result(
+    client: CodexClient,
+    chat: ChatSession,
+    pending: dict,
+    result: dict,
+) -> None:
+    cleanup_pending_turn_worker(pending)
+    if result.get("status") == "approval" and result.get("approval"):
+        pending["status"] = TURN_RUN_AWAITING_APPROVAL
+        pending["runtime"] = result["runtime"]
+        pending["approval"] = result["approval"]
+        update_pending_output(pending, result.get("output_parts"))
+        st.session_state.approval_action_in_progress = ""
+        st.session_state.approval_action_queued = None
+        st.rerun()
+
+    if result.get("ok") and result.get("status") != "no_pending_action":
+        history = client.read_thread_messages(
+            chat.thread_id, limit=CHAT_HISTORY_RECENT_MESSAGE_LIMIT
+        )
+        loaded = thread_messages_from_result(history)
+        if loaded:
+            update_thread_history_state(chat.thread_id, history)
+            chat.messages = merge_thread_history_messages(chat.messages, loaded)
+            chat.touch()
+
+    if result.get("status") == "no_pending_action":
+        result_message = "No active turn is waiting for a response."
+    elif result.get("ok"):
+        result_message = "The turn has finished."
+    else:
+        result_message = (
+            str(result.get("output") or "").strip()
+            or "Could not check this turn for a pending action."
+        )
+    st.session_state.pending_action_recovery_results[chat.id] = {
+        "ok": bool(result.get("ok")),
+        "output": result_message,
+    }
+    st.session_state.pending_turn = None
+    st.session_state.approval_action_in_progress = ""
+    st.session_state.approval_action_queued = None
+    st.session_state.chat_history_autoscroll = True
+    st.rerun()
 
 
 def normalize_embedded_form_option(option: object) -> dict:
@@ -1804,6 +1932,8 @@ def render_pending_turn(
     pending = st.session_state.get("pending_turn")
     if not pending or pending.get("chat_id") != chat.id:
         return
+    if pending.get("recovery_only"):
+        return
     drain_pending_turn_events(pending)
 
     with st.chat_message("user"):
@@ -1956,6 +2086,47 @@ def start_turn_run_worker(
         daemon=True,
     )
     registry[worker_id] = worker
+    worker.start()
+
+
+def start_pending_action_recovery_worker(
+    client: CodexClient, project: Project, chat: ChatSession, pending: dict
+) -> None:
+    event_queue: queue.Queue = queue.Queue()
+    cancel_event = threading.Event()
+    worker_id = str(uuid.uuid4())
+    pending["worker_id"] = worker_id
+    pending["worker_queue"] = event_queue
+    pending["worker_cancel_event"] = cancel_event
+    pending["worker_started_at"] = time.time()
+    pending["status"] = TURN_RUN_STARTING
+
+    def output_callback(output_parts: dict[str, Any]) -> None:
+        event_queue.put({"type": "output", "output_parts": output_parts})
+
+    def runtime_callback(runtime: dict[str, Any]) -> None:
+        if cancel_event.is_set():
+            runtime["cancel_requested"] = True
+        event_queue.put({"type": "runtime", "runtime": runtime})
+
+    def recover_turn() -> None:
+        try:
+            result = client.recover_chat_turn(
+                project.path,
+                str(chat.thread_id or ""),
+                output_callback=output_callback,
+                runtime_callback=runtime_callback,
+            )
+        except Exception as exc:
+            result = {"ok": False, "output": f"[recovery error] {exc}"}
+        event_queue.put({"type": "result", "result": result})
+
+    worker = threading.Thread(
+        target=recover_turn,
+        name=f"codex-recovery-{chat.id}-{worker_id[:8]}",
+        daemon=True,
+    )
+    st.session_state.setdefault("turn_worker_registry", {})[worker_id] = worker
     worker.start()
 
 
@@ -4059,7 +4230,11 @@ def chat_composer(
     project: Project | None,
     chat: ChatSession | None,
 ) -> None:
-    prompt_disabled = not project
+    pending = st.session_state.get("pending_turn")
+    recovery_in_progress = bool(
+        isinstance(pending, dict) and pending.get("recovery_only")
+    )
+    prompt_disabled = not project or recovery_in_progress
     prompt_value = st.chat_input(
         "Message Codex",
         key="chat_prompt_input",
@@ -4079,6 +4254,13 @@ def chat_composer(
 
     if not project:
         st.caption("Select a project and enter a message before sending.")
+    elif recovery_in_progress:
+        if pending.get("approval"):
+            st.caption("Respond to the pending action before sending a message.")
+        else:
+            st.caption(
+                "Wait for the check to finish or stop checking before sending a message."
+            )
     restore_pending_text_to_chat_input(chat)
 
 

@@ -362,6 +362,44 @@ class CodexClient:
         finally:
             asyncio.set_event_loop(None)
 
+    def recover_chat_turn(
+        self,
+        project_path: str,
+        thread_id: str,
+        output_callback: OutputCallback | None = None,
+        runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Rejoin an existing turn without starting a new one."""
+        if (
+            not project_path
+            or not thread_id
+            or not self.base_url.startswith(("ws://", "wss://"))
+        ):
+            return {
+                "ok": False,
+                "output": "An App Server thread is required for recovery.",
+            }
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                self._recover_chat_turn_ws(
+                    project_path,
+                    thread_id,
+                    output_callback,
+                    runtime_callback,
+                )
+            )
+            runtime = result.get("runtime")
+            if runtime:
+                runtime["loop"] = loop
+            else:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+            return result
+        finally:
+            asyncio.set_event_loop(None)
+
     def steer_chat_turn(
         self,
         runtime: dict[str, Any],
@@ -1165,6 +1203,124 @@ class CodexClient:
                 or text_output,
                 "output_parts": self._output_parts_snapshot(output_parts),
                 "approvals": approvals,
+            }
+
+    async def _recover_chat_turn_ws(
+        self,
+        project_path: str,
+        thread_id: str,
+        output_callback: OutputCallback | None = None,
+        runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            import websockets
+        except ModuleNotFoundError:
+            return {"ok": False, "output": "`websockets` is not installed."}
+
+        output_parts = self._empty_output_parts()
+        approvals: list[dict[str, Any]] = []
+        runtime: dict[str, Any] = {
+            "output_parts": output_parts,
+            "stream_items": {},
+            "approvals": approvals,
+            "thread_id": thread_id,
+            "output_callback": output_callback,
+            "control_request_ids": set(),
+        }
+        runtime["loop"] = asyncio.get_running_loop()
+        try:
+            websocket = await self._connect_ws(websockets)
+            runtime["websocket"] = websocket
+            if runtime_callback:
+                runtime_callback(runtime)
+            if runtime.get("cancel_requested"):
+                await self._close_chat_turn_ws(runtime)
+                return {
+                    "ok": True,
+                    "status": "recovery_cancelled",
+                    "thread_id": thread_id,
+                    "output": "Stopped checking this turn.",
+                }
+
+            async def handle_approval_message(message: dict[str, Any]) -> None:
+                runtime["approval"] = self._approval_from_message(message)
+                approvals.append(runtime["approval"])
+                raise ApprovalRequired
+
+            try:
+                await self._initialize_ws(
+                    websocket,
+                    output_parts,
+                    approvals,
+                    output_callback,
+                    handle_approval_message,
+                    stream_items=runtime["stream_items"],
+                )
+                thread_result = await self._rpc_call(
+                    websocket,
+                    "thread/resume",
+                    {
+                        "threadId": thread_id,
+                        "cwd": project_path,
+                        "persistExtendedHistory": True,
+                    },
+                    output_parts,
+                    approvals,
+                    output_callback,
+                    handle_approval_message,
+                    runtime["stream_items"],
+                )
+                thread = (
+                    thread_result.get("thread")
+                    if isinstance(thread_result, dict)
+                    else None
+                )
+                status = thread.get("status") if isinstance(thread, dict) else None
+                status_type = (
+                    str(status.get("type") or "")
+                    if isinstance(status, dict)
+                    else str(status or "")
+                )
+                if status_type in {"idle", "notLoaded"}:
+                    await self._close_chat_turn_ws(runtime)
+                    return {
+                        "ok": True,
+                        "status": "no_pending_action",
+                        "thread_id": thread_id,
+                        "output": "No active turn is waiting for a response.",
+                    }
+                if status_type != "active":
+                    await self._close_chat_turn_ws(runtime)
+                    return {
+                        "ok": False,
+                        "thread_id": thread_id,
+                        "output": "The thread could not be resumed in an active state.",
+                    }
+                if runtime.get("cancel_requested"):
+                    await self._close_chat_turn_ws(runtime)
+                    return {
+                        "ok": True,
+                        "status": "recovery_cancelled",
+                        "thread_id": thread_id,
+                        "output": "Stopped checking this turn.",
+                    }
+                return await self._collect_chat_turn_ws(runtime)
+            except ApprovalRequired:
+                if runtime.get("cancel_requested"):
+                    await self._close_chat_turn_ws(runtime)
+                    return {
+                        "ok": True,
+                        "status": "recovery_cancelled",
+                        "thread_id": thread_id,
+                        "output": "Stopped checking this turn.",
+                    }
+                return self._approval_result(runtime)
+        except Exception as exc:
+            await self._close_chat_turn_ws(runtime)
+            return {
+                "ok": False,
+                "thread_id": thread_id,
+                "output": f"[recovery error] {exc}",
             }
 
     async def _respond_chat_turn_ws(

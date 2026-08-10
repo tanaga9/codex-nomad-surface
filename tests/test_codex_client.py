@@ -1123,6 +1123,129 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(result["output_parts"]["errors"], "turn is no longer active")
         self.assertTrue(websocket.closed)
 
+    def test_recover_chat_turn_rejoins_without_starting_a_turn(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        websocket = FakeWebSocket()
+        rpc_methods: list[str] = []
+
+        async def connect(_websockets):
+            return websocket
+
+        async def initialize(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def rpc_call(
+            _websocket,
+            method,
+            _params,
+            _output,
+            _approvals,
+            _output_callback=None,
+            approval_handler=None,
+            _stream_items=None,
+        ):
+            rpc_methods.append(method)
+            await approval_handler(
+                {
+                    "id": "approval-1",
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "command": ["git", "status"],
+                    },
+                }
+            )
+            raise AssertionError("approval handler should stop thread/resume")
+
+        self.client._connect_ws = connect
+        self.client._initialize_ws = initialize
+        self.client._rpc_call = rpc_call
+
+        result = asyncio.run(
+            self.client._recover_chat_turn_ws("/path/to/project", "thread-1")
+        )
+
+        self.assertEqual(result["status"], "approval")
+        self.assertEqual(result["approval"]["id"], "approval-1")
+        self.assertEqual(rpc_methods, ["thread/resume"])
+        self.assertFalse(websocket.closed)
+
+    def test_recover_chat_turn_stops_immediately_when_thread_is_idle(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        websocket = FakeWebSocket()
+        rpc_methods: list[str] = []
+
+        async def connect(_websockets):
+            return websocket
+
+        async def initialize(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def rpc_call(_websocket, method, *_args, **_kwargs):
+            rpc_methods.append(method)
+            return {
+                "thread": {
+                    "id": "thread-1",
+                    "status": {"type": "idle"},
+                }
+            }
+
+        self.client._connect_ws = connect
+        self.client._initialize_ws = initialize
+        self.client._rpc_call = rpc_call
+
+        result = asyncio.run(
+            self.client._recover_chat_turn_ws("/path/to/project", "thread-1")
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "no_pending_action")
+        self.assertEqual(rpc_methods, ["thread/resume"])
+        self.assertTrue(websocket.closed)
+
+    def test_recover_chat_turn_can_stop_before_resuming_thread(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        websocket = FakeWebSocket()
+
+        async def connect(_websockets):
+            return websocket
+
+        def request_stop(runtime):
+            runtime["cancel_requested"] = True
+
+        self.client._connect_ws = connect
+
+        result = asyncio.run(
+            self.client._recover_chat_turn_ws(
+                "/path/to/project",
+                "thread-1",
+                runtime_callback=request_stop,
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "recovery_cancelled")
+        self.assertTrue(websocket.closed)
+
 
 if __name__ == "__main__":
     unittest.main()
