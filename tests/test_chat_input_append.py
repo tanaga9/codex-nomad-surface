@@ -31,6 +31,9 @@ def test_chat_input_outbox_saves_before_submit_and_clears_after_delivery() -> No
     assert "RECOVERY_DELAY_MS = 5000" in script
     assert "opaqueAppBackground" in script
     assert "Unconfirmed message" in script
-    assert "Minimize recovery dialog" in script
+    assert "Dismiss unconfirmed message" in script
+    assert "dismissedScopes.add(scope)" in script
+    assert "if (dismissedScopes.has(scope)) return" in script
+    assert "minimizedScopes" not in script
     assert "Restore to input" in script
     assert 'storageKey("draft")' not in script

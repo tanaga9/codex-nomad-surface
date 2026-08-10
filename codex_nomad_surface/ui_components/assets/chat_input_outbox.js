@@ -6,7 +6,7 @@
   const RECOVERY_DELAY_MS = 5000;
   let scope = "";
   let recoveryTimer = null;
-  const minimizedScopes = new Set();
+  const dismissedScopes = new Set();
   const storageKey = (kind) => `${KEY_PREFIX}${kind}.${encodeURIComponent(scope || "default")}`;
   const chatInput = () => document.querySelector('[data-testid="stChatInputTextArea"]');
   const readPending = () => {
@@ -20,7 +20,7 @@
   };
   const writePending = (text) => {
     if (!text) return;
-    minimizedScopes.delete(scope);
+    dismissedScopes.delete(scope);
     try {
       sessionStorage.setItem(storageKey("pending"), JSON.stringify({ text, createdAt: Date.now() }));
     } catch (_) {}
@@ -35,6 +35,7 @@
       return;
     }
     try { sessionStorage.removeItem(storageKey("pending")); } catch (_) {}
+    dismissedScopes.delete(scope);
     scope = previousScope;
     refreshRecovery();
   };
@@ -121,21 +122,8 @@
       recoveryTimer = setTimeout(refreshRecovery, remainingDelay);
       return;
     }
+    if (dismissedScopes.has(scope)) return;
     root.style.display = "block";
-    if (minimizedScopes.has(scope)) {
-      const reopen = document.createElement("button");
-      reopen.type = "button";
-      reopen.textContent = "Unconfirmed message";
-      reopen.style.cssText = "background:transparent;color:inherit;border:0;font:inherit;padding:0;cursor:pointer";
-      reopen.onclick = () => {
-        minimizedScopes.delete(scope);
-        refreshRecovery();
-      };
-      root.style.width = "auto";
-      root.style.padding = ".55rem .8rem";
-      root.append(reopen);
-      return;
-    }
     root.style.width = "min(30rem,calc(100vw - 1.6rem))";
     root.style.padding = "1rem 1.15rem";
     const header = document.createElement("div");
@@ -146,11 +134,11 @@
     const closeButton = document.createElement("button");
     closeButton.type = "button";
     closeButton.textContent = "×";
-    closeButton.setAttribute("aria-label", "Minimize recovery dialog");
-    closeButton.title = "Minimize";
+    closeButton.setAttribute("aria-label", "Dismiss unconfirmed message");
+    closeButton.title = "Dismiss";
     closeButton.style.cssText = "background:transparent;color:inherit;border:0;font:inherit;font-size:1.35rem;line-height:1;padding:0;cursor:pointer";
     closeButton.onclick = () => {
-      minimizedScopes.add(scope);
+      dismissedScopes.add(scope);
       refreshRecovery();
     };
     header.append(label, closeButton);
