@@ -1,5 +1,9 @@
 from codex_nomad_surface.app import append_once_chat_input_html
-from codex_nomad_surface.ui_components import load_asset_text
+from codex_nomad_surface import ui_components
+from codex_nomad_surface.ui_components import (
+    inject_responsive_input_style,
+    load_asset_text,
+)
 
 
 def test_append_once_chat_input_html_tracks_sanitized_token() -> None:
@@ -37,3 +41,20 @@ def test_chat_input_outbox_saves_before_submit_and_clears_after_delivery() -> No
     assert "minimizedScopes" not in script
     assert "Restore to input" in script
     assert 'storageKey("draft")' not in script
+
+
+def test_responsive_inputs_use_ios_safe_font_size_on_narrow_screens(
+    monkeypatch,
+) -> None:
+    rendered: list[str] = []
+    monkeypatch.setattr(ui_components.st, "html", rendered.append)
+
+    inject_responsive_input_style()
+
+    assert len(rendered) == 1
+    assert "@media (max-width: 640px)" in rendered[0]
+    assert ".stApp input" in rendered[0]
+    assert ".stApp textarea" in rendered[0]
+    assert ".stApp select" in rendered[0]
+    assert '.stApp [role="combobox"]' in rendered[0]
+    assert "font-size: 16px !important" in rendered[0]

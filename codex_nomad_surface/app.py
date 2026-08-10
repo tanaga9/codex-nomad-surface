@@ -76,10 +76,10 @@ from codex_nomad_surface.turn_run import (
 )
 from codex_nomad_surface.ui_components import (
     clear_chat_input_outbox,
-    inject_compact_chat_input_style,
     inject_chat_input_bridge,
     inject_chat_input_ime_guard,
     inject_chat_input_outbox,
+    inject_responsive_input_style,
     render_copy_text_button,
     render_promptform,
 )
@@ -4283,7 +4283,6 @@ def chat_workspace(
     active_chat = chat or (draft_chat(project) if project else None)
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
-    inject_compact_chat_input_style()
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     inject_chat_input_outbox(active_chat.id if active_chat else "")
@@ -4828,6 +4827,7 @@ def main_screen() -> None:
 
 def main() -> None:
     init_state()
+    inject_responsive_input_style()
     render_surface_logo()
     if not auth_required():
         st.session_state.authenticated = True

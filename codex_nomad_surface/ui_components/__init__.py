@@ -231,7 +231,7 @@ def clear_chat_input_outbox(text: object, scope: object) -> None:
     )
 
 
-def inject_compact_chat_input_style() -> None:
+def inject_responsive_input_style() -> None:
     st.html(
         """
         <style>
@@ -243,6 +243,16 @@ def inject_compact_chat_input_style() -> None:
         [data-testid="stChatInput"] {
           padding-top: 0.4rem !important;
           padding-bottom: max(0.4rem, env(safe-area-inset-bottom)) !important;
+        }
+
+        @media (max-width: 640px) {
+          .stApp input,
+          .stApp textarea,
+          .stApp select,
+          .stApp [contenteditable="true"],
+          .stApp [role="combobox"] {
+            font-size: 16px !important;
+          }
         }
         </style>
         """
