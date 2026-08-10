@@ -1518,6 +1518,13 @@ def render_chat(
         return
 
     pending = st.session_state.get("pending_turn") if skip_latest_user else None
+    active_interrupt_draft = st.session_state.get("pending_interrupt_draft")
+    active_interrupt_draft_id = (
+        str(active_interrupt_draft.get("draft_id") or "")
+        if isinstance(active_interrupt_draft, dict)
+        and active_interrupt_draft.get("chat_id") == chat.id
+        else ""
+    )
     message_items = []
     for index, message in enumerate(chat.messages):
         metadata = message.metadata or {}
@@ -1637,13 +1644,22 @@ def render_chat(
                     st.markdown(content)
             if message.role == "user":
                 render_chat_attachment_summary(message.metadata)
-            if (
-                message.metadata.get("kind") == "interrupt_draft"
-                and message.metadata.get("status") != INTERRUPT_DRAFT_PENDING
-            ):
-                render_disabled_interrupt_draft_buttons(
-                    f"interrupt-draft-log-{chat.id}-{index}"
-                )
+            if message.metadata.get("kind") == "interrupt_draft":
+                draft_id = str(message.metadata.get("draft_id") or "")
+                if (
+                    message.metadata.get("status") == INTERRUPT_DRAFT_PENDING
+                    and draft_id == active_interrupt_draft_id
+                ):
+                    render_return_interrupt_draft_button(
+                        chat,
+                        draft_id,
+                        message.content.strip(),
+                        key=f"pending-draft-restore-{chat.id}-{draft_id}",
+                    )
+                elif message.metadata.get("status") != INTERRUPT_DRAFT_PENDING:
+                    render_disabled_interrupt_draft_buttons(
+                        f"interrupt-draft-log-{chat.id}-{index}"
+                    )
             for form_index, form_schema in enumerate(embedded_forms):
                 render_promptform(
                     form_schema,
@@ -2226,8 +2242,6 @@ def interrupt_draft_caption(message: ChatMessage) -> str:
     if status == INTERRUPT_DRAFT_STEERED:
         return "turn/steer sent"
     if status == INTERRUPT_DRAFT_RETURNED:
-        if message.metadata.get("return_reason") == "turn_completed":
-            return "Returned to input after the turn completed"
         return "Returned to input"
     if status == INTERRUPT_DRAFT_REPLACED:
         return "Replaced by a newer draft"
@@ -2252,6 +2266,46 @@ def render_disabled_interrupt_draft_buttons(key_prefix: str) -> None:
             disabled=True,
             width="stretch",
         )
+
+
+def return_interrupt_draft_to_input(
+    chat: ChatSession, draft_id: str, text: object
+) -> bool:
+    text = str(text or "").strip()
+    draft_message = find_interrupt_draft_message(chat, draft_id)
+    if not text or not draft_message:
+        return False
+    st.session_state.pending_chat_input_restore = {
+        "chat_id": chat.id,
+        "text": text,
+        "nonce": str(uuid.uuid4()),
+    }
+    cleanup_uploaded_chat_images(draft_message.metadata.get("local_images"))
+    draft_message.metadata.pop("local_images", None)
+    draft_message.metadata.pop("prompt_text", None)
+    update_interrupt_draft_message(
+        chat,
+        draft_id,
+        INTERRUPT_DRAFT_RETURNED,
+        return_reason="user_requested",
+    )
+    active_draft = st.session_state.get("pending_interrupt_draft")
+    if (
+        isinstance(active_draft, dict)
+        and active_draft.get("chat_id") == chat.id
+        and active_draft.get("draft_id") == draft_id
+    ):
+        st.session_state.pending_interrupt_draft = None
+    st.session_state.chat_history_autoscroll = True
+    return True
+
+
+def render_return_interrupt_draft_button(
+    chat: ChatSession, draft_id: str, text: object, *, key: str
+) -> None:
+    if st.button("Return to input", key=key, width="stretch"):
+        if return_interrupt_draft_to_input(chat, draft_id, text):
+            st.rerun()
 
 
 def render_pending_interrupt_draft_controls(
@@ -2302,30 +2356,12 @@ def render_pending_interrupt_draft_controls(
             else:
                 st.error(result.get("output") or "turn/steer failed.")
     with col_restore:
-        if st.button(
-            "Return to input",
+        render_return_interrupt_draft_button(
+            chat,
+            draft_id,
+            text,
             key=f"pending-draft-restore-{chat.id}-{draft_id}",
-            width="stretch",
-        ):
-            st.session_state.pending_chat_input_restore = {
-                "chat_id": chat.id,
-                "text": text,
-                "nonce": str(uuid.uuid4()),
-            }
-            draft_message = find_interrupt_draft_message(chat, draft_id)
-            if draft_message:
-                cleanup_uploaded_chat_images(draft_message.metadata.get("local_images"))
-                draft_message.metadata.pop("local_images", None)
-                draft_message.metadata.pop("prompt_text", None)
-            update_interrupt_draft_message(
-                chat,
-                draft_id,
-                INTERRUPT_DRAFT_RETURNED,
-                return_reason="user_requested",
-            )
-            st.session_state.pending_interrupt_draft = None
-            st.session_state.chat_history_autoscroll = True
-            st.rerun()
+        )
 
 
 def render_pending_interrupt_drafts(
@@ -2390,35 +2426,6 @@ def render_pending_interrupt_drafts(
             render_disabled_interrupt_draft_buttons(
                 f"pending-draft-log-{chat.id}-{index}"
             )
-
-
-def restore_interrupt_draft_to_input_if_pending(chat: ChatSession) -> None:
-    draft = st.session_state.get("pending_interrupt_draft")
-    if not isinstance(draft, dict) or draft.get("chat_id") != chat.id:
-        return
-    draft_id = str(draft.get("draft_id") or "")
-    draft_message = find_interrupt_draft_message(chat, draft_id)
-    text = str(
-        (draft_message.content if draft_message else draft.get("text")) or ""
-    ).strip()
-    st.session_state.pending_interrupt_draft = None
-    if not text:
-        return
-    st.session_state.pending_chat_input_restore = {
-        "chat_id": chat.id,
-        "text": text,
-        "nonce": str(uuid.uuid4()),
-    }
-    if draft_message:
-        cleanup_uploaded_chat_images(draft_message.metadata.get("local_images"))
-        draft_message.metadata.pop("local_images", None)
-        draft_message.metadata.pop("prompt_text", None)
-    update_interrupt_draft_message(
-        chat,
-        draft_id,
-        INTERRUPT_DRAFT_RETURNED,
-        return_reason="turn_completed",
-    )
 
 
 def cancel_interrupt_draft_if_pending(chat_id: str | None) -> None:
@@ -2883,8 +2890,6 @@ def handle_turn_result(
     if item_ids:
         metadata["server_item_ids"] = item_ids
     chat.add_message("assistant", response_text, metadata=metadata)
-    if pending_state_key == "pending_turn":
-        restore_interrupt_draft_to_input_if_pending(chat)
     cleanup_pending_uploaded_chat_images(pending)
     st.session_state[pending_state_key] = None
     st.session_state.approval_action_in_progress = ""
