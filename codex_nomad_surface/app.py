@@ -2003,32 +2003,38 @@ def render_pending_turn_wait_indicator(client: CodexClient, pending: dict) -> No
         and runtime.get("turn_id")
         and not pending.get("interrupt_requested")
     )
-    wait_panel = st.container(border=True)
-    with wait_panel:
-        message_col, copy_col, action_col = st.columns(
-            [1, 0.18, 0.28], vertical_alignment="center"
-        )
-        with message_col:
-            st.markdown(pending_turn_wait_message(pending))
-        with copy_col:
+    cancel_clicked = False
+    with st.container(
+        border=True,
+        horizontal=True,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
+        gap="xsmall",
+        key="pending-turn-wait",
+    ):
+        with st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            gap="xsmall",
+            width="content",
+        ):
+            st.caption(pending_turn_wait_message(pending))
             if not pending.get("delivery_confirmed"):
                 render_copy_text_button(
                     pending.get("text") or "",
                     f"copy-unsent-{pending.get('run_id') or pending.get('chat_id')}",
                 )
-        with action_col:
+        if can_interrupt:
             cancel_clicked = st.button(
-                "Cancel turn",
+                "Cancel",
                 key=f"cancel_turn_{pending.get('run_id') or pending.get('chat_id')}",
                 type="secondary",
-                disabled=not can_interrupt,
+                icon=":material/cancel:",
                 help="Request cancellation of the current response.",
-                width="stretch",
+                width="content",
             )
-        if pending.get("interrupt_requested"):
-            st.caption("Waiting for the turn to finish interrupting.")
-        if interrupt_error:
-            st.error(f"Cancellation request failed: {interrupt_error}")
+    if interrupt_error:
+        st.error(f"Cancellation request failed: {interrupt_error}")
     if cancel_clicked:
         result = client.interrupt_chat_turn(runtime)
         if result.get("ok"):
