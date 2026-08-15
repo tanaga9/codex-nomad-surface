@@ -4474,6 +4474,13 @@ def canvas_workspace(
                 f"{canvas_id[-8:]}"
             )
         with st.container(horizontal=True, width="content"):
+            st.button(
+                "Refresh exports",
+                key=f"refresh_canvas_exports_{canvas_id}",
+                help="Reload the latest saved Document and SVG files.",
+                icon=":material/refresh:",
+                width="content",
+            )
             if initial_document:
                 st.download_button(
                     "Document",
@@ -4493,20 +4500,14 @@ def canvas_workspace(
                     width="content",
                 )
 
-    canvas_result = nomad_canvas(
+    nomad_canvas(
         canvas_id,
         initial_document=initial_document,
         websocket_url=f"/api/canvas/{canvas_id}/ws",
         key=f"nomad_canvas_{canvas_id}",
         height=640,
     )
-    connection_state = str(getattr(canvas_result, "connection_state", "") or "")
-    shape_count = int(getattr(canvas_result, "shape_count", 0) or 0)
-    status_parts = [f"{shape_count} shapes"]
-    if connection_state:
-        status_parts.append(connection_state)
-    status_parts.append(references["document_path"])
-    st.caption(" · ".join(status_parts))
+    st.caption(f"Canvas file · {references['document_path']}")
 
     with st.expander(
         "Chat with Codex",

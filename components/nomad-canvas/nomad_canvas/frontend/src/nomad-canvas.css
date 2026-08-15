@@ -10,6 +10,29 @@
   min-height: 640px;
 }
 
+.nomad-canvas-root {
+  position: relative;
+}
+
+.nomad-canvas-connection {
+  position: absolute;
+  z-index: 1000;
+  top: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--st-border-color, #d1d5db);
+  border-radius: 999px;
+  background: var(--st-background-color, #fff);
+  color: var(--st-text-color, #1f2937);
+  font: 500 0.75rem/1.25 var(--st-font, sans-serif);
+  pointer-events: none;
+}
+
+.nomad-canvas-connection[data-state="connected"] {
+  opacity: 0.72;
+}
+
 .nomad-canvas-root > .tl-container {
   height: 100% !important;
   min-height: 640px;

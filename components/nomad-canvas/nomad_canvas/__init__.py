@@ -32,7 +32,8 @@ def nomad_canvas(
     Returns
     -------
     ComponentResult
-        Current checkpoint fields emitted by the component.
+        The mounted component result. Canvas persistence is handled directly
+        over the WebSocket and does not emit Streamlit state while editing.
 
     """
     return out(
@@ -42,18 +43,6 @@ def nomad_canvas(
             "initialDocument": initial_document,
             "websocketUrl": websocket_url,
         },
-        default={
-            "connection_state": "connecting",
-            "document": initial_document,
-            "preview_svg": "",
-            "saved_at": "",
-            "shape_count": 0,
-        },
-        on_connection_state_change=lambda: None,
-        on_document_change=lambda: None,
-        on_preview_svg_change=lambda: None,
-        on_saved_at_change=lambda: None,
-        on_shape_count_change=lambda: None,
         width="stretch",
         height=height,
     )

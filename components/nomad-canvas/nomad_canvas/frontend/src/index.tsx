@@ -20,7 +20,7 @@ const NomadCanvasRoot: FrontendRenderer<
   NomadCanvasStateShape,
   NomadCanvasDataShape
 > = (args) => {
-  const { data, parentElement, setStateValue } = args;
+  const { data, parentElement } = args;
 
   // Get the react-root div from the parentElement that we defined in our
   // `st.components.v2.component` call in Python.
@@ -51,7 +51,6 @@ const NomadCanvasRoot: FrontendRenderer<
         canvasId={canvasId}
         initialDocument={initialDocument}
         websocketUrl={websocketUrl}
-        setStateValue={setStateValue}
       />
     </StrictMode>,
   );

@@ -1,4 +1,3 @@
-import { FrontendRendererArgs } from "@streamlit/component-v2-lib";
 import {
   Editor,
   TLShapeId,
@@ -9,15 +8,16 @@ import {
   toRichText,
 } from "tldraw";
 import "tldraw/tldraw.css";
-import { FC, ReactElement, useCallback, useEffect, useRef, useState } from "react";
+import {
+  FC,
+  ReactElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
-export type NomadCanvasStateShape = {
-  connection_state: string;
-  document: TLStoreSnapshot | null;
-  preview_svg: string;
-  saved_at: string;
-  shape_count: number;
-};
+export type NomadCanvasStateShape = Record<string, never>;
 
 export type NomadCanvasDataShape = {
   canvasId: string;
@@ -25,11 +25,7 @@ export type NomadCanvasDataShape = {
   websocketUrl: string;
 };
 
-export type NomadCanvasProps = Pick<
-  FrontendRendererArgs<NomadCanvasStateShape, NomadCanvasDataShape>,
-  "setStateValue"
-> &
-  NomadCanvasDataShape;
+export type NomadCanvasProps = NomadCanvasDataShape;
 
 type CanvasRequest = {
   id: string;
@@ -38,6 +34,8 @@ type CanvasRequest = {
 };
 
 type PatchOperation = Record<string, unknown> & { op?: string };
+type ConnectionState =
+  "connecting" | "connected" | "reconnecting" | "disconnected";
 
 const bindingProps = (terminal: "start" | "end") => ({
   terminal,
@@ -68,9 +66,11 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   canvasId,
   initialDocument,
   websocketUrl,
-  setStateValue,
 }): ReactElement => {
   const [editor, setEditor] = useState<Editor | null>(null);
+  const [connectionState, setConnectionState] =
+    useState<ConnectionState>("connecting");
+  const initialDocumentRef = useRef(initialDocument);
   const websocketRef = useRef<WebSocket | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const applyingRemoteRef = useRef(false);
@@ -94,11 +94,6 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         shape_count: shapes.length,
       };
 
-      setStateValue("document", document);
-      setStateValue("preview_svg", previewSvg);
-      setStateValue("saved_at", savedAt);
-      setStateValue("shape_count", shapes.length);
-
       if (websocketRef.current?.readyState === WebSocket.OPEN) {
         websocketRef.current.send(
           JSON.stringify({ type: "snapshot", canvas_id: canvasId, ...payload }),
@@ -106,7 +101,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       }
       return payload;
     },
-    [canvasId, setStateValue],
+    [canvasId],
   );
 
   const scheduleSnapshot = useCallback(
@@ -127,7 +122,10 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
     const shapes = activeEditor.getCurrentPageShapes();
     const bindingById = new Map<string, unknown>();
     for (const shape of shapes) {
-      for (const binding of activeEditor.getBindingsFromShape(shape.id, "arrow")) {
+      for (const binding of activeEditor.getBindingsFromShape(
+        shape.id,
+        "arrow",
+      )) {
         bindingById.set(binding.id, binding);
       }
     }
@@ -209,10 +207,12 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
               const toId = resolveId(operation.to);
               const from = activeEditor.getShape(fromId);
               const to = activeEditor.getShape(toId);
-              if (!from || !to) throw new Error("Connector endpoint not found.");
+              if (!from || !to)
+                throw new Error("Connector endpoint not found.");
               const fromBounds = activeEditor.getShapePageBounds(fromId);
               const toBounds = activeEditor.getShapePageBounds(toId);
-              if (!fromBounds || !toBounds) throw new Error("Connector bounds not found.");
+              if (!fromBounds || !toBounds)
+                throw new Error("Connector bounds not found.");
               const arrowId = createShapeId(
                 `${safeRef(args.command_id)}-arrow-${changedIds.size}`,
               );
@@ -250,7 +250,8 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
 
             const id = resolveId(operation.id);
             const existing = activeEditor.getShape(id);
-            if (!existing) throw new Error(`Shape not found: ${String(operation.id)}`);
+            if (!existing)
+              throw new Error(`Shape not found: ${String(operation.id)}`);
             if (op === "move") {
               activeEditor.updateShape({
                 id,
@@ -277,8 +278,12 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
               activeEditor.updateShape({
                 id,
                 type: existing.type,
-                ...(operation.x !== undefined ? { x: Number(operation.x) } : {}),
-                ...(operation.y !== undefined ? { y: Number(operation.y) } : {}),
+                ...(operation.x !== undefined
+                  ? { x: Number(operation.x) }
+                  : {}),
+                ...(operation.y !== undefined
+                  ? { y: Number(operation.y) }
+                  : {}),
                 props,
               } as never);
             } else {
@@ -304,10 +309,9 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
 
   useEffect(() => {
     if (!editor) return;
-    const unsubscribe = editor.store.listen(
-      () => scheduleSnapshot(editor),
-      { scope: "document" },
-    );
+    const unsubscribe = editor.store.listen(() => scheduleSnapshot(editor), {
+      scope: "document",
+    });
     void publishSnapshot(editor);
     return () => {
       unsubscribe();
@@ -323,60 +327,107 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
     const resolvedWebsocketUrl = websocketUrl.startsWith("/")
       ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${websocketUrl}`
       : websocketUrl;
-    const websocket = new WebSocket(resolvedWebsocketUrl);
-    websocketRef.current = websocket;
-    setStateValue("connection_state", "connecting");
+    let disposed = false;
+    let retryTimer: number | null = null;
+    let websocket: WebSocket | null = null;
 
-    websocket.onopen = () => {
-      setStateValue("connection_state", "connected");
-      websocket.send(JSON.stringify({ type: "hello", canvas_id: canvasId }));
-    };
-    websocket.onclose = () => setStateValue("connection_state", "disconnected");
-    websocket.onerror = () => setStateValue("connection_state", "error");
-    websocket.onmessage = (event) => {
-      void (async () => {
-        let message: { type?: string; request?: CanvasRequest };
-        try {
-          message = JSON.parse(String(event.data));
-        } catch {
+    const connect = () => {
+      if (disposed) return;
+      setConnectionState(websocket ? "reconnecting" : "connecting");
+      const nextWebsocket = new WebSocket(resolvedWebsocketUrl);
+      websocket = nextWebsocket;
+      websocketRef.current = nextWebsocket;
+
+      nextWebsocket.onopen = () => {
+        if (disposed) return;
+        setConnectionState("connected");
+        nextWebsocket.send(
+          JSON.stringify({ type: "hello", canvas_id: canvasId }),
+        );
+        void publishSnapshot(editor);
+      };
+      nextWebsocket.onclose = (event) => {
+        if (disposed) return;
+        if (websocketRef.current === nextWebsocket) {
+          websocketRef.current = null;
+        }
+        if ([4001, 4401, 4404].includes(event.code)) {
+          setConnectionState("disconnected");
           return;
         }
-        const request = message.request;
-        if (message.type !== "request" || !request) return;
-        try {
-          const payload =
-            request.method === "read_scene"
-              ? {
-                  scene: readScene(editor),
-                  ...(await publishSnapshot(editor)),
-                }
-              : await applyPatch(editor, request.arguments || {});
-          websocket.send(
-            JSON.stringify({ type: "response", id: request.id, ok: true, payload }),
-          );
-        } catch (error) {
-          websocket.send(
-            JSON.stringify({
-              type: "response",
-              id: request.id,
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          );
-        }
-      })();
+        setConnectionState("reconnecting");
+        retryTimer = window.setTimeout(connect, 1500);
+      };
+      nextWebsocket.onerror = () => nextWebsocket.close();
+      nextWebsocket.onmessage = (event) => {
+        void (async () => {
+          let message: { type?: string; request?: CanvasRequest };
+          try {
+            message = JSON.parse(String(event.data));
+          } catch {
+            return;
+          }
+          const request = message.request;
+          if (message.type !== "request" || !request) return;
+          try {
+            const payload =
+              request.method === "read_scene"
+                ? {
+                    scene: readScene(editor),
+                    ...(await publishSnapshot(editor)),
+                  }
+                : await applyPatch(editor, request.arguments || {});
+            nextWebsocket.send(
+              JSON.stringify({
+                type: "response",
+                id: request.id,
+                ok: true,
+                payload,
+              }),
+            );
+          } catch (error) {
+            if (nextWebsocket.readyState === WebSocket.OPEN) {
+              nextWebsocket.send(
+                JSON.stringify({
+                  type: "response",
+                  id: request.id,
+                  ok: false,
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              );
+            }
+          }
+        })();
+      };
     };
 
+    connect();
+
     return () => {
-      websocket.close();
+      disposed = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      websocket?.close();
       websocketRef.current = null;
     };
-  }, [applyPatch, canvasId, editor, publishSnapshot, readScene, setStateValue, websocketUrl]);
+  }, [applyPatch, canvasId, editor, publishSnapshot, readScene, websocketUrl]);
 
   return (
     <div className="nomad-canvas-root">
+      <div
+        className="nomad-canvas-connection"
+        data-state={connectionState}
+        role="status"
+      >
+        {connectionState === "connected"
+          ? "Connected"
+          : connectionState === "connecting"
+            ? "Connecting…"
+            : connectionState === "reconnecting"
+              ? "Reconnecting…"
+              : "Disconnected"}
+      </div>
       <Tldraw
-        snapshot={initialDocument || undefined}
+        snapshot={initialDocumentRef.current || undefined}
         onMount={setEditor}
       />
     </div>

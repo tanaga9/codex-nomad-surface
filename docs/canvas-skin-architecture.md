@@ -151,7 +151,10 @@ SQLite service, or tldraw sync service.
 
 High-frequency editor changes must not use `setStateValue` or
 `setTriggerValue`, because each event may cause a Streamlit rerun. Those APIs
-remain appropriate for low-frequency component state and user actions.
+remain appropriate for low-frequency component state and user actions. The
+current Canvas component sends snapshots directly over its WebSocket and emits
+no Streamlit state while the user is editing. Connection status and retries
+remain local to the component so they do not rerun the Streamlit application.
 
 ### Canvas Runtime
 
