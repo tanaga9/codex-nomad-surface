@@ -1,0 +1,2 @@
+recursive-include nomad_canvas/frontend/build *
+include pyproject.toml

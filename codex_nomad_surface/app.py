@@ -22,7 +22,23 @@ from urllib.request import Request, urlopen
 
 import streamlit as st
 from starlette.middleware import Middleware
+from starlette.routing import WebSocketRoute
 from streamlit.starlette import App
+
+from codex_nomad_surface.canvas_runtime import (
+    canvas_dynamic_tool_handler,
+    canvas_dynamic_tools,
+    canvas_websocket,
+)
+from codex_nomad_surface.canvas_store import (
+    canvas_exists_for_thread,
+    canvas_file_references,
+    canvas_id_for_thread,
+    initialize_canvas,
+    list_canvas_manifests,
+    load_canvas_document,
+    load_canvas_preview,
+)
 
 from codex_nomad_surface.chat_store import (
     ChatMessage,
@@ -317,6 +333,13 @@ def available_project_paths(server_threads: list[CodexThread]) -> list[str]:
             continue
         paths.append(thread.cwd)
         seen.add(thread.cwd)
+
+    for manifest in list_canvas_manifests():
+        path = str(manifest.get("project_path") or "")
+        if not path or path in seen:
+            continue
+        paths.append(path)
+        seen.add(path)
 
     for path in st.session_state.get("manual_project_paths", []):
         if not path or path in seen:
@@ -833,9 +856,18 @@ def select_project_for_chat_id(server_threads: list[CodexThread], chat_id: str) 
         return
     thread_id = chat_id.removeprefix("thread:")
     thread = next((item for item in server_threads if item.id == thread_id), None)
-    if not thread:
-        return
-    project = next((item for item in projects if item.path == thread.cwd), None)
+    project_path = thread.cwd if thread else ""
+    if not project_path:
+        manifest = next(
+            (
+                item
+                for item in list_canvas_manifests()
+                if str(item.get("thread_id") or "") == thread_id
+            ),
+            None,
+        )
+        project_path = str((manifest or {}).get("project_path") or "")
+    project = next((item for item in projects if item.path == project_path), None)
     if project:
         set_selected_project_key(project_key(project))
         st.session_state[PENDING_PROJECT_SELECT_KEY] = project_key(project)
@@ -852,6 +884,33 @@ def server_thread_chat(project: Project, thread: CodexThread) -> ChatSession:
         thread_id=thread.id,
         created_at=created_at,
         updated_at=updated_at or created_at,
+        surface="canvas" if canvas_exists_for_thread(thread.id) else "chat",
+    )
+
+
+def canvas_manifest_chat(project: Project, manifest: dict[str, Any]) -> ChatSession:
+    thread_id = str(manifest.get("thread_id") or "")
+    raw_created_at = str(
+        manifest.get("created_at") or manifest.get("updated_at") or ""
+    )
+    raw_updated_at = str(manifest.get("updated_at") or raw_created_at)
+
+    def display_time(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return value
+
+    created_at = display_time(raw_created_at)
+    updated_at = display_time(raw_updated_at)
+    return ChatSession(
+        id=f"thread:{thread_id}",
+        project_path=project.path,
+        title="Canvas",
+        thread_id=thread_id,
+        created_at=created_at,
+        updated_at=updated_at,
+        surface="canvas",
     )
 
 
@@ -878,7 +937,20 @@ def recent_thread_chats(
         seen_thread_ids.add(thread.id)
         if len(recent) >= limit:
             break
-    return recent
+    for manifest in list_canvas_manifests():
+        thread_id = str(manifest.get("thread_id") or "")
+        if not thread_id or thread_id in seen_thread_ids:
+            continue
+        project = project_by_path.get(str(manifest.get("project_path") or ""))
+        if not project:
+            continue
+        recent.append((project, canvas_manifest_chat(project, manifest)))
+        seen_thread_ids.add(thread_id)
+    return sorted(
+        recent,
+        key=lambda item: item[1].updated_at or item[1].created_at,
+        reverse=True,
+    )[:limit]
 
 
 def project_chats(
@@ -898,7 +970,14 @@ def project_chats(
         and thread.id not in known_thread_ids
         and f"thread:{thread.id}" not in known_chat_ids
     ]
-    return local_chats + server_chats
+    known_thread_ids.update(chat.thread_id for chat in server_chats if chat.thread_id)
+    manifest_chats = [
+        canvas_manifest_chat(project, manifest)
+        for manifest in list_canvas_manifests()
+        if str(manifest.get("project_path") or "") == project.path
+        and str(manifest.get("thread_id") or "") not in known_thread_ids
+    ]
+    return local_chats + server_chats + manifest_chats
 
 
 def create_chat(project: Project) -> ChatSession:
@@ -2097,6 +2176,11 @@ def start_turn_run_worker(
                 approval_policy=pending.get("approval_policy"),
                 output_callback=output_callback,
                 runtime_callback=runtime_callback,
+                dynamic_tool_handler=(
+                    canvas_dynamic_tool_handler(str(chat.thread_id))
+                    if chat.surface == "canvas" and chat.thread_id
+                    else None
+                ),
             )
         except Exception as exc:
             result = {"ok": False, "output": f"[send/receive error] {exc}"}
@@ -2138,6 +2222,11 @@ def start_pending_action_recovery_worker(
                 str(chat.thread_id or ""),
                 output_callback=output_callback,
                 runtime_callback=runtime_callback,
+                dynamic_tool_handler=(
+                    canvas_dynamic_tool_handler(str(chat.thread_id))
+                    if chat.surface == "canvas" and chat.thread_id
+                    else None
+                ),
             )
         except Exception as exc:
             result = {"ok": False, "output": f"[recovery error] {exc}"}
@@ -4281,13 +4370,153 @@ def chat_workspace(
     chat: ChatSession | None,
 ) -> None:
     active_chat = chat or (draft_chat(project) if project else None)
+    if (
+        active_chat
+        and active_chat.thread_id
+        and (
+            active_chat.surface == "canvas"
+            or canvas_exists_for_thread(active_chat.thread_id)
+        )
+    ):
+        active_chat.surface = "canvas"
+        canvas_workspace(client, project, active_chat)
+        return
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     inject_chat_input_outbox(active_chat.id if active_chat else "")
+    render_canvas_start_action(client, project, active_chat)
     chat_history_panel(client, project, active_chat)
     chat_composer(client, project, active_chat)
+
+
+def render_canvas_start_action(
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession | None,
+) -> None:
+    if not project or not chat or chat.thread_id or chat.messages:
+        return
+    with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        with st.container():
+            st.markdown("**Canvas**")
+            st.caption("Start this task with a shared tldraw canvas.")
+        if st.button(
+            "Start canvas",
+            key=f"start_canvas_{chat.id}",
+            type="secondary",
+            icon=":material/draw:",
+            width="content",
+        ):
+            try:
+                with st.spinner("Starting canvas..."):
+                    thread = client.start_thread(
+                        project.path,
+                        {"dynamicTools": canvas_dynamic_tools()},
+                    )
+                    initialize_canvas(thread.id, project.path)
+            except Exception as exc:
+                st.error(f"Could not start canvas: {exc}")
+                return
+
+            discard_draft_chat(project)
+            canvas_chat = server_thread_chat(project, thread)
+            canvas_chat.surface = "canvas"
+            chats_state().insert(0, canvas_chat)
+            st.session_state.selected_chat_id = canvas_chat.id
+            st.session_state[PENDING_CHAT_SELECT_KEY] = canvas_chat.id
+            set_query_chat_id(canvas_chat.id)
+            st.rerun()
+
+
+def canvas_workspace(
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession,
+) -> None:
+    # Import after Streamlit has initialized and discovered installed CCv2
+    # manifests. Importing a file-backed component during pytest collection
+    # happens too early for the component registry.
+    from codex_nomad_surface.canvas_component import nomad_canvas
+
+    if not project or not chat.thread_id:
+        st.error("Canvas requires an App Server thread.")
+        return
+
+    manifest = initialize_canvas(chat.thread_id, project.path)
+    canvas_id = canvas_id_for_thread(chat.thread_id)
+    initial_document = load_canvas_document(canvas_id)
+    preview_svg = load_canvas_preview(canvas_id)
+    references = canvas_file_references(canvas_id)
+
+    st.html(
+        """
+        <style>
+        [data-testid="stMainBlockContainer"] {
+          max-width: 100% !important;
+          padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
+          padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
+        }
+        </style>
+        """
+    )
+
+    with st.container(
+        horizontal=True,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
+    ):
+        with st.container(width="content"):
+            st.markdown("**Canvas**")
+            st.caption(
+                f"Revision {int(manifest.get('current_revision') or 0)} · "
+                f"{canvas_id[-8:]}"
+            )
+        with st.container(horizontal=True, width="content"):
+            if initial_document:
+                st.download_button(
+                    "Document",
+                    data=json.dumps(initial_document, ensure_ascii=False, indent=2),
+                    file_name=f"{canvas_id}.json",
+                    mime="application/json",
+                    icon=":material/download:",
+                    width="content",
+                )
+            if preview_svg:
+                st.download_button(
+                    "SVG",
+                    data=preview_svg,
+                    file_name=f"{canvas_id}.svg",
+                    mime="image/svg+xml",
+                    icon=":material/image:",
+                    width="content",
+                )
+
+    canvas_result = nomad_canvas(
+        canvas_id,
+        initial_document=initial_document,
+        websocket_url=f"/api/canvas/{canvas_id}/ws",
+        key=f"nomad_canvas_{canvas_id}",
+        height=640,
+    )
+    connection_state = str(getattr(canvas_result, "connection_state", "") or "")
+    shape_count = int(getattr(canvas_result, "shape_count", 0) or 0)
+    status_parts = [f"{shape_count} shapes"]
+    if connection_state:
+        status_parts.append(connection_state)
+    status_parts.append(references["document_path"])
+    st.caption(" · ".join(status_parts))
+
+    with st.expander(
+        "Chat with Codex",
+        expanded=bool(chat.messages or st.session_state.get("pending_turn")),
+    ):
+        inject_chat_input_bridge()
+        inject_chat_input_ime_guard()
+        inject_chat_input_outbox(chat.id)
+        chat_history_panel(client, project, chat)
+    chat_composer(client, project, chat)
 
 
 def render_recent_threads(server_threads: list[CodexThread]) -> None:
@@ -4841,7 +5070,11 @@ def main() -> None:
     main_screen()
 
 
-app = App(__file__, middleware=[Middleware(FileContentMiddleware)])
+app = App(
+    __file__,
+    routes=[WebSocketRoute("/api/canvas/{canvas_id}/ws", canvas_websocket)],
+    middleware=[Middleware(FileContentMiddleware)],
+)
 
 
 if __name__ == "__main__":

@@ -218,6 +218,7 @@ class CodexTurnOutput:
 OutputState = CodexTurnOutput
 OutputSnapshot = dict[str, Any]
 OutputCallback = Callable[[OutputSnapshot], None]
+DynamicToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,7 @@ class CodexClient:
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
     ) -> dict[str, Any]:
         if not self.base_url.startswith(("ws://", "wss://")):
             return {
@@ -350,6 +352,7 @@ class CodexClient:
                     approval_policy,
                     output_callback,
                     runtime_callback,
+                    dynamic_tool_handler,
                 )
             )
             runtime = result.get("runtime")
@@ -368,6 +371,7 @@ class CodexClient:
         thread_id: str,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
     ) -> dict[str, Any]:
         """Rejoin an existing turn without starting a new one."""
         if (
@@ -388,6 +392,7 @@ class CodexClient:
                     thread_id,
                     output_callback,
                     runtime_callback,
+                    dynamic_tool_handler,
                 )
             )
             runtime = result.get("runtime")
@@ -496,10 +501,12 @@ class CodexClient:
             return []
         return asyncio.run(self._list_threads_ws())
 
-    def start_thread(self, cwd: str) -> CodexThread:
+    def start_thread(
+        self, cwd: str, thread_overrides: dict[str, Any] | None = None
+    ) -> CodexThread:
         if not cwd or not self.base_url.startswith(("ws://", "wss://")):
             raise ValueError("Codex App Server URL must use ws:// or wss://.")
-        return asyncio.run(self._start_thread_ws(cwd))
+        return asyncio.run(self._start_thread_ws(cwd, thread_overrides))
 
     def read_thread_messages(
         self, thread_id: str, limit: int = 40, cursor: str | None = None
@@ -647,7 +654,9 @@ class CodexClient:
         except Exception:
             return []
 
-    async def _start_thread_ws(self, cwd: str) -> CodexThread:
+    async def _start_thread_ws(
+        self, cwd: str, thread_overrides: dict[str, Any] | None = None
+    ) -> CodexThread:
         try:
             import websockets
         except ModuleNotFoundError as exc:
@@ -657,16 +666,18 @@ class CodexClient:
             output: list[str] = []
             approvals: list[dict[str, Any]] = []
             await self._initialize_ws(websocket, output, approvals)
+            params: dict[str, Any] = {
+                "cwd": cwd,
+                "ephemeral": False,
+                "sessionStartSource": "startup",
+                "experimentalRawEvents": False,
+                "persistExtendedHistory": True,
+            }
+            params.update(thread_overrides or {})
             raw = await self._rpc_call(
                 websocket,
                 "thread/start",
-                {
-                    "cwd": cwd,
-                    "ephemeral": False,
-                    "sessionStartSource": "startup",
-                    "experimentalRawEvents": False,
-                    "persistExtendedHistory": True,
-                },
+                params,
                 output,
                 approvals,
             )
@@ -1069,6 +1080,7 @@ class CodexClient:
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1087,6 +1099,7 @@ class CodexClient:
             "thread_id": thread_id,
             "output_callback": output_callback,
             "control_request_ids": set(),
+            "dynamic_tool_handler": dynamic_tool_handler,
         }
         runtime["loop"] = asyncio.get_running_loop()
         thread_overrides = thread_overrides or {}
@@ -1211,6 +1224,7 @@ class CodexClient:
         thread_id: str,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1226,6 +1240,7 @@ class CodexClient:
             "thread_id": thread_id,
             "output_callback": output_callback,
             "control_request_ids": set(),
+            "dynamic_tool_handler": dynamic_tool_handler,
         }
         runtime["loop"] = asyncio.get_running_loop()
         try:
@@ -1498,6 +1513,28 @@ class CodexClient:
                 continue
             method = message.get("method")
             params = message.get("params") or {}
+            if (
+                method == "item/tool/call"
+                and message.get("id") is not None
+                and runtime.get("dynamic_tool_handler")
+            ):
+                handler = runtime["dynamic_tool_handler"]
+                try:
+                    tool_result = await asyncio.to_thread(handler, params)
+                except Exception as exc:
+                    tool_result = {
+                        "success": False,
+                        "contentItems": [
+                            {"type": "inputText", "text": f"canvas_tool_error: {exc}"}
+                        ],
+                    }
+                await websocket.send(
+                    json.dumps(
+                        {"id": message.get("id"), "result": tool_result},
+                        ensure_ascii=False,
+                    )
+                )
+                continue
             if self._is_user_response_request_message(message):
                 approval = self._approval_from_message(message)
                 approvals.append(approval)

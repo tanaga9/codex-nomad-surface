@@ -1,0 +1,36 @@
+:host {
+  display: block;
+  height: 100%;
+  min-height: 640px;
+}
+
+.react-root,
+.nomad-canvas-root {
+  height: 100%;
+  min-height: 640px;
+}
+
+.nomad-canvas-root > .tl-container {
+  height: 100% !important;
+  min-height: 640px;
+}
+
+/*
+ * tldraw normally uses strict paint containment for both the drawing surface
+ * and its UI. Chromium can skip those contained layers when they are nested
+ * inside Streamlit CCv2's Shadow DOM, leaving only the license watermark
+ * visible. Keep component style isolation, but relax paint containment inside
+ * this editor so the canvas and tool panels are composited normally.
+ */
+.nomad-canvas-root .tl-canvas {
+  contain: layout style;
+  content-visibility: visible;
+}
+
+.nomad-canvas-root .tlui-layout {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  max-height: none;
+  contain: layout style;
+}
