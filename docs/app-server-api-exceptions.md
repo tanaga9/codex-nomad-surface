@@ -22,11 +22,12 @@ instead of a current Codex App Server API.
 
 `EX-010` — Canvas document persistence and live editor bridge: tldraw
 snapshots and previews are stored as local files, and the live editor is
-brokered over an authenticated same-origin WebSocket. Canvas documents are
-Nomad Surface product state; App Server Dynamic Tools carry Codex calls but do
-not store or edit tldraw documents. Keep this layer small, continue using the
-current Dynamic Tools API directly, and do not add a legacy Codex transport
-fallback.
+brokered over an authenticated same-origin WebSocket. A local draft ID keeps a
+new canvas addressable until its first App Server turn returns a durable thread
+ID. Canvas documents are Nomad Surface product state; App Server Dynamic Tools
+carry Codex calls but do not store or edit tldraw documents. Keep this layer
+small, continue using the current Dynamic Tools API directly, and do not add a
+legacy Codex transport fallback.
 
 | ID       | Area                                     | Mechanism                                                                                         | Why It Exists                                                                                         | Direction                                                                                                      |
 | -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |

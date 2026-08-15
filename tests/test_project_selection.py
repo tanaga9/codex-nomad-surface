@@ -1,6 +1,14 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from codex_nomad_surface.app import recent_thread_chats
+from codex_nomad_surface import canvas_store
+from codex_nomad_surface.app import (
+    project_chats,
+    public_query_chat_id,
+    recent_thread_chats,
+)
 from codex_nomad_surface.selection import (
     apply_pending_selectbox_state,
     chat_belongs_to_project,
@@ -101,6 +109,50 @@ class ProjectSelectionTests(unittest.TestCase):
         recent = recent_thread_chats(threads, projects, limit=2)
 
         self.assertEqual([chat.thread_id for _, chat in recent], ["3", "2"])
+
+    def test_recent_thread_chats_restores_canvas_draft(self) -> None:
+        projects = [Project(name="repo", path="/path/to/repo")]
+        with TemporaryDirectory() as temporary_directory:
+            previous_root = canvas_store.CANVAS_ROOT
+            canvas_store.CANVAS_ROOT = Path(temporary_directory) / "canvases"
+            try:
+                manifest = canvas_store.initialize_canvas_draft(
+                    "draft-chat", "/path/to/repo"
+                )
+
+                recent = recent_thread_chats([], projects)
+            finally:
+                canvas_store.CANVAS_ROOT = previous_root
+
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(recent[0][1].id, f"canvas:{manifest['canvas_id']}")
+        self.assertIsNone(recent[0][1].thread_id)
+        self.assertEqual(recent[0][1].canvas_id, manifest["canvas_id"])
+
+    def test_canvas_draft_id_is_preserved_in_query_string(self) -> None:
+        self.assertEqual(
+            public_query_chat_id("canvas:canvas-abcd"),
+            "canvas:canvas-abcd",
+        )
+
+    def test_project_chats_restores_canvas_draft(self) -> None:
+        project = Project(name="repo", path="/path/to/repo")
+        with TemporaryDirectory() as temporary_directory:
+            previous_root = canvas_store.CANVAS_ROOT
+            canvas_store.CANVAS_ROOT = Path(temporary_directory) / "canvases"
+            try:
+                manifest = canvas_store.initialize_canvas_draft(
+                    "draft-chat", project.path
+                )
+                with patch("codex_nomad_surface.app.chats_state", return_value=[]):
+                    chats = project_chats(project, [])
+            finally:
+                canvas_store.CANVAS_ROOT = previous_root
+
+        self.assertEqual(
+            [chat.id for chat in chats],
+            [f"canvas:{manifest['canvas_id']}"],
+        )
 
     def test_chat_title_marks_truncated_text(self) -> None:
         text = "x" * 60

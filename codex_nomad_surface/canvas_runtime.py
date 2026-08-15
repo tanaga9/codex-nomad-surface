@@ -266,9 +266,9 @@ def _content_result(success: bool, value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def canvas_dynamic_tool_handler(thread_id: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    canvas_id = canvas_id_for_thread(thread_id)
-
+def canvas_dynamic_tool_handler_for_canvas(
+    canvas_id: str,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def handle(params: dict[str, Any]) -> dict[str, Any]:
         namespace = str(params.get("namespace") or "")
         tool = str(params.get("tool") or "")
@@ -316,3 +316,9 @@ def canvas_dynamic_tool_handler(thread_id: str) -> Callable[[dict[str, Any]], di
         return _content_result(success, payload)
 
     return handle
+
+
+def canvas_dynamic_tool_handler(
+    thread_id: str,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    return canvas_dynamic_tool_handler_for_canvas(canvas_id_for_thread(thread_id))

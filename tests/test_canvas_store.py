@@ -7,6 +7,7 @@ from codex_nomad_surface import canvas_store
 from codex_nomad_surface.canvas_runtime import (
     CanvasBroker,
     canvas_dynamic_tool_handler,
+    canvas_dynamic_tool_handler_for_canvas,
     canvas_dynamic_tools,
 )
 
@@ -76,6 +77,42 @@ def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
     assert payload["revision"] == 1
     assert payload["scene"]["shapes"][0]["id"] == "shape:one"
     assert payload["document_path"].endswith("current/document.json")
+
+
+def test_draft_canvas_binds_to_thread_without_moving_files(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas_draft(
+        "draft-chat-1", "/path/to/project"
+    )
+    canvas_id = manifest["canvas_id"]
+    document = {
+        "store": {"shape:one": {"id": "shape:one", "typeName": "shape"}}
+    }
+    canvas_store.save_canvas_snapshot(canvas_id, document)
+
+    bound = canvas_store.bind_canvas_to_thread(canvas_id, "thread-after-first-turn")
+
+    assert bound["thread_id"] == "thread-after-first-turn"
+    assert bound["draft_id"] == "draft-chat-1"
+    assert canvas_store.load_canvas_document(canvas_id) == document
+    assert canvas_store.canvas_manifest_for_thread("thread-after-first-turn") == bound
+    assert canvas_store.canvas_exists_for_thread("thread-after-first-turn") is True
+
+
+def test_dynamic_tool_handler_can_target_draft_canvas(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas_draft("draft-chat-tool")
+    canvas_id = manifest["canvas_id"]
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        {"store": {"shape:draft": {"id": "shape:draft", "typeName": "shape"}}},
+    )
+
+    result = canvas_dynamic_tool_handler_for_canvas(canvas_id)(
+        {"namespace": "canvas", "tool": "read_scene", "arguments": {}}
+    )
+    payload = json.loads(result["contentItems"][0]["text"])
+
+    assert result["success"] is True
+    assert payload["scene"]["shapes"][0]["id"] == "shape:draft"
 
 
 def test_empty_canvas_clears_saved_preview(isolated_canvas_root):

@@ -13,14 +13,19 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
 ### Implemented prototype slice
 
 - `New chat...` shows a **Start canvas** action.
-- Starting it creates a non-ephemeral App Server thread with the experimental
-  `canvas` Dynamic Tools namespace.
+- Starting it creates a local Canvas draft. Its first message creates a
+  non-ephemeral App Server thread and starts the first turn on the same
+  connection with the experimental `canvas` Dynamic Tools namespace.
 - The Canvas Skin mounts tldraw through a packaged Streamlit CCv2 component.
 - A same-origin WebSocket brokers `read_scene` and bounded `apply_patch` calls.
 - The editable tldraw snapshot, SVG preview, manifest, and bounded revisions
   are saved atomically under `.nomad_surface/canvases/`.
-- Empty Canvas threads are restored from their manifests even before their
-  first Codex turn appears in `thread/list`.
+- A Canvas is bound to its App Server thread after the first turn starts.
+- Canvas drafts are restored from their manifests after a browser refresh or
+  process restart, even before they have an App Server thread.
+- Canvas manifests created by the earlier prototype remain usable: if their
+  empty thread has no rollout, the first message creates and binds a replacement
+  thread without replacing the drawing files.
 - Document JSON and SVG are downloadable from the Canvas Skin.
 
 The prototype does not yet implement asset ingestion, PNG rendering, command
@@ -296,13 +301,16 @@ revision on the Nomad Surface host is the durability authority.
 
 ### Identity and Lookup
 
-The canvas directory name is derived deterministically from the thread ID with
-a path-safe stable hash. `manifest.json` stores the original thread ID and the
-current revision. This removes the need for a central thread-to-canvas database
-or mutable global index.
+The canvas directory name is derived deterministically from a local draft ID
+with a path-safe stable hash. `manifest.json` stores that draft ID, the current
+revision, and the App Server thread ID after the first turn starts. Existing
+prototype canvases retain their original thread-derived directory names. A
+manifest lookup keeps both layouts usable without moving drawing files or
+introducing a central database.
 
-A fork receives a new thread ID and therefore a new canvas directory. Its first
-revision is copied from the source canvas checkpoint. Archiving a task preserves
+A fork creates a new local Canvas draft ID and therefore a new canvas directory.
+Its first revision is copied from the source canvas checkpoint; its App Server
+thread ID is bound after the fork's first turn starts. Archiving a task preserves
 its canvas files.
 
 ### Manifest
@@ -311,8 +319,9 @@ An illustrative manifest is:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "canvas_id": "canvas-abcd",
+  "draft_id": "local-draft-123",
   "thread_id": "thread-123",
   "current_revision": 42,
   "document": "current/document.json",

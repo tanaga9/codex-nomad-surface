@@ -87,22 +87,37 @@ def read_canvas_manifest(canvas_id: str) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
-def initialize_canvas(thread_id: str, project_path: str = "") -> dict[str, Any]:
-    canvas_id = canvas_id_for_thread(thread_id)
+def _initialize_canvas_manifest(
+    canvas_id: str,
+    *,
+    thread_id: str = "",
+    draft_id: str = "",
+    project_path: str = "",
+) -> dict[str, Any]:
     with _canvas_lock(canvas_id):
         existing = read_canvas_manifest(canvas_id)
         if existing:
+            changed = False
             if project_path and not existing.get("project_path"):
                 existing["project_path"] = project_path
+                changed = True
+            if thread_id and not existing.get("thread_id"):
+                existing["thread_id"] = thread_id
+                changed = True
+            if draft_id and not existing.get("draft_id"):
+                existing["draft_id"] = draft_id
+                changed = True
+            if changed:
                 _atomic_write(_manifest_path(canvas_id), _json_bytes(existing))
             return existing
         directory = canvas_directory(canvas_id)
         directory.mkdir(parents=True, exist_ok=True)
         created_at = _timestamp()
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "canvas_id": canvas_id,
             "thread_id": thread_id,
+            "draft_id": draft_id,
             "project_path": project_path,
             "current_revision": 0,
             "document": "current/document.json",
@@ -115,9 +130,61 @@ def initialize_canvas(thread_id: str, project_path: str = "") -> dict[str, Any]:
         return manifest
 
 
+def initialize_canvas(thread_id: str, project_path: str = "") -> dict[str, Any]:
+    canvas_id = canvas_id_for_thread(thread_id)
+    return _initialize_canvas_manifest(
+        canvas_id,
+        thread_id=thread_id,
+        project_path=project_path,
+    )
+
+
+def initialize_canvas_draft(draft_id: str, project_path: str = "") -> dict[str, Any]:
+    canvas_id = canvas_id_for_thread(draft_id)
+    return _initialize_canvas_manifest(
+        canvas_id,
+        draft_id=draft_id,
+        project_path=project_path,
+    )
+
+
+def bind_canvas_to_thread(canvas_id: str, thread_id: str) -> dict[str, Any]:
+    if not thread_id:
+        raise ValueError("A thread ID is required.")
+    with _canvas_lock(canvas_id):
+        manifest = read_canvas_manifest(canvas_id)
+        if not manifest:
+            raise FileNotFoundError("Canvas manifest was not found.")
+        if manifest.get("thread_id") == thread_id:
+            return manifest
+        manifest = {
+            **manifest,
+            "schema_version": max(int(manifest.get("schema_version") or 1), 2),
+            "thread_id": thread_id,
+            "updated_at": _timestamp(),
+        }
+        _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
+        return manifest
+
+
+def canvas_manifest_for_thread(thread_id: str) -> dict[str, Any] | None:
+    if not thread_id:
+        return None
+    direct = read_canvas_manifest(canvas_id_for_thread(thread_id))
+    if direct and direct.get("thread_id") == thread_id:
+        return direct
+    return next(
+        (
+            manifest
+            for manifest in list_canvas_manifests()
+            if manifest.get("thread_id") == thread_id
+        ),
+        None,
+    )
+
+
 def canvas_exists_for_thread(thread_id: str) -> bool:
-    manifest = read_canvas_manifest(canvas_id_for_thread(thread_id))
-    return bool(manifest and manifest.get("thread_id") == thread_id)
+    return canvas_manifest_for_thread(thread_id) is not None
 
 
 def canvas_exists(canvas_id: str) -> bool:

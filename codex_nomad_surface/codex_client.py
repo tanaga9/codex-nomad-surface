@@ -332,6 +332,7 @@ class CodexClient:
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
         dynamic_tool_handler: DynamicToolHandler | None = None,
+        replace_missing_rollout: bool = False,
     ) -> dict[str, Any]:
         if not self.base_url.startswith(("ws://", "wss://")):
             return {
@@ -353,6 +354,7 @@ class CodexClient:
                     output_callback,
                     runtime_callback,
                     dynamic_tool_handler,
+                    replace_missing_rollout,
                 )
             )
             runtime = result.get("runtime")
@@ -1081,6 +1083,7 @@ class CodexClient:
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
         dynamic_tool_handler: DynamicToolHandler | None = None,
+        replace_missing_rollout: bool = False,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1132,17 +1135,26 @@ class CodexClient:
                     if approval_policy:
                         resume_params["approvalPolicy"] = approval_policy
                     resume_params.update(thread_overrides)
-                    thread_result = await self._rpc_call(
-                        websocket,
-                        "thread/resume",
-                        resume_params,
-                        output_parts,
-                        approvals,
-                        output_callback,
-                        handle_approval_message,
-                        runtime["stream_items"],
-                    )
-                else:
+                    try:
+                        thread_result = await self._rpc_call(
+                            websocket,
+                            "thread/resume",
+                            resume_params,
+                            output_parts,
+                            approvals,
+                            output_callback,
+                            handle_approval_message,
+                            runtime["stream_items"],
+                        )
+                    except RuntimeError as exc:
+                        if not (
+                            replace_missing_rollout
+                            and "no rollout found for thread id" in str(exc).lower()
+                        ):
+                            raise
+                        runtime["replaced_thread_id"] = thread_id
+                        thread_id = None
+                if not thread_id:
                     start_params: dict[str, Any] = {
                         "cwd": project_path,
                         "ephemeral": False,

@@ -1302,6 +1302,64 @@ class CodexClientApprovalTests(unittest.TestCase):
         )
         self.assertTrue(websocket.closed)
 
+    def test_canvas_turn_replaces_thread_when_rollout_is_missing(self) -> None:
+        class FakeWebSocket:
+            pass
+
+        websocket = FakeWebSocket()
+        calls: list[tuple[str, dict]] = []
+        captured_runtime: dict = {}
+
+        async def connect(_websockets):
+            return websocket
+
+        async def initialize(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def rpc_call(_websocket, method, params, *_args, **_kwargs):
+            calls.append((method, params))
+            if method == "thread/resume":
+                raise RuntimeError("no rollout found for thread id missing-thread")
+            if method == "thread/start":
+                return {"thread": {"id": "replacement-thread"}}
+            if method == "turn/start":
+                return {"turn": {"id": "turn-1"}}
+            raise AssertionError(f"unexpected RPC method: {method}")
+
+        async def collect(runtime):
+            captured_runtime.update(runtime)
+            return {
+                "ok": True,
+                "thread_id": runtime["thread_id"],
+                "turn_id": runtime["turn_id"],
+                "output": "Done",
+            }
+
+        self.client._connect_ws = connect
+        self.client._initialize_ws = initialize
+        self.client._rpc_call = rpc_call
+        self.client._collect_chat_turn_ws = collect
+
+        result = asyncio.run(
+            self.client._start_chat_turn_ws(
+                "/path/to/project",
+                "Draw a box",
+                "missing-thread",
+                None,
+                thread_overrides={"dynamicTools": [{"name": "canvas"}]},
+                replace_missing_rollout=True,
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["thread_id"], "replacement-thread")
+        self.assertEqual(
+            [method for method, _params in calls],
+            ["thread/resume", "thread/start", "turn/start"],
+        )
+        self.assertEqual(calls[1][1]["dynamicTools"], [{"name": "canvas"}])
+        self.assertEqual(captured_runtime["replaced_thread_id"], "missing-thread")
+
     def test_recover_chat_turn_can_stop_before_resuming_thread(self) -> None:
         class FakeWebSocket:
             def __init__(self) -> None:
