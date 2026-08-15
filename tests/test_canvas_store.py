@@ -5,6 +5,7 @@ import pytest
 
 from codex_nomad_surface import canvas_store
 from codex_nomad_surface.canvas_runtime import (
+    CanvasBroker,
     canvas_dynamic_tool_handler,
     canvas_dynamic_tools,
 )
@@ -89,6 +90,40 @@ def test_empty_canvas_clears_saved_preview(isolated_canvas_root):
     canvas_store.save_canvas_snapshot(canvas_id, {"store": {}}, "")
 
     assert canvas_store.load_canvas_preview(canvas_id) == ""
+
+
+def test_canvas_save_reuses_an_incomplete_next_revision(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-interrupted-save")
+    canvas_id = manifest["canvas_id"]
+    revision_directory = (
+        isolated_canvas_root / canvas_id / "revisions" / "00000001"
+    )
+    revision_directory.mkdir(parents=True)
+    (revision_directory / "document.json").write_text(
+        "incomplete", encoding="utf-8"
+    )
+
+    document = {"store": {"shape:recovered": {"typeName": "shape"}}}
+    saved = canvas_store.save_canvas_snapshot(canvas_id, document, "<svg />")
+
+    assert saved["current_revision"] == 1
+    assert canvas_store.load_canvas_document(canvas_id) == document
+    assert json.loads(
+        (revision_directory / "document.json").read_text(encoding="utf-8")
+    ) == document
+    assert (revision_directory / "metadata.json").is_file()
+
+
+def test_canvas_broker_retires_the_previous_connection():
+    broker = CanvasBroker()
+    first = broker.register("canvas-one")
+
+    second = broker.register("canvas-one")
+
+    assert first.retired.is_set()
+    assert first.outgoing.get_nowait() is None
+    assert broker.is_current("canvas-one", first) is False
+    assert broker.is_current("canvas-one", second) is True
 
 
 def test_canvas_dynamic_tool_manifest_uses_namespace_shape():

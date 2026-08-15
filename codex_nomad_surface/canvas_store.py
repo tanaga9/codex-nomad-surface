@@ -205,7 +205,9 @@ def save_canvas_snapshot(
 
         revision = current_revision + 1
         revision_directory = directory / "revisions" / f"{revision:08d}"
-        revision_directory.mkdir(parents=True, exist_ok=False)
+        # Reuse an uncommitted directory left by an interrupted previous save.
+        # The manifest remains the authority for the current revision.
+        revision_directory.mkdir(parents=True, exist_ok=True)
         _atomic_write(revision_directory / "document.json", document_bytes)
         _atomic_write(
             revision_directory / "metadata.json",

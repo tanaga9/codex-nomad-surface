@@ -27,6 +27,7 @@ from codex_nomad_surface.http_gate import (
 
 
 CANVAS_TOOL_TIMEOUT_SECONDS = 25.0
+CANVAS_REPLACED_CLOSE_CODE = 4001
 
 
 @dataclass
@@ -38,6 +39,7 @@ class PendingCanvasRequest:
 @dataclass
 class CanvasConnection:
     outgoing: queue.Queue[dict[str, Any] | None] = field(default_factory=queue.Queue)
+    retired: threading.Event = field(default_factory=threading.Event)
 
 
 class CanvasBroker:
@@ -51,9 +53,14 @@ class CanvasBroker:
         with self._lock:
             previous = self._connections.pop(canvas_id, None)
             if previous:
+                previous.retired.set()
                 previous.outgoing.put(None)
             self._connections[canvas_id] = connection
         return connection
+
+    def is_current(self, canvas_id: str, connection: CanvasConnection) -> bool:
+        with self._lock:
+            return self._connections.get(canvas_id) is connection
 
     def unregister(self, canvas_id: str, connection: CanvasConnection) -> None:
         with self._lock:
@@ -105,6 +112,11 @@ async def _canvas_sender(websocket: WebSocket, connection: CanvasConnection) -> 
     while True:
         message = await asyncio.to_thread(connection.outgoing.get)
         if message is None:
+            if connection.retired.is_set():
+                try:
+                    await websocket.close(code=CANVAS_REPLACED_CLOSE_CODE)
+                except RuntimeError:
+                    pass
             return
         await websocket.send_json(message)
 
@@ -127,6 +139,8 @@ async def canvas_websocket(websocket: WebSocket) -> None:
     try:
         while True:
             message = await websocket.receive_json()
+            if not CANVAS_BROKER.is_current(canvas_id, connection):
+                return
             if not isinstance(message, dict):
                 continue
             message_type = str(message.get("type") or "")

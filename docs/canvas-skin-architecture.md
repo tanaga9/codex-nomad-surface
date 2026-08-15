@@ -167,6 +167,8 @@ remain appropriate for low-frequency component state and user actions.
 ### Canvas Command Broker
 
 - Tracks the active browser connection for each canvas.
+- Keeps only the most recently connected editor writable and retires an older
+  connection when the same canvas is opened again.
 - Sends structured read or apply requests to the live editor.
 - Correlates replies by request ID.
 - Applies bounded timeouts and disconnect handling.
@@ -319,24 +321,23 @@ An illustrative manifest is:
 Paths in the manifest are relative to the canvas directory. User-provided path
 segments are never accepted.
 
-### Atomic Commit
+### File Commit
 
 A document commit follows this sequence:
 
 1. Acquire the in-process canvas lock.
 2. Compare `base_revision` with the manifest revision when the write comes from
    a Codex command.
-3. Write the new revision into a temporary directory.
-4. Validate that the snapshot is readable.
-5. Atomically move the completed revision into `revisions/`.
-6. Atomically replace `current/document.json` and `manifest.json`.
-7. Record the command receipt under `commands/` when applicable.
-8. Generate or replace SVG and PNG previews.
+3. Create the next numbered revision directory, or reuse it if an interrupted
+   save left it uncommitted.
+4. Atomically replace the revision files, current document, and SVG preview.
+5. Atomically update the manifest last, making the revision current.
+6. Prune old revisions beyond the retention limit.
 
-The document commit succeeds independently of preview rendering. A preview
-failure is visible and retryable but does not invalidate the editable document.
-On startup, incomplete temporary files are ignored and the last complete
-revision is used for recovery.
+This intentionally uses individual atomic file replacements instead of a
+cross-file transaction. The manifest is the commit authority: if a save stops
+before it is updated, the next save safely overwrites and completes that same
+revision.
 
 ### Save Triggers
 
