@@ -4458,8 +4458,8 @@ def chat_workspace(
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     inject_chat_input_outbox(active_chat.id if active_chat else "")
-    render_canvas_start_action(project, active_chat)
     chat_history_panel(client, project, active_chat)
+    render_canvas_start_action(project, active_chat)
     chat_composer(client, project, active_chat)
 
 
