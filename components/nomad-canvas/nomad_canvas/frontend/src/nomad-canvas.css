@@ -1,13 +1,16 @@
 :host {
   display: block;
   height: 100%;
-  min-height: 640px;
+  min-height: 0;
+  overflow: hidden;
 }
 
+:host > div,
+:host > div > div,
 .react-root,
 .nomad-canvas-root {
   height: 100%;
-  min-height: 640px;
+  min-height: 0;
 }
 
 .nomad-canvas-root {
@@ -35,7 +38,7 @@
 
 .nomad-canvas-root > .tl-container {
   height: 100% !important;
-  min-height: 640px;
+  min-height: 0;
 }
 
 /*

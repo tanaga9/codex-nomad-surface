@@ -4544,66 +4544,209 @@ def canvas_workspace(
           padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
           padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
         }
+
+        .st-key-canvas-stage,
+        .st-key-canvas-chat-sidebar {
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
+
+        .st-key-canvas-stage > [data-testid="stVerticalBlock"],
+        .st-key-canvas-chat-sidebar > [data-testid="stVerticalBlock"] {
+          height: 100%;
+          min-height: 0;
+        }
+
+        .st-key-canvas-stage [data-testid="stElementContainer"] {
+          height: 100% !important;
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
+
+        .st-key-canvas-chat-sidebar
+          [data-testid="stElementContainer"]:has(#chat-input-bridge),
+        .st-key-canvas-chat-sidebar
+          [data-testid="stElementContainer"]:has(#chat-input-ime-guard),
+        .st-key-canvas-chat-sidebar
+          [data-testid="stElementContainer"]:has(#chat-input-outbox) {
+          display: none;
+        }
+
+        .st-key-canvas-chat-sidebar
+          [data-testid="stLayoutWrapper"]:has(> .st-key-chat-history-panel) {
+          flex: 1 1 0 !important;
+          height: auto !important;
+          min-height: 0;
+          overflow: hidden !important;
+        }
+
+        .st-key-canvas-chat-sidebar .st-key-chat-history-panel {
+          height: 100% !important;
+          min-height: 0;
+          overflow-y: auto !important;
+          overscroll-behavior: contain;
+        }
+
+        @media (min-width: 901px) {
+          [data-testid="stAppScrollToBottomContainer"]:has(
+              .st-key-canvas-viewport
+            ) {
+            overflow: hidden;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport) {
+            height: 100dvh;
+            overflow: hidden;
+            padding-top: 4rem !important;
+            padding-bottom: 0.5rem !important;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport)
+            > [data-testid="stVerticalBlock"],
+          .st-key-canvas-viewport,
+          .st-key-canvas-viewport > [data-testid="stVerticalBlock"] {
+            height: 100%;
+            min-height: 0;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport)
+            > [data-testid="stVerticalBlock"] {
+            overflow: hidden;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport)
+            > [data-testid="stVerticalBlock"]
+            > [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-viewport) {
+            flex: 1 1 0 !important;
+            height: auto !important;
+            min-height: 0;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-viewport
+            [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-workspace) {
+            flex: 1 1 0 !important;
+            height: auto !important;
+            min-height: 0;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-workspace
+            [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-stage),
+          .st-key-canvas-workspace
+            [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-chat-sidebar) {
+            flex: 1 1 0 !important;
+            height: 100% !important;
+            min-height: 0;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-workspace,
+          .st-key-canvas-workspace > [data-testid="stVerticalBlock"],
+          .st-key-canvas-workspace
+            > [data-testid="stLayoutWrapper"],
+          .st-key-canvas-workspace [data-testid="stHorizontalBlock"],
+          .st-key-canvas-workspace [data-testid="stColumn"],
+          .st-key-canvas-workspace
+            [data-testid="stColumn"]
+            > [data-testid="stVerticalBlock"] {
+            height: 100% !important;
+            min-height: 0;
+          }
+
+          .st-key-canvas-workspace
+            > [data-testid="stLayoutWrapper"] {
+            flex: 1 1 0 !important;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-workspace [data-testid="stHorizontalBlock"] {
+            align-items: stretch;
+          }
+        }
+
+        @media (max-width: 900px) {
+          .st-key-canvas-stage {
+            height: min(64dvh, 640px) !important;
+            min-height: 24rem !important;
+          }
+
+          .st-key-canvas-chat-sidebar {
+            height: 24rem !important;
+          }
+        }
         </style>
         """
     )
 
-    with st.container(
-        horizontal=True,
-        horizontal_alignment="distribute",
-        vertical_alignment="center",
-    ):
-        with st.container(width="content"):
-            st.markdown("**Canvas**")
-            st.caption(
-                f"Revision {int(manifest.get('current_revision') or 0)} · "
-                f"{canvas_id[-8:]}"
-            )
-        with st.container(horizontal=True, width="content"):
-            st.button(
-                "Refresh exports",
-                key=f"refresh_canvas_exports_{canvas_id}",
-                help="Reload the latest saved Document and SVG files.",
-                icon=":material/refresh:",
-                width="content",
-            )
-            if initial_document:
-                st.download_button(
-                    "Document",
-                    data=json.dumps(initial_document, ensure_ascii=False, indent=2),
-                    file_name=f"{canvas_id}.json",
-                    mime="application/json",
-                    icon=":material/download:",
-                    width="content",
+    with st.container(key="canvas-viewport", gap="xsmall"):
+        with st.expander("Canvas", expanded=False):
+            with st.container(
+                horizontal=True,
+                horizontal_alignment="distribute",
+                vertical_alignment="center",
+            ):
+                st.caption(
+                    f"Revision {int(manifest.get('current_revision') or 0)} · "
+                    f"{canvas_id[-8:]}"
                 )
-            if preview_svg:
-                st.download_button(
-                    "SVG",
-                    data=preview_svg,
-                    file_name=f"{canvas_id}.svg",
-                    mime="image/svg+xml",
-                    icon=":material/image:",
-                    width="content",
-                )
+                with st.container(horizontal=True, width="content"):
+                    st.button(
+                        "Refresh exports",
+                        key=f"refresh_canvas_exports_{canvas_id}",
+                        help="Reload the latest saved Document and SVG files.",
+                        icon=":material/refresh:",
+                        width="content",
+                    )
+                    if initial_document:
+                        st.download_button(
+                            "Document",
+                            data=json.dumps(
+                                initial_document, ensure_ascii=False, indent=2
+                            ),
+                            file_name=f"{canvas_id}.json",
+                            mime="application/json",
+                            help=references["document_path"],
+                            icon=":material/download:",
+                            width="content",
+                        )
+                    if preview_svg:
+                        st.download_button(
+                            "SVG",
+                            data=preview_svg,
+                            file_name=f"{canvas_id}.svg",
+                            mime="image/svg+xml",
+                            help=references["preview_path"],
+                            icon=":material/image:",
+                            width="content",
+                        )
 
-    nomad_canvas(
-        canvas_id,
-        initial_document=initial_document,
-        websocket_url=f"/api/canvas/{canvas_id}/ws",
-        key=f"nomad_canvas_{canvas_id}",
-        height=640,
-    )
-    st.caption(f"Canvas file · {references['document_path']}")
-
-    with st.expander(
-        "Chat with Codex",
-        expanded=bool(chat.messages or st.session_state.get("pending_turn")),
-    ):
-        inject_chat_input_bridge()
-        inject_chat_input_ime_guard()
-        inject_chat_input_outbox(chat.id)
-        chat_history_panel(client, project, chat)
-    chat_composer(client, project, chat)
+        with st.container(key="canvas-workspace", height="stretch", gap=None):
+            canvas_column, chat_column = st.columns([7, 3], gap="small")
+            with canvas_column:
+                with st.container(
+                    key="canvas-stage", height="stretch", gap=None
+                ):
+                    nomad_canvas(
+                        canvas_id,
+                        initial_document=initial_document,
+                        websocket_url=f"/api/canvas/{canvas_id}/ws",
+                        key=f"nomad_canvas_{canvas_id}",
+                        height="stretch",
+                    )
+            with chat_column:
+                with st.container(
+                    key="canvas-chat-sidebar",
+                    height="stretch",
+                    border=True,
+                    gap="xsmall",
+                ):
+                    st.markdown("**Chat**")
+                    inject_chat_input_bridge()
+                    inject_chat_input_ime_guard()
+                    inject_chat_input_outbox(chat.id)
+                    chat_history_panel(client, project, chat)
+                    chat_composer(client, project, chat)
 
 
 def render_recent_threads(server_threads: list[CodexThread]) -> None:

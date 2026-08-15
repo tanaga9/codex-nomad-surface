@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import streamlit as st
 
 
@@ -17,7 +19,7 @@ def nomad_canvas(
     initial_document: dict | None,
     websocket_url: str,
     key: str | None = None,
-    height: int = 640,
+    height: int | Literal["content", "stretch"] = 640,
 ):
     """Mount the tldraw CCv2 component for one thread canvas."""
     return _component(

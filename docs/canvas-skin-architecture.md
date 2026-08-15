@@ -31,6 +31,10 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   empty thread has no rollout, the first message creates and binds a replacement
   thread without replacing the drawing files.
 - Document JSON and SVG are downloadable from the Canvas Skin.
+- On wider screens, the canvas remains fixed in the viewport while chat history
+  scrolls independently in a right-side panel; the native `st.chat_input` sits
+  at the bottom of that panel so the canvas can use the full remaining height.
+- Canvas metadata and export actions are kept in a compact disclosure.
 
 The prototype does not yet implement asset ingestion, PNG rendering, command
 receipt files, fork-copy behavior, or the full proposed operation vocabulary.
@@ -85,9 +89,10 @@ Canvas Skin is selected when creating or opening a Canvas task. The canvas is
 shown immediately from the beginning of the task.
 
 On a phone, the canvas occupies the main screen and the existing Streamlit chat
-surface opens as a drawer or dialog. On a wider screen, chat may be displayed in
-a collapsible side panel. These are two responsive presentations of the same
-task and thread.
+surface may open as a drawer or dialog. On a wider screen, chat is displayed in
+an independently scrolling side panel so the canvas itself does not move with
+chat history. These are two responsive presentations of the same task and
+thread.
 
 The tldraw component owns canvas interaction only. Streamlit continues to own:
 
@@ -472,7 +477,7 @@ infrastructure.
 2. Add the authenticated same-origin WebSocket and Canvas Runtime.
 3. Add file-backed snapshots, revisions, previews, and recovery.
 4. Add the App Server interaction router and the two Dynamic Tools.
-5. Add the mobile chat drawer and wider-screen side panel.
+5. Add the mobile chat drawer; the wider-screen side panel is implemented.
 6. Add fork, archive, export, asset ingestion, and destructive-operation policy.
 7. Reconsider sync infrastructure or a database only after a concrete new
    requirement or measured limitation appears.
