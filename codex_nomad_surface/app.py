@@ -4587,7 +4587,7 @@ def canvas_workspace(
           overscroll-behavior: contain;
         }
 
-        @media (min-width: 901px) {
+        @media (min-width: 641px) {
           [data-testid="stAppScrollToBottomContainer"]:has(
               .st-key-canvas-viewport
             ) {
@@ -4665,7 +4665,14 @@ def canvas_workspace(
           }
         }
 
-        @media (max-width: 900px) {
+        @media (max-width: 640px) {
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport) {
+            padding-bottom: max(
+              0.75rem,
+              env(safe-area-inset-bottom)
+            ) !important;
+          }
+
           .st-key-canvas-stage {
             height: min(64dvh, 640px) !important;
             min-height: 24rem !important;
@@ -4673,6 +4680,7 @@ def canvas_workspace(
 
           .st-key-canvas-chat-sidebar {
             height: 24rem !important;
+            min-height: 24rem !important;
           }
         }
         </style>
