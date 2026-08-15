@@ -28,6 +28,17 @@ from codex_nomad_surface.http_gate import (
 
 CANVAS_TOOL_TIMEOUT_SECONDS = 25.0
 CANVAS_REPLACED_CLOSE_CODE = 4001
+CANVAS_DEVELOPER_INSTRUCTIONS = (
+    "This thread uses the Nomad Surface embedded Canvas. When a request concerns "
+    "the canvas, use the canvas dynamic tools as the primary interface. Read the "
+    "current scene before scene-dependent edits, then apply edits through "
+    "canvas.apply_patch using the returned revision. Treat backing document and "
+    "preview files as persistence artifacts, not as the canvas interface. Do not "
+    "inspect or modify those files, and do not use external or offline canvas "
+    "integrations, unless the user explicitly requests it. If the canvas tools do "
+    "not provide enough information, explain the limitation instead of silently "
+    "switching interfaces."
+)
 
 
 @dataclass
@@ -194,14 +205,18 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
         {
             "type": "namespace",
             "name": "canvas",
-            "description": "Read and edit the live tldraw canvas for this thread.",
+            "description": (
+                "Read and edit the live Nomad Surface embedded Canvas for this "
+                "thread. This is separate from external or offline canvas apps."
+            ),
             "tools": [
                 {
                     "type": "function",
                     "name": "read_scene",
                     "description": (
                         "Read the current canvas before editing it. Returns shapes, "
-                        "bindings, page information, and the current revision."
+                        "their page-space bounds when available, bindings, page "
+                        "information, and the current revision."
                     ),
                     "inputSchema": {
                         "type": "object",
@@ -249,6 +264,22 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                         "additionalProperties": False,
                     },
                 },
+            ],
+        }
+    ]
+
+
+def canvas_initial_context_items() -> list[dict[str, Any]]:
+    """Return the developer context injected once when a Canvas thread starts."""
+    return [
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": CANVAS_DEVELOPER_INSTRUCTIONS,
+                }
             ],
         }
     ]

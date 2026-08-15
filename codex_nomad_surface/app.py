@@ -26,6 +26,7 @@ from starlette.routing import WebSocketRoute
 from streamlit.starlette import App
 
 from codex_nomad_surface.canvas_runtime import (
+    canvas_initial_context_items,
     canvas_dynamic_tool_handler_for_canvas,
     canvas_dynamic_tools,
     canvas_websocket,
@@ -2231,6 +2232,11 @@ def start_turn_run_worker(
                     else None
                 ),
                 replace_missing_rollout=chat.surface == "canvas",
+                initial_context_items=(
+                    canvas_initial_context_items()
+                    if chat.surface == "canvas"
+                    else None
+                ),
             )
         except Exception as exc:
             result = {"ok": False, "output": f"[send/receive error] {exc}"}

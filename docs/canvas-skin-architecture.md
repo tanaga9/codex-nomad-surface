@@ -16,6 +16,10 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
 - Starting it creates a local Canvas draft. Its first message creates a
   non-ephemeral App Server thread and starts the first turn on the same
   connection with the experimental `canvas` Dynamic Tools namespace.
+- Before that first turn, Nomad Surface adds one Canvas-scoped developer
+  context item through `thread/inject_items`. It preserves the App Server's
+  existing instructions while telling Codex to use the embedded Canvas tools
+  instead of backing files or unrelated offline integrations.
 - The Canvas Skin mounts tldraw through a packaged Streamlit CCv2 component.
 - A same-origin WebSocket brokers `read_scene` and bounded `apply_patch` calls.
 - The editable tldraw snapshot, SVG preview, manifest, and bounded revisions
@@ -197,6 +201,12 @@ Tools are currently experimental. The project should use the current API
 directly and report an explicit unsupported state if it is unavailable; it
 should not add a legacy transport fallback.
 
+For a newly created Canvas thread, the router injects one short developer
+message before its first user turn. The message defines only the general Canvas
+interaction policy; geometry and other scene facts remain tool results. It is
+not repeated on resumed turns, and it does not replace the selected Codex
+collaboration mode or its built-in instructions.
+
 ## Codex Tool Contract
 
 The initial Canvas Skin exposes only two dynamic tools.
@@ -251,17 +261,19 @@ the command.
 ## Command Flow
 
 1. The user sends a message through the Canvas Skin chat.
-2. Codex calls `canvas.read_scene` through an App Server Dynamic Tool request.
-3. The interaction router sends the request to the Canvas Runtime.
-4. The Runtime reads the live editor through the broker, or the latest saved
+2. For a new Canvas thread, Nomad Surface injects the Canvas interaction policy
+   before starting the first user turn.
+3. Codex calls `canvas.read_scene` through an App Server Dynamic Tool request.
+4. The interaction router sends the request to the Canvas Runtime.
+5. The Runtime reads the live editor through the broker, or the latest saved
    checkpoint when a live read is not required.
-5. Codex calls `canvas.apply_patch` with the observed base revision.
-6. The Runtime rejects a stale revision or forwards the command to the editor.
-7. The editor validates and applies the batch as one undoable transaction.
-8. The updated document is checkpointed immediately.
-9. The tool result returns the resulting revision, changed IDs, logical-ID
+6. Codex calls `canvas.apply_patch` with the observed base revision.
+7. The Runtime rejects a stale revision or forwards the command to the editor.
+8. The editor validates and applies the batch as one undoable transaction.
+9. The updated document is checkpointed immediately.
+10. The tool result returns the resulting revision, changed IDs, logical-ID
    mapping, warnings, and current file references.
-10. Codex continues the same turn and explains the completed change.
+11. Codex continues the same turn and explains the completed change.
 
 ## File-Backed Storage
 
@@ -468,6 +480,7 @@ infrastructure.
 ## External References
 
 - [Codex App Server Dynamic Tools](https://learn.chatgpt.com/docs/app-server#dynamic-tool-calls-experimental)
+- [Codex App Server thread context injection](https://learn.chatgpt.com/docs/app-server#inject-items-into-a-thread)
 - [Streamlit Custom Components v2](https://docs.streamlit.io/develop/api-reference/custom-components/st.components.v2.component)
 - [tldraw persistence](https://tldraw.dev/docs/persistence)
 - [tldraw collaboration](https://tldraw.dev/docs/collaboration)

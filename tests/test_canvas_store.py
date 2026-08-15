@@ -5,7 +5,9 @@ import pytest
 
 from codex_nomad_surface import canvas_store
 from codex_nomad_surface.canvas_runtime import (
+    CANVAS_DEVELOPER_INSTRUCTIONS,
     CanvasBroker,
+    canvas_initial_context_items,
     canvas_dynamic_tool_handler,
     canvas_dynamic_tool_handler_for_canvas,
     canvas_dynamic_tools,
@@ -168,9 +170,31 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
 
     assert namespace["type"] == "namespace"
     assert namespace["name"] == "canvas"
+    assert "Nomad Surface embedded Canvas" in namespace["description"]
     assert [tool["name"] for tool in namespace["tools"]] == [
         "read_scene",
         "apply_patch",
     ]
+    assert "page-space bounds" in namespace["tools"][0]["description"]
     apply_schema = namespace["tools"][1]["inputSchema"]
     assert apply_schema["required"] == ["command_id", "base_revision", "operations"]
+
+
+def test_canvas_initial_context_is_a_developer_message():
+    items = canvas_initial_context_items()
+
+    assert items == [
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": CANVAS_DEVELOPER_INSTRUCTIONS,
+                }
+            ],
+        }
+    ]
+    assert "canvas dynamic tools as the primary interface" in items[0]["content"][0][
+        "text"
+    ]

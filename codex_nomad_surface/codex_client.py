@@ -333,6 +333,7 @@ class CodexClient:
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
         dynamic_tool_handler: DynamicToolHandler | None = None,
         replace_missing_rollout: bool = False,
+        initial_context_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.base_url.startswith(("ws://", "wss://")):
             return {
@@ -355,6 +356,7 @@ class CodexClient:
                     runtime_callback,
                     dynamic_tool_handler,
                     replace_missing_rollout,
+                    initial_context_items,
                 )
             )
             runtime = result.get("runtime")
@@ -1084,6 +1086,7 @@ class CodexClient:
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
         dynamic_tool_handler: DynamicToolHandler | None = None,
         replace_missing_rollout: bool = False,
+        initial_context_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1126,6 +1129,7 @@ class CodexClient:
                     handle_approval_message,
                     stream_items=runtime["stream_items"],
                 )
+                started_new_thread = not thread_id
                 if thread_id:
                     resume_params: dict[str, Any] = {
                         "threadId": thread_id,
@@ -1154,6 +1158,7 @@ class CodexClient:
                             raise
                         runtime["replaced_thread_id"] = thread_id
                         thread_id = None
+                        started_new_thread = True
                 if not thread_id:
                     start_params: dict[str, Any] = {
                         "cwd": project_path,
@@ -1177,6 +1182,23 @@ class CodexClient:
                     )
                 thread_id = thread_result["thread"]["id"]
                 runtime["thread_id"] = thread_id
+                if started_new_thread and initial_context_items:
+                    runtime["initial_context_injection_pending"] = True
+                    await self._rpc_call(
+                        websocket,
+                        "thread/inject_items",
+                        {
+                            "threadId": thread_id,
+                            "items": initial_context_items,
+                        },
+                        output_parts,
+                        approvals,
+                        output_callback,
+                        handle_approval_message,
+                        runtime["stream_items"],
+                    )
+                    runtime.pop("initial_context_injection_pending", None)
+                    runtime["initial_context_injected"] = True
                 turn_params: dict[str, Any] = {
                     "threadId": thread_id,
                     "cwd": project_path,
@@ -1214,6 +1236,11 @@ class CodexClient:
             return self._approval_result(runtime)
         except Exception as exc:
             await self._close_chat_turn_ws(runtime)
+            result_thread_id = (
+                None
+                if runtime.get("initial_context_injection_pending")
+                else thread_id
+            )
             text_output = self._fallback_output_text(output_parts)
             if text_output:
                 text_output = f"{text_output}\n\n[send/receive error] {exc}"
@@ -1222,7 +1249,7 @@ class CodexClient:
             output_parts.append_block("error", text_output)
             return {
                 "ok": False,
-                "thread_id": thread_id,
+                "thread_id": result_thread_id,
                 "turn_id": runtime.get("turn_id"),
                 "output": self._output_parts_snapshot(output_parts)["output"]
                 or text_output,

@@ -45,7 +45,10 @@ const bindingProps = (terminal: "start" | "end") => ({
   snap: "none" as const,
 });
 
-const compactShape = (shape: Record<string, unknown>) => ({
+const compactShape = (
+  shape: Record<string, unknown>,
+  pageBounds: { x: number; y: number; w: number; h: number } | undefined,
+) => ({
   id: shape.id,
   type: shape.type,
   x: shape.x,
@@ -55,6 +58,20 @@ const compactShape = (shape: Record<string, unknown>) => ({
   index: shape.index,
   props: shape.props,
   meta: shape.meta,
+  ...(pageBounds
+    ? {
+        page_bounds: {
+          x: pageBounds.x,
+          y: pageBounds.y,
+          w: pageBounds.w,
+          h: pageBounds.h,
+          center: {
+            x: pageBounds.x + pageBounds.w / 2,
+            y: pageBounds.y + pageBounds.h / 2,
+          },
+        },
+      }
+    : {}),
 });
 
 const safeRef = (value: unknown): string =>
@@ -131,9 +148,20 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
     }
     return {
       page_id: activeEditor.getCurrentPageId(),
-      shapes: shapes.map((shape) =>
-        compactShape(shape as unknown as Record<string, unknown>),
-      ),
+      shapes: shapes.map((shape) => {
+        const pageBounds = activeEditor.getShapePageBounds(shape.id);
+        return compactShape(
+          shape as unknown as Record<string, unknown>,
+          pageBounds
+            ? {
+                x: pageBounds.x,
+                y: pageBounds.y,
+                w: pageBounds.w,
+                h: pageBounds.h,
+              }
+            : undefined,
+        );
+      }),
       bindings: Array.from(bindingById.values()),
     };
   }, []);
