@@ -34,6 +34,10 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
 - On wider screens, the canvas remains fixed in the viewport while chat history
   scrolls independently in a right-side panel; the native `st.chat_input` sits
   at the bottom of that panel so the canvas can use the full remaining height.
+- The Canvas chat keeps a configurable, bounded number of completed messages
+  visible (two by default). That stable history is separate from the live-turn
+  fragment, which continues to show the active prompt, progress, approvals, and
+  final response without polling and redrawing the completed history.
 - Canvas metadata and export actions are kept in a compact disclosure.
 
 The prototype does not yet implement asset ingestion, PNG rendering, command

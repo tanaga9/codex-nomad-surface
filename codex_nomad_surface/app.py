@@ -70,6 +70,7 @@ from codex_nomad_surface.promptform_defs import (
 )
 from codex_nomad_surface.settings import (
     AppSettings,
+    MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
     Project,
     load_settings,
     save_settings,
@@ -1622,6 +1623,8 @@ def render_chat(
     project: Project | None,
     chat: ChatSession | None,
     skip_latest_user: bool = False,
+    message_items: list[tuple[int, ChatMessage]] | None = None,
+    show_empty_state: bool = True,
 ) -> None:
     if not chat:
         return
@@ -1629,7 +1632,7 @@ def render_chat(
     skill_defs = load_available_skill_defs(
         client.base_url, project.path if project else ""
     )
-    if not chat.messages:
+    if not chat.messages and show_empty_state:
         if chat.thread_id:
             st.caption(
                 "An App Server thread is selected. Previous messages have not been loaded yet. The next submission will continue this thread."
@@ -1653,8 +1656,11 @@ def render_chat(
         and active_interrupt_draft.get("chat_id") == chat.id
         else ""
     )
-    message_items = []
-    for index, message in enumerate(chat.messages):
+    source_message_items = (
+        list(enumerate(chat.messages)) if message_items is None else message_items
+    )
+    visible_message_items = []
+    for index, message in source_message_items:
         metadata = message.metadata or {}
         if (
             pending
@@ -1677,9 +1683,11 @@ def render_chat(
             and metadata.get("kind") != "interrupt_draft"
         ):
             continue
-        message_items.append((index, message))
-    latest_progress_only_index = latest_progress_only_message_index(message_items)
-    for index, message in message_items:
+        visible_message_items.append((index, message))
+    latest_progress_only_index = latest_progress_only_message_index(
+        visible_message_items
+    )
+    for index, message in visible_message_items:
         if message.role == "promptform_picker":
             picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
             with st.chat_message("promptform-picker", avatar="🧩"):
@@ -2068,6 +2076,76 @@ def chat_history_panel(
         polling_chat_history_panel(client, project, chat)
         return
     render_chat_history_panel_contents(client, project, chat)
+
+
+def canvas_confirmed_message_items(
+    chat: ChatSession,
+    pending: dict[str, Any] | None,
+    limit: int,
+) -> list[tuple[int, ChatMessage]]:
+    """Return bounded confirmed history without mutating the full chat."""
+    if limit <= 0:
+        return []
+    active_run_id = ""
+    if isinstance(pending, dict) and pending.get("chat_id") == chat.id:
+        active_run_id = str(pending.get("run_id") or "")
+    items = [
+        (index, message)
+        for index, message in enumerate(chat.messages)
+        if not active_run_id
+        or str(message.metadata.get("run_id") or "") != active_run_id
+    ]
+    return items[-limit:]
+
+
+@st.fragment(run_every=CHAT_HISTORY_POLL_INTERVAL_SECONDS)
+def polling_canvas_live_turn(
+    client: CodexClient, project: Project, chat: ChatSession
+) -> None:
+    render_pending_turn(client, project, chat)
+
+
+def render_canvas_live_turn(
+    client: CodexClient, project: Project, chat: ChatSession
+) -> None:
+    pending = st.session_state.get("pending_turn")
+    polling_statuses = {
+        TURN_RUN_STARTING,
+        TURN_RUN_RUNNING,
+        TURN_RUN_RESPONDING_APPROVAL,
+    }
+    if (
+        isinstance(pending, dict)
+        and pending.get("chat_id") == chat.id
+        and pending.get("status") in polling_statuses
+    ):
+        drain_pending_turn_events(pending)
+        if not pending.get("result") and not pending.get("approval"):
+            polling_canvas_live_turn(client, project, chat)
+            return
+    render_pending_turn(client, project, chat)
+
+
+def canvas_chat_history_panel(
+    client: CodexClient, project: Project, chat: ChatSession
+) -> None:
+    pending = st.session_state.get("pending_turn")
+    limit = settings_state().canvas_chat_history_message_limit
+    confirmed_items = canvas_confirmed_message_items(chat, pending, limit)
+    with st.container(
+        height="stretch",
+        autoscroll=True,
+        key="chat-history-panel",
+    ):
+        if confirmed_items:
+            render_chat(
+                client,
+                project,
+                chat,
+                message_items=confirmed_items,
+                show_empty_state=False,
+            )
+        render_canvas_live_turn(client, project, chat)
 
 
 def render_pending_turn(
@@ -4753,7 +4831,7 @@ def canvas_workspace(
                     inject_chat_input_bridge()
                     inject_chat_input_ime_guard()
                     inject_chat_input_outbox(chat.id)
-                    chat_history_panel(client, project, chat)
+                    canvas_chat_history_panel(client, project, chat)
                     chat_composer(client, project, chat)
 
 
@@ -5241,9 +5319,24 @@ def settings_screen(
             value=settings.app_server_url,
             disabled=disabled,
         )
+        canvas_chat_history_message_limit = st.number_input(
+            "Canvas recent messages",
+            min_value=0,
+            max_value=MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
+            value=settings.canvas_chat_history_message_limit,
+            step=1,
+            help=(
+                "Number of completed messages kept visible in Canvas. "
+                "The active message and live progress are always shown."
+            ),
+            disabled=disabled,
+        )
         submitted = st.form_submit_button("Save", disabled=disabled)
     if submitted:
         settings.app_server_url = url.strip()
+        settings.canvas_chat_history_message_limit = int(
+            canvas_chat_history_message_limit
+        )
         st.session_state.app_server_launch_in_progress = False
         st.session_state.app_server_launch_failure_returncode = None
         persist()

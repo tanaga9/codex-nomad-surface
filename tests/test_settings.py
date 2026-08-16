@@ -5,6 +5,8 @@ import pytest
 from codex_nomad_surface import settings
 from codex_nomad_surface.settings import (
     AppSettings,
+    DEFAULT_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
+    MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
     auth_dummy_username_field_enabled,
     auth_session_days,
     load_settings,
@@ -24,6 +26,7 @@ def test_new_chat_runtime_defaults_round_trip(
             new_chat_model_provider="openai",
             new_chat_model="gpt-test",
             new_chat_reasoning_effort="high",
+            canvas_chat_history_message_limit=3,
         )
     )
 
@@ -33,6 +36,26 @@ def test_new_chat_runtime_defaults_round_trip(
     assert loaded.new_chat_model_provider == "openai"
     assert loaded.new_chat_model == "gpt-test"
     assert loaded.new_chat_reasoning_effort == "high"
+    assert loaded.canvas_chat_history_message_limit == 3
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (None, DEFAULT_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT),
+        ("invalid", DEFAULT_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT),
+        (-1, 0),
+        (999, MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT),
+    ],
+)
+def test_canvas_chat_history_message_limit_is_bounded(
+    raw_value: object, expected: int
+) -> None:
+    raw = {}
+    if raw_value is not None:
+        raw["canvas_chat_history_message_limit"] = raw_value
+
+    assert AppSettings.from_dict(raw).canvas_chat_history_message_limit == expected
 
 
 def test_auth_dummy_username_field_env_flag(

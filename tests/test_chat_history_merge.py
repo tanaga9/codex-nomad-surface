@@ -1,6 +1,7 @@
 import unittest
 
 from codex_nomad_surface.app import (
+    canvas_confirmed_message_items,
     codex_output_is_progress_only,
     latest_progress_only_message_index,
     merge_thread_history_messages,
@@ -154,6 +155,31 @@ class ChatHistoryMergeTests(unittest.TestCase):
         set_user_turn_delivery_status(chat, "run-1", "delivered")
 
         self.assertEqual(chat.messages[0].metadata["delivery_status"], "delivered")
+
+    def test_canvas_history_is_bounded_without_mutating_chat(self) -> None:
+        chat = ChatSession.new("/project")
+        chat.add_message("user", "First")
+        chat.add_message("assistant", "Previous response")
+        chat.add_message(
+            "user",
+            "Current request",
+            metadata={"kind": "turn_prompt", "run_id": "run-1"},
+        )
+
+        items = canvas_confirmed_message_items(
+            chat,
+            {"chat_id": chat.id, "run_id": "run-1"},
+            limit=1,
+        )
+
+        self.assertEqual([message.content for _, message in items], ["Previous response"])
+        self.assertEqual(len(chat.messages), 3)
+
+    def test_canvas_history_can_hide_all_completed_messages(self) -> None:
+        chat = ChatSession.new("/project")
+        chat.add_message("assistant", "Previous response")
+
+        self.assertEqual(canvas_confirmed_message_items(chat, None, limit=0), [])
 
 
 if __name__ == "__main__":
