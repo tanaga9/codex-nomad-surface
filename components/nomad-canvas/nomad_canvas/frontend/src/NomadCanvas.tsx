@@ -4,6 +4,7 @@ import {
   TLStoreSnapshot,
   Tldraw,
   createShapeId,
+  getSvgAsImage,
   getSnapshot,
   toRichText,
 } from "tldraw";
@@ -36,6 +37,75 @@ type CanvasRequest = {
 type PatchOperation = Record<string, unknown> & { op?: string };
 type ConnectionState =
   "connecting" | "connected" | "reconnecting" | "disconnected";
+
+const CANVAS_VISION_MAX_DIMENSION = 1536;
+const CANVAS_VISION_MAX_BYTES = 8 * 1024 * 1024;
+const CANVAS_VISION_EXPORT_ATTEMPTS = 3;
+const CANVAS_SNAPSHOT_STABILITY_ATTEMPTS = 3;
+const CANVAS_EXPORT_PADDING = 32;
+
+const blobToDataUrl = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () =>
+      reject(reader.error || new Error("Image export failed."));
+    reader.readAsDataURL(blob);
+  });
+
+type SceneSvgExport = {
+  svg: string;
+  width: number;
+  height: number;
+};
+
+const renderSceneImage = async (exported: SceneSvgExport | undefined) => {
+  if (!exported) {
+    return {
+      preview_image_url: "",
+      preview_image_width: 0,
+      preview_image_height: 0,
+    };
+  }
+
+  let pixelRatio = Math.min(
+    1,
+    CANVAS_VISION_MAX_DIMENSION / Math.max(exported.width, exported.height),
+  );
+  for (let attempt = 0; attempt < CANVAS_VISION_EXPORT_ATTEMPTS; attempt += 1) {
+    const image = await getSvgAsImage(exported.svg, {
+      type: "png",
+      width: exported.width,
+      height: exported.height,
+      pixelRatio,
+    });
+    if (!image) throw new Error("Could not construct canvas image.");
+    if (image.size <= CANVAS_VISION_MAX_BYTES) {
+      return {
+        preview_image_url: await blobToDataUrl(image),
+        preview_image_width: Math.round(exported.width * pixelRatio),
+        preview_image_height: Math.round(exported.height * pixelRatio),
+      };
+    }
+    const sizeRatio = Math.sqrt(CANVAS_VISION_MAX_BYTES / image.size) * 0.95;
+    pixelRatio *= Math.min(0.9, sizeRatio);
+  }
+  throw new Error("Canvas image remains too large after downscaling.");
+};
+
+const renderSceneImageSafely = async (exported: SceneSvgExport | undefined) => {
+  try {
+    return await renderSceneImage(exported);
+  } catch (error) {
+    return {
+      preview_image_url: "",
+      preview_image_width: 0,
+      preview_image_height: 0,
+      preview_image_error:
+        error instanceof Error ? error.message : "Canvas image export failed.",
+    };
+  }
+};
 
 const bindingProps = (terminal: "start" | "end") => ({
   terminal,
@@ -79,6 +149,39 @@ const safeRef = (value: unknown): string =>
     .replace(/[^a-zA-Z0-9_-]/g, "-")
     .slice(0, 48);
 
+const readScene = (
+  activeEditor: Editor,
+  shapes = activeEditor.getCurrentPageShapes(),
+) => {
+  const bindingById = new Map<string, unknown>();
+  for (const shape of shapes) {
+    for (const binding of activeEditor.getBindingsFromShape(
+      shape.id,
+      "arrow",
+    )) {
+      bindingById.set(binding.id, binding);
+    }
+  }
+  return {
+    page_id: activeEditor.getCurrentPageId(),
+    shapes: shapes.map((shape) => {
+      const pageBounds = activeEditor.getShapePageBounds(shape.id);
+      return compactShape(
+        shape as unknown as Record<string, unknown>,
+        pageBounds
+          ? {
+              x: pageBounds.x,
+              y: pageBounds.y,
+              w: pageBounds.w,
+              h: pageBounds.h,
+            }
+          : undefined,
+      );
+    }),
+    bindings: Array.from(bindingById.values()),
+  };
+};
+
 const NomadCanvas: FC<NomadCanvasProps> = ({
   canvasId,
   initialDocument,
@@ -91,32 +194,67 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const websocketRef = useRef<WebSocket | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const applyingRemoteRef = useRef(false);
+  const publishQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const documentVersionRef = useRef(0);
 
   const publishSnapshot = useCallback(
-    async (activeEditor: Editor) => {
-      const document = getSnapshot(activeEditor.store).document;
-      const shapes = activeEditor.getCurrentPageShapes();
-      const exported = shapes.length
-        ? await activeEditor.getSvgString(shapes, {
-            background: true,
-            padding: 32,
-          })
-        : undefined;
-      const previewSvg = exported?.svg || "";
-      const savedAt = new Date().toISOString();
-      const payload = {
-        document,
-        preview_svg: previewSvg,
-        saved_at: savedAt,
-        shape_count: shapes.length,
+    (activeEditor: Editor) => {
+      const publish = async () => {
+        for (
+          let attempt = 0;
+          attempt < CANVAS_SNAPSHOT_STABILITY_ATTEMPTS;
+          attempt += 1
+        ) {
+          const documentVersion = documentVersionRef.current;
+          const document = getSnapshot(activeEditor.store).document;
+          const documentFingerprint = JSON.stringify(document);
+          const shapes = activeEditor.getCurrentPageShapes();
+          const scene = readScene(activeEditor, shapes);
+          const exported = shapes.length
+            ? await activeEditor.getSvgString(shapes, {
+                background: true,
+                padding: CANVAS_EXPORT_PADDING,
+              })
+            : undefined;
+          const sceneImage = await renderSceneImageSafely(exported);
+          const currentDocument = getSnapshot(activeEditor.store).document;
+          if (
+            documentVersion !== documentVersionRef.current ||
+            documentFingerprint !== JSON.stringify(currentDocument)
+          ) {
+            continue;
+          }
+
+          const previewSvg = exported?.svg || "";
+          const savedAt = new Date().toISOString();
+          const payload = {
+            document,
+            preview_svg: previewSvg,
+            saved_at: savedAt,
+            shape_count: shapes.length,
+            ...sceneImage,
+          };
+
+          if (websocketRef.current?.readyState === WebSocket.OPEN) {
+            websocketRef.current.send(
+              JSON.stringify({
+                type: "snapshot",
+                canvas_id: canvasId,
+                ...payload,
+              }),
+            );
+          }
+          return { ...payload, scene };
+        }
+        throw new Error("Canvas changed while preparing its visual snapshot.");
       };
 
-      if (websocketRef.current?.readyState === WebSocket.OPEN) {
-        websocketRef.current.send(
-          JSON.stringify({ type: "snapshot", canvas_id: canvasId, ...payload }),
-        );
-      }
-      return payload;
+      const queued = publishQueueRef.current.then(publish, publish);
+      publishQueueRef.current = queued.then(
+        () => undefined,
+        () => undefined,
+      );
+      return queued;
     },
     [canvasId],
   );
@@ -129,42 +267,11 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       }
       saveTimerRef.current = window.setTimeout(() => {
         saveTimerRef.current = null;
-        void publishSnapshot(activeEditor);
+        void publishSnapshot(activeEditor).catch(() => undefined);
       }, 700);
     },
     [publishSnapshot],
   );
-
-  const readScene = useCallback((activeEditor: Editor) => {
-    const shapes = activeEditor.getCurrentPageShapes();
-    const bindingById = new Map<string, unknown>();
-    for (const shape of shapes) {
-      for (const binding of activeEditor.getBindingsFromShape(
-        shape.id,
-        "arrow",
-      )) {
-        bindingById.set(binding.id, binding);
-      }
-    }
-    return {
-      page_id: activeEditor.getCurrentPageId(),
-      shapes: shapes.map((shape) => {
-        const pageBounds = activeEditor.getShapePageBounds(shape.id);
-        return compactShape(
-          shape as unknown as Record<string, unknown>,
-          pageBounds
-            ? {
-                x: pageBounds.x,
-                y: pageBounds.y,
-                w: pageBounds.w,
-                h: pageBounds.h,
-              }
-            : undefined,
-        );
-      }),
-      bindings: Array.from(bindingById.values()),
-    };
-  }, []);
 
   const applyPatch = useCallback(
     async (activeEditor: Editor, args: Record<string, unknown>) => {
@@ -329,18 +436,21 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         ...snapshot,
         changed_ids: Array.from(changedIds),
         refs: Object.fromEntries(idsByRef),
-        scene: readScene(activeEditor),
       };
     },
-    [publishSnapshot, readScene],
+    [publishSnapshot],
   );
 
   useEffect(() => {
     if (!editor) return;
-    const unsubscribe = editor.store.listen(() => scheduleSnapshot(editor), {
-      scope: "document",
-    });
-    void publishSnapshot(editor);
+    const unsubscribe = editor.store.listen(
+      () => {
+        documentVersionRef.current += 1;
+        scheduleSnapshot(editor);
+      },
+      { scope: "document" },
+    );
+    void publishSnapshot(editor).catch(() => undefined);
     return () => {
       unsubscribe();
       if (saveTimerRef.current !== null) {
@@ -372,7 +482,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         nextWebsocket.send(
           JSON.stringify({ type: "hello", canvas_id: canvasId }),
         );
-        void publishSnapshot(editor);
+        void publishSnapshot(editor).catch(() => undefined);
       };
       nextWebsocket.onclose = (event) => {
         if (disposed) return;
@@ -400,10 +510,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           try {
             const payload =
               request.method === "read_scene"
-                ? {
-                    scene: readScene(editor),
-                    ...(await publishSnapshot(editor)),
-                  }
+                ? await publishSnapshot(editor)
                 : await applyPatch(editor, request.arguments || {});
             nextWebsocket.send(
               JSON.stringify({
@@ -437,7 +544,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       websocket?.close();
       websocketRef.current = null;
     };
-  }, [applyPatch, canvasId, editor, publishSnapshot, readScene, websocketUrl]);
+  }, [applyPatch, canvasId, editor, publishSnapshot, websocketUrl]);
 
   return (
     <div className="nomad-canvas-root">

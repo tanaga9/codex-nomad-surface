@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ from typing import Any
 CANVAS_ROOT = Path(".nomad_surface") / "canvases"
 CANVAS_ID_PATTERN = re.compile(r"^canvas-[0-9a-f]{24}$")
 CANVAS_REVISION_LIMIT = 40
+CANVAS_PREVIEW_IMAGE_MIME_TYPE = "image/png"
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -122,6 +124,7 @@ def _initialize_canvas_manifest(
             "current_revision": 0,
             "document": "current/document.json",
             "preview": "current/preview.svg",
+            "visual_preview": "current/preview.png",
             "content_hash": "",
             "created_at": created_at,
             "updated_at": created_at,
@@ -230,6 +233,22 @@ def load_canvas_preview(canvas_id: str) -> str:
         return ""
 
 
+def load_canvas_visual_preview(canvas_id: str) -> bytes:
+    path = canvas_directory(canvas_id) / "current" / "preview.png"
+    try:
+        return path.read_bytes()
+    except OSError:
+        return b""
+
+
+def canvas_visual_preview_data_url(canvas_id: str) -> str:
+    preview = load_canvas_visual_preview(canvas_id)
+    if not preview:
+        return ""
+    encoded = base64.b64encode(preview).decode("ascii")
+    return f"data:{CANVAS_PREVIEW_IMAGE_MIME_TYPE};base64,{encoded}"
+
+
 def _prune_revisions(directory: Path) -> None:
     revisions = sorted(
         (item for item in directory.iterdir() if item.is_dir() and item.name.isdigit()),
@@ -246,6 +265,7 @@ def save_canvas_snapshot(
     canvas_id: str,
     document: dict[str, Any],
     preview_svg: str = "",
+    preview_image: bytes | None = b"",
     *,
     expected_revision: int | None = None,
 ) -> dict[str, Any]:
@@ -265,9 +285,15 @@ def save_canvas_snapshot(
         directory = canvas_directory(canvas_id)
         current_document = directory / "current" / "document.json"
         current_preview = directory / "current" / "preview.svg"
+        current_visual_preview = directory / "current" / "preview.png"
         if manifest.get("content_hash") == content_hash:
             if preview_svg != load_canvas_preview(canvas_id):
                 _atomic_write(current_preview, preview_svg.encode("utf-8"))
+            if (
+                preview_image is not None
+                and preview_image != load_canvas_visual_preview(canvas_id)
+            ):
+                _atomic_write(current_visual_preview, preview_image)
             return manifest
 
         revision = current_revision + 1
@@ -282,6 +308,7 @@ def save_canvas_snapshot(
         )
         _atomic_write(current_document, document_bytes)
         _atomic_write(current_preview, preview_svg.encode("utf-8"))
+        _atomic_write(current_visual_preview, preview_image or b"")
 
         manifest = {
             **manifest,
@@ -299,6 +326,7 @@ def canvas_file_references(canvas_id: str) -> dict[str, str]:
     return {
         "document_path": str(directory / "current" / "document.json"),
         "preview_path": str(directory / "current" / "preview.svg"),
+        "visual_preview_path": str(directory / "current" / "preview.png"),
     }
 
 

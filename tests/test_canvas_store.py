@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_nomad_surface import canvas_store
+from codex_nomad_surface import canvas_runtime, canvas_store
 from codex_nomad_surface.canvas_runtime import (
     CANVAS_DEVELOPER_INSTRUCTIONS,
     CanvasBroker,
@@ -34,15 +34,20 @@ def test_canvas_snapshots_are_file_backed_and_revisioned(isolated_canvas_root):
         }
     }
 
-    saved = canvas_store.save_canvas_snapshot(canvas_id, document, "<svg />")
+    preview_image = b"\x89PNG\r\n\x1a\npreview"
+    saved = canvas_store.save_canvas_snapshot(
+        canvas_id, document, "<svg />", preview_image
+    )
     references = canvas_store.canvas_file_references(canvas_id)
 
     assert saved["current_revision"] == 1
     assert saved["project_path"] == "/path/to/project"
     assert canvas_store.load_canvas_document(canvas_id) == document
     assert canvas_store.load_canvas_preview(canvas_id) == "<svg />"
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == preview_image
     assert json.loads(Path(references["document_path"]).read_text(encoding="utf-8")) == document
     assert Path(references["preview_path"]).read_text(encoding="utf-8") == "<svg />"
+    assert Path(references["visual_preview_path"]).read_bytes() == preview_image
     assert (
         isolated_canvas_root
         / canvas_id
@@ -67,6 +72,8 @@ def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
                 }
             }
         },
+        "<svg />",
+        b"\x89PNG\r\n\x1a\npreview",
     )
 
     result = canvas_dynamic_tool_handler("thread-offline-read")(
@@ -79,6 +86,10 @@ def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
     assert payload["revision"] == 1
     assert payload["scene"]["shapes"][0]["id"] == "shape:one"
     assert payload["document_path"].endswith("current/document.json")
+    assert result["contentItems"][1]["type"] == "inputImage"
+    assert result["contentItems"][1]["imageUrl"].startswith(
+        "data:image/png;base64,"
+    )
 
 
 def test_draft_canvas_binds_to_thread_without_moving_files(isolated_canvas_root):
@@ -117,6 +128,101 @@ def test_dynamic_tool_handler_can_target_draft_canvas(isolated_canvas_root):
     assert payload["scene"]["shapes"][0]["id"] == "shape:draft"
 
 
+def test_live_read_scene_returns_visual_input_without_embedding_it_in_text(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-live-visual")
+    image_url = "data:image/png;base64,iVBORw0KGgo="
+    monkeypatch.setattr(
+        canvas_runtime.CANVAS_BROKER,
+        "call",
+        lambda canvas_id, tool, arguments: {
+            "ok": True,
+            "payload": {
+                "scene": {"shapes": []},
+                "revision": 0,
+                "preview_image_url": image_url,
+            },
+        },
+    )
+
+    result = canvas_dynamic_tool_handler_for_canvas(manifest["canvas_id"])(
+        {"namespace": "canvas", "tool": "read_scene", "arguments": {}}
+    )
+
+    assert result["success"] is True
+    assert result["contentItems"][1] == {
+        "type": "inputImage",
+        "imageUrl": image_url,
+    }
+    assert image_url not in result["contentItems"][0]["text"]
+
+
+def test_rejected_visual_preview_does_not_block_document_save(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-rejected-visual")
+    canvas_id = manifest["canvas_id"]
+    document = {
+        "store": {"shape:safe": {"id": "shape:safe", "typeName": "shape"}}
+    }
+    monkeypatch.setattr(canvas_runtime, "CANVAS_PREVIEW_IMAGE_MAX_BYTES", 2)
+
+    saved, preview_error = canvas_runtime._save_canvas_payload(
+        canvas_id,
+        document,
+        "<svg />",
+        "data:image/png;base64,aW1hZ2U=",
+    )
+
+    assert saved["current_revision"] == 1
+    assert preview_error == "Canvas preview is too large."
+    assert canvas_store.load_canvas_document(canvas_id) == document
+    assert canvas_store.load_canvas_preview(canvas_id) == "<svg />"
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == b""
+
+
+def test_rejected_visual_preview_preserves_valid_image_for_same_document(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-preserved-visual")
+    canvas_id = manifest["canvas_id"]
+    document = {
+        "store": {"shape:safe": {"id": "shape:safe", "typeName": "shape"}}
+    }
+    preview_image = b"valid preview"
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        document,
+        "<svg />",
+        preview_image,
+    )
+    monkeypatch.setattr(canvas_runtime, "CANVAS_PREVIEW_IMAGE_MAX_BYTES", 2)
+
+    saved, preview_error = canvas_runtime._save_canvas_payload(
+        canvas_id,
+        document,
+        "<svg />",
+        "data:image/png;base64,aW1hZ2U=",
+    )
+
+    assert saved["current_revision"] == 1
+    assert preview_error == "Canvas preview is too large."
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == preview_image
+
+    saved, preview_error = canvas_runtime._save_canvas_payload(
+        canvas_id,
+        document,
+        "<svg />",
+        "",
+        "Browser image export failed.",
+    )
+
+    assert saved["current_revision"] == 1
+    assert preview_error == "Browser image export failed."
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == preview_image
+
+
 def test_empty_canvas_clears_saved_preview(isolated_canvas_root):
     manifest = canvas_store.initialize_canvas("thread-preview-clear")
     canvas_id = manifest["canvas_id"]
@@ -124,11 +230,13 @@ def test_empty_canvas_clears_saved_preview(isolated_canvas_root):
         canvas_id,
         {"store": {"shape:one": {"id": "shape:one", "typeName": "shape"}}},
         "<svg>old preview</svg>",
+        b"old preview image",
     )
 
     canvas_store.save_canvas_snapshot(canvas_id, {"store": {}}, "")
 
     assert canvas_store.load_canvas_preview(canvas_id) == ""
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == b""
 
 
 def test_canvas_save_reuses_an_incomplete_next_revision(isolated_canvas_root):
@@ -176,6 +284,7 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
         "apply_patch",
     ]
     assert "page-space bounds" in namespace["tools"][0]["description"]
+    assert "whole-canvas image" in namespace["tools"][0]["description"]
     apply_schema = namespace["tools"][1]["inputSchema"]
     assert apply_schema["required"] == ["command_id", "base_revision", "operations"]
 
@@ -198,3 +307,4 @@ def test_canvas_initial_context_is_a_developer_message():
     assert "canvas dynamic tools as the primary interface" in items[0]["content"][0][
         "text"
     ]
+    assert "whole-canvas image" in items[0]["content"][0]["text"]

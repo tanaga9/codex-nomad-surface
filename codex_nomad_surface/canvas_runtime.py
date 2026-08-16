@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import queue
 import threading
@@ -14,6 +16,7 @@ from codex_nomad_surface.canvas_store import (
     canvas_exists,
     canvas_file_references,
     canvas_id_for_thread,
+    canvas_visual_preview_data_url,
     load_canvas_document,
     read_canvas_manifest,
     save_canvas_snapshot,
@@ -28,10 +31,17 @@ from codex_nomad_surface.http_gate import (
 
 CANVAS_TOOL_TIMEOUT_SECONDS = 25.0
 CANVAS_REPLACED_CLOSE_CODE = 4001
+CANVAS_PREVIEW_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+CANVAS_PREVIEW_IMAGE_PREFIX = "data:image/png;base64,"
 CANVAS_DEVELOPER_INSTRUCTIONS = (
     "This thread uses the Nomad Surface embedded Canvas. When a request concerns "
     "the canvas, use the canvas dynamic tools as the primary interface. Read the "
-    "current scene before scene-dependent edits, then apply edits through "
+    "current scene before scene-dependent edits. A non-empty read_scene result "
+    "normally includes a whole-canvas image; interpret it together with the "
+    "structured shape and binding data so freehand marks are understood as a "
+    "composition, not only as isolated objects. If the result reports that the "
+    "visual preview is unavailable, state that limitation rather than guessing. "
+    "Then apply edits through "
     "canvas.apply_patch using the returned revision. Treat backing document and "
     "preview files as persistence artifacts, not as the canvas interface. Do not "
     "inspect or modify those files, and do not use external or offline canvas "
@@ -39,6 +49,50 @@ CANVAS_DEVELOPER_INSTRUCTIONS = (
     "not provide enough information, explain the limitation instead of silently "
     "switching interfaces."
 )
+
+
+def _decode_preview_image(data_url: object) -> bytes:
+    value = str(data_url or "")
+    if not value:
+        return b""
+    if not value.startswith(CANVAS_PREVIEW_IMAGE_PREFIX):
+        raise ValueError("Canvas preview must be a PNG data URL.")
+    encoded = value[len(CANVAS_PREVIEW_IMAGE_PREFIX) :]
+    if len(encoded) > (CANVAS_PREVIEW_IMAGE_MAX_BYTES * 4 // 3) + 4:
+        raise ValueError("Canvas preview is too large.")
+    try:
+        preview = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Canvas preview is not valid base64.") from exc
+    if len(preview) > CANVAS_PREVIEW_IMAGE_MAX_BYTES:
+        raise ValueError("Canvas preview is too large.")
+    return preview
+
+
+def _save_canvas_payload(
+    canvas_id: str,
+    document: dict[str, Any],
+    preview_svg: str,
+    preview_image_url: object,
+    preview_image_error: object = "",
+) -> tuple[dict[str, Any], str]:
+    preview_error = str(preview_image_error or "")
+    if not preview_image_url and preview_svg:
+        preview_image = None
+        preview_error = preview_error or "Canvas preview image is unavailable."
+    else:
+        try:
+            preview_image = _decode_preview_image(preview_image_url)
+        except ValueError as exc:
+            preview_image = None
+            preview_error = str(exc)
+    manifest = save_canvas_snapshot(
+        canvas_id,
+        document,
+        preview_svg,
+        preview_image,
+    )
+    return manifest, preview_error
 
 
 @dataclass
@@ -159,10 +213,12 @@ async def canvas_websocket(websocket: WebSocket) -> None:
                 document = message.get("document")
                 if isinstance(document, dict):
                     await asyncio.to_thread(
-                        save_canvas_snapshot,
+                        _save_canvas_payload,
                         canvas_id,
                         document,
                         str(message.get("preview_svg") or ""),
+                        message.get("preview_image_url"),
+                        message.get("preview_image_error"),
                     )
                 continue
             if message_type != "response":
@@ -177,20 +233,30 @@ async def canvas_websocket(websocket: WebSocket) -> None:
             if isinstance(payload, dict):
                 document = payload.pop("document", None)
                 preview_svg = str(payload.pop("preview_svg", "") or "")
+                preview_image_url = str(
+                    payload.pop("preview_image_url", "") or ""
+                )
                 if isinstance(document, dict):
                     try:
-                        manifest = await asyncio.to_thread(
-                            save_canvas_snapshot,
+                        manifest, preview_error = await asyncio.to_thread(
+                            _save_canvas_payload,
                             canvas_id,
                             document,
                             preview_svg,
+                            preview_image_url,
+                            payload.get("preview_image_error"),
                         )
                         payload["revision"] = int(
                             manifest.get("current_revision") or 0
                         )
+                        if preview_error:
+                            preview_image_url = ""
+                            payload["preview_image_error"] = preview_error
                     except Exception as exc:
                         result = {"ok": False, "error": f"save_failed: {exc}"}
                 payload.update(canvas_file_references(canvas_id))
+                if preview_image_url:
+                    payload["preview_image_url"] = preview_image_url
                 result["payload"] = payload
             CANVAS_BROKER.resolve(request_id, result)
     except WebSocketDisconnect:
@@ -216,7 +282,8 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                     "description": (
                         "Read the current canvas before editing it. Returns shapes, "
                         "their page-space bounds when available, bindings, page "
-                        "information, and the current revision."
+                        "information, the current revision, and a whole-canvas image "
+                        "for visual interpretation when the canvas is non-empty."
                     ),
                     "inputSchema": {
                         "type": "object",
@@ -285,15 +352,23 @@ def canvas_initial_context_items() -> list[dict[str, Any]]:
     ]
 
 
-def _content_result(success: bool, value: dict[str, Any]) -> dict[str, Any]:
+def _content_result(
+    success: bool,
+    value: dict[str, Any],
+    *,
+    image_url: str = "",
+) -> dict[str, Any]:
+    content_items: list[dict[str, str]] = [
+        {
+            "type": "inputText",
+            "text": json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+        }
+    ]
+    if image_url:
+        content_items.append({"type": "inputImage", "imageUrl": image_url})
     return {
         "success": success,
-        "contentItems": [
-            {
-                "type": "inputText",
-                "text": json.dumps(value, ensure_ascii=False, separators=(",", ":")),
-            }
-        ],
+        "contentItems": content_items,
     }
 
 
@@ -326,14 +401,17 @@ def canvas_dynamic_tool_handler_for_canvas(
         except RuntimeError as exc:
             if tool == "read_scene":
                 document = load_canvas_document(canvas_id)
+                image_url = canvas_visual_preview_data_url(canvas_id)
                 return _content_result(
                     True,
                     {
                         "live": False,
                         "revision": revision,
                         "scene": scene_from_document(document),
+                        "visual_preview_available": bool(image_url),
                         **canvas_file_references(canvas_id),
                     },
+                    image_url=image_url,
                 )
             return _content_result(False, {"error": str(exc)})
         except TimeoutError as exc:
@@ -343,8 +421,13 @@ def canvas_dynamic_tool_handler_for_canvas(
         payload = broker_result.get("payload")
         if not isinstance(payload, dict):
             payload = {"error": broker_result.get("error") or "canvas_call_failed"}
+        image_url = str(payload.pop("preview_image_url", "") or "")
         payload.setdefault("live", True)
-        return _content_result(success, payload)
+        return _content_result(
+            success,
+            payload,
+            image_url=image_url if success and tool == "read_scene" else "",
+        )
 
     return handle
 

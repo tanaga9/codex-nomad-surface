@@ -222,8 +222,9 @@ The initial Canvas Skin exposes only two dynamic tools.
 
 ### `canvas.read_scene`
 
-Returns a compact semantic representation rather than the complete raw tldraw
-store by default.
+Returns a compact semantic representation plus a whole-canvas PNG image rather
+than relying on the raw tldraw store alone. Codex uses the image for visual
+composition and the structured scene for exact object identity and geometry.
 
 The result includes:
 
@@ -234,10 +235,13 @@ The result includes:
 - bindings and connector endpoints;
 - optionally the current selection or viewport subset;
 - file references for the latest document and preview.
+- an `inputImage` content item containing the whole current canvas when it is
+  non-empty.
 
 When the live editor is disconnected, this tool may read the most recent saved
 document. Its result must state that it is a saved checkpoint rather than live
-state.
+state. Raster export or validation failure never blocks the canonical document
+or SVG save; the result reports that the visual preview is unavailable instead.
 
 ### `canvas.apply_patch`
 
@@ -310,7 +314,8 @@ illustrative layout is:
 
 - `document.json` is the canonical editable tldraw document snapshot.
 - `preview.svg` is the preferred always-addressable visual representation.
-- `preview.png` is a derived thumbnail or compatibility image.
+- `preview.png` is the bounded whole-canvas raster used for Codex visual
+  recognition and as a compatibility image.
 - `assets/` contains validated image and media files referenced by the document.
 - A self-contained `.tldraw` file is generated on demand for interchange rather
   than rewritten after every editor change.
