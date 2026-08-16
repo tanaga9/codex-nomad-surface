@@ -13,8 +13,6 @@ DEFAULT_APP_SERVER_URL = "ws://127.0.0.1:8080"
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DEFAULT_AUTH_SESSION_DAYS = 180
 MAX_AUTH_SESSION_DAYS = 365
-DEFAULT_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT = 2
-MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT = 20
 
 
 @dataclass
@@ -29,28 +27,10 @@ class AppSettings:
     new_chat_model_provider: str = ""
     new_chat_model: str = ""
     new_chat_reasoning_effort: str = ""
-    canvas_chat_history_message_limit: int = (
-        DEFAULT_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT
-    )
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "AppSettings":
         app_server_url = raw.get("app_server_url") or cls.app_server_url
-        try:
-            canvas_chat_history_message_limit = int(
-                raw.get(
-                    "canvas_chat_history_message_limit",
-                    DEFAULT_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
-                )
-            )
-        except (TypeError, ValueError):
-            canvas_chat_history_message_limit = (
-                DEFAULT_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT
-            )
-        canvas_chat_history_message_limit = min(
-            max(canvas_chat_history_message_limit, 0),
-            MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
-        )
         return cls(
             app_server_url=app_server_url,
             new_chat_model_provider=str(raw.get("new_chat_model_provider") or ""),
@@ -58,7 +38,6 @@ class AppSettings:
             new_chat_reasoning_effort=str(
                 raw.get("new_chat_reasoning_effort") or ""
             ),
-            canvas_chat_history_message_limit=canvas_chat_history_message_limit,
         )
 
     def to_dict(self) -> dict[str, Any]:

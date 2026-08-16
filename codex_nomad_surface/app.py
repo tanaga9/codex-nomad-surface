@@ -70,7 +70,6 @@ from codex_nomad_surface.promptform_defs import (
 )
 from codex_nomad_surface.settings import (
     AppSettings,
-    MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
     Project,
     load_settings,
     save_settings,
@@ -121,6 +120,7 @@ DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
 CHAT_HISTORY_RECENT_MESSAGE_LIMIT = 50
 CHAT_HISTORY_LOAD_EARLIER_LIMIT = 40
+CANVAS_CHAT_HISTORY_MESSAGE_LIMIT = 2
 CHAT_INPUT_IMAGE_FILE_TYPES = ("png", "jpg", "jpeg", "webp", "gif")
 CHAT_INPUT_IMAGE_MIME_TYPES = {
     "image/png",
@@ -2130,8 +2130,9 @@ def canvas_chat_history_panel(
     client: CodexClient, project: Project, chat: ChatSession
 ) -> None:
     pending = st.session_state.get("pending_turn")
-    limit = settings_state().canvas_chat_history_message_limit
-    confirmed_items = canvas_confirmed_message_items(chat, pending, limit)
+    confirmed_items = canvas_confirmed_message_items(
+        chat, pending, CANVAS_CHAT_HISTORY_MESSAGE_LIMIT
+    )
     with st.container(
         height="stretch",
         autoscroll=True,
@@ -5319,24 +5320,9 @@ def settings_screen(
             value=settings.app_server_url,
             disabled=disabled,
         )
-        canvas_chat_history_message_limit = st.number_input(
-            "Canvas recent messages",
-            min_value=0,
-            max_value=MAX_CANVAS_CHAT_HISTORY_MESSAGE_LIMIT,
-            value=settings.canvas_chat_history_message_limit,
-            step=1,
-            help=(
-                "Number of completed messages kept visible in Canvas. "
-                "The active message and live progress are always shown."
-            ),
-            disabled=disabled,
-        )
         submitted = st.form_submit_button("Save", disabled=disabled)
     if submitted:
         settings.app_server_url = url.strip()
-        settings.canvas_chat_history_message_limit = int(
-            canvas_chat_history_message_limit
-        )
         st.session_state.app_server_launch_in_progress = False
         st.session_state.app_server_launch_failure_returncode = None
         persist()
