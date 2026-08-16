@@ -34,7 +34,7 @@ def test_canvas_snapshots_are_file_backed_and_revisioned(isolated_canvas_root):
         }
     }
 
-    preview_image = b"\x89PNG\r\n\x1a\npreview"
+    preview_image = b"RIFF\x04\x00\x00\x00WEBP"
     saved = canvas_store.save_canvas_snapshot(
         canvas_id, document, "<svg />", preview_image
     )
@@ -58,6 +58,48 @@ def test_canvas_snapshots_are_file_backed_and_revisioned(isolated_canvas_root):
     assert canvas_store.list_canvas_manifests()[0]["thread_id"] == "thread-file-store"
 
 
+def test_canvas_save_updates_visual_preview_manifest_to_webp(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-preview-manifest")
+    canvas_id = manifest["canvas_id"]
+    manifest_path = isolated_canvas_root / canvas_id / "manifest.json"
+    legacy_manifest = {
+        **manifest,
+        "schema_version": 2,
+        "visual_preview": "current/preview.png",
+    }
+    manifest_path.write_text(json.dumps(legacy_manifest), encoding="utf-8")
+
+    saved = canvas_store.save_canvas_snapshot(canvas_id, {"store": {}})
+
+    assert saved["schema_version"] == canvas_store.CANVAS_SCHEMA_VERSION
+    assert saved["visual_preview"] == "current/preview.webp"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))[
+        "visual_preview"
+    ] == "current/preview.webp"
+
+
+def test_future_canvas_manifest_is_not_modified(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-future-manifest")
+    canvas_id = manifest["canvas_id"]
+    manifest_path = isolated_canvas_root / canvas_id / "manifest.json"
+    future_manifest = {
+        **manifest,
+        "schema_version": canvas_store.CANVAS_SCHEMA_VERSION + 1,
+        "visual_preview": "current/preview.avif",
+    }
+    manifest_path.write_text(json.dumps(future_manifest), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+
+    with pytest.raises(canvas_store.CanvasManifestVersionError):
+        canvas_store.initialize_canvas("thread-future-manifest")
+    with pytest.raises(canvas_store.CanvasManifestVersionError):
+        canvas_store.bind_canvas_to_thread(canvas_id, "thread-future-manifest")
+    with pytest.raises(canvas_store.CanvasManifestVersionError):
+        canvas_store.save_canvas_snapshot(canvas_id, {"store": {}})
+
+    assert manifest_path.read_bytes() == original_manifest
+
+
 def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
     manifest = canvas_store.initialize_canvas("thread-offline-read")
     canvas_id = manifest["canvas_id"]
@@ -73,7 +115,7 @@ def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
             }
         },
         "<svg />",
-        b"\x89PNG\r\n\x1a\npreview",
+        b"RIFF\x04\x00\x00\x00WEBP",
     )
 
     result = canvas_dynamic_tool_handler("thread-offline-read")(
@@ -88,7 +130,7 @@ def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
     assert payload["document_path"].endswith("current/document.json")
     assert result["contentItems"][1]["type"] == "inputImage"
     assert result["contentItems"][1]["imageUrl"].startswith(
-        "data:image/png;base64,"
+        "data:image/webp;base64,"
     )
 
 
@@ -132,7 +174,7 @@ def test_live_read_scene_returns_visual_input_without_embedding_it_in_text(
     isolated_canvas_root, monkeypatch
 ):
     manifest = canvas_store.initialize_canvas("thread-live-visual")
-    image_url = "data:image/png;base64,iVBORw0KGgo="
+    image_url = "data:image/webp;base64,UklGRg=="
     monkeypatch.setattr(
         canvas_runtime.CANVAS_BROKER,
         "call",
@@ -158,6 +200,11 @@ def test_live_read_scene_returns_visual_input_without_embedding_it_in_text(
     assert image_url not in result["contentItems"][0]["text"]
 
 
+def test_canvas_preview_rejects_png_data_urls():
+    with pytest.raises(ValueError, match="WebP data URL"):
+        canvas_runtime._decode_preview_image("data:image/png;base64,iVBORw0KGgo=")
+
+
 def test_rejected_visual_preview_does_not_block_document_save(
     isolated_canvas_root, monkeypatch
 ):
@@ -172,7 +219,7 @@ def test_rejected_visual_preview_does_not_block_document_save(
         canvas_id,
         document,
         "<svg />",
-        "data:image/png;base64,aW1hZ2U=",
+        "data:image/webp;base64,aW1hZ2U=",
     )
 
     assert saved["current_revision"] == 1
@@ -203,7 +250,7 @@ def test_rejected_visual_preview_preserves_valid_image_for_same_document(
         canvas_id,
         document,
         "<svg />",
-        "data:image/png;base64,aW1hZ2U=",
+        "data:image/webp;base64,aW1hZ2U=",
     )
 
     assert saved["current_revision"] == 1

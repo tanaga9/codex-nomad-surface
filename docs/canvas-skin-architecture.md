@@ -40,8 +40,8 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   without polling and redrawing the completed history.
 - Canvas metadata and export actions are kept in a compact disclosure.
 
-The prototype does not yet implement asset ingestion, PNG rendering, command
-receipt files, fork-copy behavior, or the full proposed operation vocabulary.
+The prototype does not yet implement asset ingestion, command receipt files,
+fork-copy behavior, or the full proposed operation vocabulary.
 Before production distribution, the tldraw production-license prompt visible
 in the editor must also be resolved under the chosen tldraw license.
 
@@ -222,7 +222,7 @@ The initial Canvas Skin exposes only two dynamic tools.
 
 ### `canvas.read_scene`
 
-Returns a compact semantic representation plus a whole-canvas PNG image rather
+Returns a compact semantic representation plus a whole-canvas WebP image rather
 than relying on the raw tldraw store alone. Codex uses the image for visual
 composition and the structured scene for exact object identity and geometry.
 
@@ -299,7 +299,7 @@ illustrative layout is:
 ├── current/
 │   ├── document.json
 │   ├── preview.svg
-│   └── preview.png
+│   └── preview.webp
 ├── assets/
 │   └── <content-hash>.<extension>
 ├── revisions/
@@ -314,7 +314,7 @@ illustrative layout is:
 
 - `document.json` is the canonical editable tldraw document snapshot.
 - `preview.svg` is the preferred always-addressable visual representation.
-- `preview.png` is the bounded whole-canvas raster used for Codex visual
+- `preview.webp` is the bounded whole-canvas raster used for Codex visual
   recognition and as a compatibility image.
 - `assets/` contains validated image and media files referenced by the document.
 - A self-contained `.tldraw` file is generated on demand for interchange rather

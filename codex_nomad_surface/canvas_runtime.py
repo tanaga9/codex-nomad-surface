@@ -32,7 +32,7 @@ from codex_nomad_surface.http_gate import (
 CANVAS_TOOL_TIMEOUT_SECONDS = 25.0
 CANVAS_REPLACED_CLOSE_CODE = 4001
 CANVAS_PREVIEW_IMAGE_MAX_BYTES = 8 * 1024 * 1024
-CANVAS_PREVIEW_IMAGE_PREFIX = "data:image/png;base64,"
+CANVAS_PREVIEW_IMAGE_PREFIX = "data:image/webp;base64,"
 CANVAS_DEVELOPER_INSTRUCTIONS = (
     "This thread uses the Nomad Surface embedded Canvas. When a request concerns "
     "the canvas, use the canvas dynamic tools as the primary interface. Read the "
@@ -56,7 +56,7 @@ def _decode_preview_image(data_url: object) -> bytes:
     if not value:
         return b""
     if not value.startswith(CANVAS_PREVIEW_IMAGE_PREFIX):
-        raise ValueError("Canvas preview must be a PNG data URL.")
+        raise ValueError("Canvas preview must be a WebP data URL.")
     encoded = value[len(CANVAS_PREVIEW_IMAGE_PREFIX) :]
     if len(encoded) > (CANVAS_PREVIEW_IMAGE_MAX_BYTES * 4 // 3) + 4:
         raise ValueError("Canvas preview is too large.")

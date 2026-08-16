@@ -40,6 +40,7 @@ type ConnectionState =
 
 const CANVAS_VISION_MAX_DIMENSION = 1536;
 const CANVAS_VISION_MAX_BYTES = 8 * 1024 * 1024;
+const CANVAS_VISION_WEBP_QUALITY = 0.9;
 const CANVAS_VISION_EXPORT_ATTEMPTS = 3;
 const CANVAS_SNAPSHOT_STABILITY_ATTEMPTS = 3;
 const CANVAS_EXPORT_PADDING = 32;
@@ -74,9 +75,10 @@ const renderSceneImage = async (exported: SceneSvgExport | undefined) => {
   );
   for (let attempt = 0; attempt < CANVAS_VISION_EXPORT_ATTEMPTS; attempt += 1) {
     const image = await getSvgAsImage(exported.svg, {
-      type: "png",
+      type: "webp",
       width: exported.width,
       height: exported.height,
+      quality: CANVAS_VISION_WEBP_QUALITY,
       pixelRatio,
     });
     if (!image) throw new Error("Could not construct canvas image.");

@@ -15,7 +15,9 @@ from typing import Any
 CANVAS_ROOT = Path(".nomad_surface") / "canvases"
 CANVAS_ID_PATTERN = re.compile(r"^canvas-[0-9a-f]{24}$")
 CANVAS_REVISION_LIMIT = 40
-CANVAS_PREVIEW_IMAGE_MIME_TYPE = "image/png"
+CANVAS_SCHEMA_VERSION = 3
+CANVAS_PREVIEW_IMAGE_MIME_TYPE = "image/webp"
+CANVAS_VISUAL_PREVIEW_PATH = "current/preview.webp"
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -24,6 +26,15 @@ class CanvasRevisionConflict(RuntimeError):
     def __init__(self, current_revision: int) -> None:
         super().__init__(f"Canvas revision is now {current_revision}.")
         self.current_revision = current_revision
+
+
+class CanvasManifestVersionError(RuntimeError):
+    def __init__(self, schema_version: int) -> None:
+        super().__init__(
+            "Canvas manifest schema version "
+            f"{schema_version} is newer than supported version {CANVAS_SCHEMA_VERSION}."
+        )
+        self.schema_version = schema_version
 
 
 def canvas_id_for_thread(thread_id: str) -> str:
@@ -89,6 +100,13 @@ def read_canvas_manifest(canvas_id: str) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
+def _supported_manifest_version(manifest: dict[str, Any]) -> int:
+    schema_version = int(manifest.get("schema_version") or 1)
+    if schema_version > CANVAS_SCHEMA_VERSION:
+        raise CanvasManifestVersionError(schema_version)
+    return schema_version
+
+
 def _initialize_canvas_manifest(
     canvas_id: str,
     *,
@@ -99,7 +117,15 @@ def _initialize_canvas_manifest(
     with _canvas_lock(canvas_id):
         existing = read_canvas_manifest(canvas_id)
         if existing:
+            schema_version = _supported_manifest_version(existing)
             changed = False
+            if (
+                schema_version < CANVAS_SCHEMA_VERSION
+                or existing.get("visual_preview") != CANVAS_VISUAL_PREVIEW_PATH
+            ):
+                existing["schema_version"] = CANVAS_SCHEMA_VERSION
+                existing["visual_preview"] = CANVAS_VISUAL_PREVIEW_PATH
+                changed = True
             if project_path and not existing.get("project_path"):
                 existing["project_path"] = project_path
                 changed = True
@@ -116,7 +142,7 @@ def _initialize_canvas_manifest(
         directory.mkdir(parents=True, exist_ok=True)
         created_at = _timestamp()
         manifest = {
-            "schema_version": 2,
+            "schema_version": CANVAS_SCHEMA_VERSION,
             "canvas_id": canvas_id,
             "thread_id": thread_id,
             "draft_id": draft_id,
@@ -124,7 +150,7 @@ def _initialize_canvas_manifest(
             "current_revision": 0,
             "document": "current/document.json",
             "preview": "current/preview.svg",
-            "visual_preview": "current/preview.png",
+            "visual_preview": CANVAS_VISUAL_PREVIEW_PATH,
             "content_hash": "",
             "created_at": created_at,
             "updated_at": created_at,
@@ -158,12 +184,14 @@ def bind_canvas_to_thread(canvas_id: str, thread_id: str) -> dict[str, Any]:
         manifest = read_canvas_manifest(canvas_id)
         if not manifest:
             raise FileNotFoundError("Canvas manifest was not found.")
+        schema_version = _supported_manifest_version(manifest)
         if manifest.get("thread_id") == thread_id:
             return manifest
         manifest = {
             **manifest,
-            "schema_version": max(int(manifest.get("schema_version") or 1), 2),
+            "schema_version": max(schema_version, CANVAS_SCHEMA_VERSION),
             "thread_id": thread_id,
+            "visual_preview": CANVAS_VISUAL_PREVIEW_PATH,
             "updated_at": _timestamp(),
         }
         _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
@@ -234,7 +262,7 @@ def load_canvas_preview(canvas_id: str) -> str:
 
 
 def load_canvas_visual_preview(canvas_id: str) -> bytes:
-    path = canvas_directory(canvas_id) / "current" / "preview.png"
+    path = canvas_directory(canvas_id) / CANVAS_VISUAL_PREVIEW_PATH
     try:
         return path.read_bytes()
     except OSError:
@@ -278,6 +306,17 @@ def save_canvas_snapshot(
         manifest = read_canvas_manifest(canvas_id)
         if not manifest:
             raise FileNotFoundError("Canvas manifest was not found.")
+        schema_version = _supported_manifest_version(manifest)
+        manifest_needs_update = (
+            schema_version < CANVAS_SCHEMA_VERSION
+            or manifest.get("visual_preview") != CANVAS_VISUAL_PREVIEW_PATH
+        )
+        if manifest_needs_update:
+            manifest = {
+                **manifest,
+                "schema_version": CANVAS_SCHEMA_VERSION,
+                "visual_preview": CANVAS_VISUAL_PREVIEW_PATH,
+            }
         current_revision = int(manifest.get("current_revision") or 0)
         if expected_revision is not None and expected_revision != current_revision:
             raise CanvasRevisionConflict(current_revision)
@@ -285,7 +324,7 @@ def save_canvas_snapshot(
         directory = canvas_directory(canvas_id)
         current_document = directory / "current" / "document.json"
         current_preview = directory / "current" / "preview.svg"
-        current_visual_preview = directory / "current" / "preview.png"
+        current_visual_preview = directory / CANVAS_VISUAL_PREVIEW_PATH
         if manifest.get("content_hash") == content_hash:
             if preview_svg != load_canvas_preview(canvas_id):
                 _atomic_write(current_preview, preview_svg.encode("utf-8"))
@@ -294,6 +333,8 @@ def save_canvas_snapshot(
                 and preview_image != load_canvas_visual_preview(canvas_id)
             ):
                 _atomic_write(current_visual_preview, preview_image)
+            if manifest_needs_update:
+                _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
             return manifest
 
         revision = current_revision + 1
@@ -326,7 +367,7 @@ def canvas_file_references(canvas_id: str) -> dict[str, str]:
     return {
         "document_path": str(directory / "current" / "document.json"),
         "preview_path": str(directory / "current" / "preview.svg"),
-        "visual_preview_path": str(directory / "current" / "preview.png"),
+        "visual_preview_path": str(directory / CANVAS_VISUAL_PREVIEW_PATH),
     }
 
 
