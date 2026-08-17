@@ -60,6 +60,42 @@ type SceneSvgExport = {
   height: number;
 };
 
+const renderSceneImageBlob = async (
+  exported: SceneSvgExport,
+  pixelRatio: number,
+) => {
+  try {
+    const image = await getSvgAsImage(exported.svg, {
+      type: "webp",
+      width: exported.width,
+      height: exported.height,
+      quality: CANVAS_VISION_WEBP_QUALITY,
+      pixelRatio,
+    });
+    if (image && (image.type === "image/webp" || image.type === "image/png")) {
+      return image;
+    }
+  } catch {
+    // Some browsers cannot encode WebP. Retry the same export as PNG below.
+  }
+
+  const fallbackImage = await getSvgAsImage(exported.svg, {
+    type: "png",
+    width: exported.width,
+    height: exported.height,
+    pixelRatio,
+  });
+  if (!fallbackImage) {
+    throw new Error("Could not construct canvas image as WebP or PNG.");
+  }
+  if (fallbackImage.type !== "image/png") {
+    throw new Error(
+      `Canvas PNG fallback returned unsupported type: ${fallbackImage.type || "unknown"}.`,
+    );
+  }
+  return fallbackImage;
+};
+
 const renderSceneImage = async (exported: SceneSvgExport | undefined) => {
   if (!exported) {
     return {
@@ -74,14 +110,7 @@ const renderSceneImage = async (exported: SceneSvgExport | undefined) => {
     CANVAS_VISION_MAX_DIMENSION / Math.max(exported.width, exported.height),
   );
   for (let attempt = 0; attempt < CANVAS_VISION_EXPORT_ATTEMPTS; attempt += 1) {
-    const image = await getSvgAsImage(exported.svg, {
-      type: "webp",
-      width: exported.width,
-      height: exported.height,
-      quality: CANVAS_VISION_WEBP_QUALITY,
-      pixelRatio,
-    });
-    if (!image) throw new Error("Could not construct canvas image.");
+    const image = await renderSceneImageBlob(exported, pixelRatio);
     if (image.size <= CANVAS_VISION_MAX_BYTES) {
       return {
         preview_image_url: await blobToDataUrl(image),

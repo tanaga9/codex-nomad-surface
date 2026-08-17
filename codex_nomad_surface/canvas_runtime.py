@@ -32,7 +32,10 @@ from codex_nomad_surface.http_gate import (
 CANVAS_TOOL_TIMEOUT_SECONDS = 25.0
 CANVAS_REPLACED_CLOSE_CODE = 4001
 CANVAS_PREVIEW_IMAGE_MAX_BYTES = 8 * 1024 * 1024
-CANVAS_PREVIEW_IMAGE_PREFIX = "data:image/webp;base64,"
+CANVAS_PREVIEW_IMAGE_PREFIXES = {
+    "data:image/webp;base64,": "image/webp",
+    "data:image/png;base64,": "image/png",
+}
 CANVAS_DEVELOPER_INSTRUCTIONS = (
     "This thread uses the Nomad Surface embedded Canvas. When a request concerns "
     "the canvas, use the canvas dynamic tools as the primary interface. Read the "
@@ -51,13 +54,21 @@ CANVAS_DEVELOPER_INSTRUCTIONS = (
 )
 
 
-def _decode_preview_image(data_url: object) -> bytes:
+def _decode_preview_image(data_url: object) -> tuple[bytes, str]:
     value = str(data_url or "")
     if not value:
-        return b""
-    if not value.startswith(CANVAS_PREVIEW_IMAGE_PREFIX):
-        raise ValueError("Canvas preview must be a WebP data URL.")
-    encoded = value[len(CANVAS_PREVIEW_IMAGE_PREFIX) :]
+        return b"", "image/webp"
+    prefix, mime_type = next(
+        (
+            (candidate_prefix, candidate_mime_type)
+            for candidate_prefix, candidate_mime_type in CANVAS_PREVIEW_IMAGE_PREFIXES.items()
+            if value.startswith(candidate_prefix)
+        ),
+        ("", ""),
+    )
+    if not prefix:
+        raise ValueError("Canvas preview must be a WebP or PNG data URL.")
+    encoded = value[len(prefix) :]
     if len(encoded) > (CANVAS_PREVIEW_IMAGE_MAX_BYTES * 4 // 3) + 4:
         raise ValueError("Canvas preview is too large.")
     try:
@@ -66,7 +77,7 @@ def _decode_preview_image(data_url: object) -> bytes:
         raise ValueError("Canvas preview is not valid base64.") from exc
     if len(preview) > CANVAS_PREVIEW_IMAGE_MAX_BYTES:
         raise ValueError("Canvas preview is too large.")
-    return preview
+    return preview, mime_type
 
 
 def _save_canvas_payload(
@@ -79,18 +90,23 @@ def _save_canvas_payload(
     preview_error = str(preview_image_error or "")
     if not preview_image_url and preview_svg:
         preview_image = None
+        preview_image_mime_type = "image/webp"
         preview_error = preview_error or "Canvas preview image is unavailable."
     else:
         try:
-            preview_image = _decode_preview_image(preview_image_url)
+            preview_image, preview_image_mime_type = _decode_preview_image(
+                preview_image_url
+            )
         except ValueError as exc:
             preview_image = None
+            preview_image_mime_type = "image/webp"
             preview_error = str(exc)
     manifest = save_canvas_snapshot(
         canvas_id,
         document,
         preview_svg,
         preview_image,
+        preview_image_mime_type,
     )
     return manifest, preview_error
 

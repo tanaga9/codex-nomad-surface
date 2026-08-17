@@ -200,9 +200,38 @@ def test_live_read_scene_returns_visual_input_without_embedding_it_in_text(
     assert image_url not in result["contentItems"][0]["text"]
 
 
-def test_canvas_preview_rejects_png_data_urls():
-    with pytest.raises(ValueError, match="WebP data URL"):
-        canvas_runtime._decode_preview_image("data:image/png;base64,iVBORw0KGgo=")
+def test_canvas_preview_accepts_png_data_urls():
+    preview, mime_type = canvas_runtime._decode_preview_image(
+        "data:image/png;base64,iVBORw0KGgo="
+    )
+
+    assert preview == b"\x89PNG\r\n\x1a\n"
+    assert mime_type == "image/png"
+
+
+def test_canvas_save_preserves_png_preview_mime_type(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-png-preview")
+    canvas_id = manifest["canvas_id"]
+    document = {"store": {"shape:one": {"id": "shape:one", "typeName": "shape"}}}
+    png_preview = b"\x89PNG\r\n\x1a\n"
+
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        document,
+        "<svg />",
+        png_preview,
+        "image/png",
+    )
+
+    assert canvas_store.read_canvas_manifest(canvas_id)["visual_preview_mime_type"] == "image/png"
+    assert canvas_store.canvas_visual_preview_data_url(canvas_id).startswith(
+        "data:image/png;base64,"
+    )
+
+
+def test_canvas_preview_rejects_unsupported_data_urls():
+    with pytest.raises(ValueError, match="WebP or PNG data URL"):
+        canvas_runtime._decode_preview_image("data:image/svg+xml;base64,PHN2Zy8+")
 
 
 def test_rejected_visual_preview_does_not_block_document_save(

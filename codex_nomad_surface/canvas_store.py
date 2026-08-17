@@ -17,6 +17,7 @@ CANVAS_ID_PATTERN = re.compile(r"^canvas-[0-9a-f]{24}$")
 CANVAS_REVISION_LIMIT = 40
 CANVAS_SCHEMA_VERSION = 3
 CANVAS_PREVIEW_IMAGE_MIME_TYPE = "image/webp"
+CANVAS_PREVIEW_IMAGE_MIME_TYPES = frozenset({"image/webp", "image/png"})
 CANVAS_VISUAL_PREVIEW_PATH = "current/preview.webp"
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -151,6 +152,7 @@ def _initialize_canvas_manifest(
             "document": "current/document.json",
             "preview": "current/preview.svg",
             "visual_preview": CANVAS_VISUAL_PREVIEW_PATH,
+            "visual_preview_mime_type": CANVAS_PREVIEW_IMAGE_MIME_TYPE,
             "content_hash": "",
             "created_at": created_at,
             "updated_at": created_at,
@@ -273,8 +275,14 @@ def canvas_visual_preview_data_url(canvas_id: str) -> str:
     preview = load_canvas_visual_preview(canvas_id)
     if not preview:
         return ""
+    manifest = read_canvas_manifest(canvas_id) or {}
+    mime_type = str(
+        manifest.get("visual_preview_mime_type") or CANVAS_PREVIEW_IMAGE_MIME_TYPE
+    ).lower()
+    if mime_type not in CANVAS_PREVIEW_IMAGE_MIME_TYPES:
+        mime_type = CANVAS_PREVIEW_IMAGE_MIME_TYPE
     encoded = base64.b64encode(preview).decode("ascii")
-    return f"data:{CANVAS_PREVIEW_IMAGE_MIME_TYPE};base64,{encoded}"
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def _prune_revisions(directory: Path) -> None:
@@ -294,11 +302,15 @@ def save_canvas_snapshot(
     document: dict[str, Any],
     preview_svg: str = "",
     preview_image: bytes | None = b"",
+    preview_image_mime_type: str = CANVAS_PREVIEW_IMAGE_MIME_TYPE,
     *,
     expected_revision: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise ValueError("Canvas document must be a JSON object.")
+    preview_image_mime_type = str(preview_image_mime_type).lower()
+    if preview_image_mime_type not in CANVAS_PREVIEW_IMAGE_MIME_TYPES:
+        raise ValueError("Canvas preview image type is not supported.")
     document_bytes = _json_bytes(document)
     content_hash = hashlib.sha256(document_bytes).hexdigest()
 
@@ -310,12 +322,15 @@ def save_canvas_snapshot(
         manifest_needs_update = (
             schema_version < CANVAS_SCHEMA_VERSION
             or manifest.get("visual_preview") != CANVAS_VISUAL_PREVIEW_PATH
+            or manifest.get("visual_preview_mime_type")
+            not in CANVAS_PREVIEW_IMAGE_MIME_TYPES
         )
         if manifest_needs_update:
             manifest = {
                 **manifest,
                 "schema_version": CANVAS_SCHEMA_VERSION,
                 "visual_preview": CANVAS_VISUAL_PREVIEW_PATH,
+                "visual_preview_mime_type": CANVAS_PREVIEW_IMAGE_MIME_TYPE,
             }
         current_revision = int(manifest.get("current_revision") or 0)
         if expected_revision is not None and expected_revision != current_revision:
@@ -325,6 +340,10 @@ def save_canvas_snapshot(
         current_document = directory / "current" / "document.json"
         current_preview = directory / "current" / "preview.svg"
         current_visual_preview = directory / CANVAS_VISUAL_PREVIEW_PATH
+        preview_mime_changed = (
+            preview_image is not None
+            and manifest.get("visual_preview_mime_type") != preview_image_mime_type
+        )
         if manifest.get("content_hash") == content_hash:
             if preview_svg != load_canvas_preview(canvas_id):
                 _atomic_write(current_preview, preview_svg.encode("utf-8"))
@@ -333,7 +352,9 @@ def save_canvas_snapshot(
                 and preview_image != load_canvas_visual_preview(canvas_id)
             ):
                 _atomic_write(current_visual_preview, preview_image)
-            if manifest_needs_update:
+            if preview_image is not None:
+                manifest["visual_preview_mime_type"] = preview_image_mime_type
+            if manifest_needs_update or preview_mime_changed:
                 _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
             return manifest
 
@@ -356,6 +377,7 @@ def save_canvas_snapshot(
             "current_revision": revision,
             "content_hash": content_hash,
             "updated_at": _timestamp(),
+            "visual_preview_mime_type": preview_image_mime_type,
         }
         _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
         _prune_revisions(directory / "revisions")
