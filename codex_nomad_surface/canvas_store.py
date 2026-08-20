@@ -17,7 +17,9 @@ CANVAS_ID_PATTERN = re.compile(r"^canvas-[0-9a-f]{24}$")
 CANVAS_REVISION_LIMIT = 40
 CANVAS_SCHEMA_VERSION = 3
 CANVAS_PREVIEW_IMAGE_MIME_TYPE = "image/webp"
-CANVAS_PREVIEW_IMAGE_MIME_TYPES = frozenset({"image/webp", "image/png"})
+CANVAS_PREVIEW_IMAGE_MIME_TYPES = frozenset(
+    {"image/webp", "image/jpeg", "image/png"}
+)
 CANVAS_VISUAL_PREVIEW_PATH = "current/preview.webp"
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()

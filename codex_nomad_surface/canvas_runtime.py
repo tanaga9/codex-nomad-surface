@@ -34,6 +34,7 @@ CANVAS_REPLACED_CLOSE_CODE = 4001
 CANVAS_PREVIEW_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 CANVAS_PREVIEW_IMAGE_PREFIXES = {
     "data:image/webp;base64,": "image/webp",
+    "data:image/jpeg;base64,": "image/jpeg",
     "data:image/png;base64,": "image/png",
 }
 CANVAS_DEVELOPER_INSTRUCTIONS = (
@@ -67,7 +68,7 @@ def _decode_preview_image(data_url: object) -> tuple[bytes, str]:
         ("", ""),
     )
     if not prefix:
-        raise ValueError("Canvas preview must be a WebP or PNG data URL.")
+        raise ValueError("Canvas preview must be a WebP, JPEG, or PNG data URL.")
     encoded = value[len(prefix) :]
     if len(encoded) > (CANVAS_PREVIEW_IMAGE_MAX_BYTES * 4 // 3) + 4:
         raise ValueError("Canvas preview is too large.")

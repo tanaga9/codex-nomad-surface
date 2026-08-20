@@ -209,6 +209,15 @@ def test_canvas_preview_accepts_png_data_urls():
     assert mime_type == "image/png"
 
 
+def test_canvas_preview_accepts_jpeg_data_urls():
+    preview, mime_type = canvas_runtime._decode_preview_image(
+        "data:image/jpeg;base64,/9j/"
+    )
+
+    assert preview == b"\xff\xd8\xff"
+    assert mime_type == "image/jpeg"
+
+
 def test_canvas_save_preserves_png_preview_mime_type(isolated_canvas_root):
     manifest = canvas_store.initialize_canvas("thread-png-preview")
     canvas_id = manifest["canvas_id"]
@@ -229,8 +238,31 @@ def test_canvas_save_preserves_png_preview_mime_type(isolated_canvas_root):
     )
 
 
+def test_canvas_save_preserves_jpeg_preview_mime_type(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-jpeg-preview")
+    canvas_id = manifest["canvas_id"]
+    document = {"store": {"shape:one": {"id": "shape:one", "typeName": "shape"}}}
+    jpeg_preview = b"\xff\xd8\xff"
+
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        document,
+        "<svg />",
+        jpeg_preview,
+        "image/jpeg",
+    )
+
+    assert (
+        canvas_store.read_canvas_manifest(canvas_id)["visual_preview_mime_type"]
+        == "image/jpeg"
+    )
+    assert canvas_store.canvas_visual_preview_data_url(canvas_id).startswith(
+        "data:image/jpeg;base64,"
+    )
+
+
 def test_canvas_preview_rejects_unsupported_data_urls():
-    with pytest.raises(ValueError, match="WebP or PNG data URL"):
+    with pytest.raises(ValueError, match="WebP, JPEG, or PNG data URL"):
         canvas_runtime._decode_preview_image("data:image/svg+xml;base64,PHN2Zy8+")
 
 
