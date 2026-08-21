@@ -69,6 +69,10 @@ CANVAS_DEVELOPER_INSTRUCTIONS = (
     "the Canvas tool. Prefer semantic_id targets for later domain edits and exact "
     "tldraw IDs for decoration. Treat structured lint errors as incomplete "
     "semantic success and address them before claiming the diagram is complete. "
+    "For freehand marks, highlights, and polylines, use the draw operation with "
+    "ordinary absolute Canvas points; do not encode tldraw segments yourself. "
+    "Use group, reparent, reorder, and layout operations for structural edits "
+    "instead of simulating them with repeated raw coordinate changes. "
     "Treat backing document and "
     "preview files as persistence artifacts, not as the canvas interface. Do not "
     "inspect or modify those files, and do not use external or offline canvas "
@@ -472,12 +476,27 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
         "maxItems": 20,
         "items": source_ref,
     }
+    point = _closed_object(
+        {
+            "x": coordinate,
+            "y": coordinate,
+            "pressure": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        ["x", "y"],
+    )
     target = {
         "oneOf": [
             _closed_object({"id": {"type": "string", "minLength": 1, "maxLength": 256}}, ["id"]),
             _closed_object({"semantic_id": semantic_id}, ["semantic_id"]),
             _closed_object({"ref": {"type": "string", "minLength": 1, "maxLength": 128}}, ["ref"]),
         ]
+    }
+    targets = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 100,
+        "uniqueItems": True,
+        "items": target,
     }
     common_style = {
         "color": {
@@ -511,6 +530,24 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
         }
     )
     frame_style = _closed_object({"color": common_style["color"]})
+    draw_style = _closed_object(
+        {
+            "color": common_style["color"],
+            "size": common_style["size"],
+            "fill": geo_style["properties"]["fill"],
+            "dash": geo_style["properties"]["dash"],
+        }
+    )
+    highlight_style = _closed_object(
+        {"color": common_style["color"], "size": common_style["size"]}
+    )
+    line_style = _closed_object(
+        {
+            "color": common_style["color"],
+            "size": common_style["size"],
+            "dash": geo_style["properties"]["dash"],
+        }
+    )
     shape_common = {
         "x": coordinate,
         "y": coordinate,
@@ -575,11 +612,69 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
         {"required": [field]}
         for field in ["x", "y", "width", "height", "text", "name", "style", "semantic_id", "source_refs"]
     ]
+    two_targets = {**targets, "minItems": 2}
+    three_targets = {**targets, "minItems": 3}
+    draw_operations = [
+        _closed_object(
+            {
+                "op": {"const": "draw"},
+                "ref": {"type": "string", "minLength": 1, "maxLength": 128},
+                "kind": {"const": "freehand"},
+                "points": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 600,
+                    "items": point,
+                },
+                "closed": {"type": "boolean"},
+                "style": draw_style,
+                "semantic_id": semantic_id,
+                "source_refs": source_refs,
+            },
+            ["op", "ref", "kind", "points"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "draw"},
+                "ref": {"type": "string", "minLength": 1, "maxLength": 128},
+                "kind": {"const": "highlight"},
+                "points": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 600,
+                    "items": point,
+                },
+                "style": highlight_style,
+                "semantic_id": semantic_id,
+                "source_refs": source_refs,
+            },
+            ["op", "ref", "kind", "points"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "draw"},
+                "ref": {"type": "string", "minLength": 1, "maxLength": 128},
+                "kind": {"const": "line"},
+                "points": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 100,
+                    "items": point,
+                },
+                "spline": {"type": "string", "enum": ["line", "cubic"]},
+                "style": line_style,
+                "semantic_id": semantic_id,
+                "source_refs": source_refs,
+            },
+            ["op", "ref", "kind", "points"],
+        ),
+    ]
     operations = [
         _closed_object(
             {"op": {"const": "create"}, "ref": {"type": "string", "minLength": 1, "maxLength": 128}, "shape": {"oneOf": create_shapes}},
             ["op", "ref", "shape"],
         ),
+        *draw_operations,
         update_operation,
         _closed_object(
             {"op": {"const": "move"}, "target": target, "x": coordinate, "y": coordinate},
@@ -590,12 +685,115 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
             ["op", "target", "width", "height"],
         ),
         _closed_object(
-            {"op": {"const": "delete"}, "targets": {"type": "array", "minItems": 1, "maxItems": 100, "items": target}},
+            {"op": {"const": "delete"}, "targets": targets},
             ["op", "targets"],
         ),
         _closed_object(
             {"op": {"const": "connect"}, "ref": {"type": "string", "minLength": 1, "maxLength": 128}, "from": target, "to": target, "text": text, "style": arrow_style, "semantic_id": semantic_id, "source_refs": source_refs},
             ["op", "ref", "from", "to"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "disconnect"},
+                "target": target,
+                "terminals": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "enum": ["start", "end"]},
+                },
+            },
+            ["op", "target"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "group"},
+                "ref": {"type": "string", "minLength": 1, "maxLength": 128},
+                "targets": two_targets,
+                "semantic_id": semantic_id,
+                "source_refs": source_refs,
+            },
+            ["op", "ref", "targets"],
+        ),
+        _closed_object(
+            {"op": {"const": "ungroup"}, "targets": targets},
+            ["op", "targets"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "reparent"},
+                "targets": targets,
+                "parent": {"oneOf": [target, {"type": "null"}]},
+            },
+            ["op", "targets", "parent"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "reorder"},
+                "targets": targets,
+                "position": {
+                    "type": "string",
+                    "enum": ["back", "backward", "forward", "front"],
+                },
+                "consider_all_shapes": {"type": "boolean"},
+            },
+            ["op", "targets", "position"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "rotate"},
+                "targets": targets,
+                "degrees": coordinate,
+            },
+            ["op", "targets", "degrees"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "flip"},
+                "targets": targets,
+                "axis": {"type": "string", "enum": ["horizontal", "vertical"]},
+            },
+            ["op", "targets", "axis"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "align"},
+                "targets": two_targets,
+                "alignment": {
+                    "type": "string",
+                    "enum": [
+                        "bottom",
+                        "center-horizontal",
+                        "center-vertical",
+                        "left",
+                        "right",
+                        "top",
+                    ],
+                },
+            },
+            ["op", "targets", "alignment"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "distribute"},
+                "targets": three_targets,
+                "axis": {"type": "string", "enum": ["horizontal", "vertical"]},
+            },
+            ["op", "targets", "axis"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "stack"},
+                "targets": two_targets,
+                "axis": {"type": "string", "enum": ["horizontal", "vertical"]},
+                "gap": coordinate,
+            },
+            ["op", "targets", "axis"],
+        ),
+        _closed_object(
+            {"op": {"const": "pack"}, "targets": two_targets, "gap": coordinate},
+            ["op", "targets"],
         ),
     ]
     return _closed_object(
@@ -778,15 +976,18 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                     "type": "function",
                     "name": "apply_patch",
                     "description": (
-                        "Apply a bounded batch of create, update, move, resize, "
-                        "delete, or connect operations to the live canvas. Use "
+                        "Apply a bounded batch of shape, drawing, connector, "
+                        "grouping, parenting, z-order, and layout operations to "
+                        "the live canvas. Use "
                         "Nomad fields such as shape.text, width, and height; raw "
                         "tldraw props are not accepted. Read the scene first and use "
                         "its revision as base_revision. A command "
                         "ID is idempotent and cannot be reused with different input. "
                         "Targets accept exactly one id, semantic_id, or earlier ref. "
                         "Use semantic_id and bounded source_refs for domain objects; "
-                        "omitting source_refs preserves existing provenance."
+                        "omitting source_refs preserves existing provenance. The draw "
+                        "operation accepts absolute Canvas points for freehand, "
+                        "highlight, and line marks."
                         " A patch may change at most "
                         f"{CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS} unique shapes."
                     ),

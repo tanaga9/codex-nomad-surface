@@ -613,13 +613,30 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
     assert operations["minItems"] == 1
     assert operations["maxItems"] == 100
     operation_schemas = operations["items"]["oneOf"]
-    assert [item["properties"]["op"]["const"] for item in operation_schemas] == [
+    operation_names = [
+        item["properties"]["op"]["const"] for item in operation_schemas
+    ]
+    assert operation_names == [
         "create",
+        "draw",
+        "draw",
+        "draw",
         "update",
         "move",
         "resize",
         "delete",
         "connect",
+        "disconnect",
+        "group",
+        "ungroup",
+        "reparent",
+        "reorder",
+        "rotate",
+        "flip",
+        "align",
+        "distribute",
+        "stack",
+        "pack",
     ]
     assert all(item["additionalProperties"] is False for item in operation_schemas)
     create_shapes = operation_schemas[0]["properties"]["shape"]["oneOf"]
@@ -768,6 +785,76 @@ def test_canvas_apply_patch_schema_accepts_nomad_dto_and_rejects_raw_props():
     assert list(validator.iter_errors(empty_update))
     assert list(validator.iter_errors(empty_style_update))
     assert list(validator.iter_errors(valid_update)) == []
+
+
+def test_canvas_apply_patch_schema_accepts_drawing_and_layout_operations():
+    validator = Draft202012Validator(canvas_runtime._canvas_apply_patch_schema())
+    targets = [{"id": "shape:one"}, {"id": "shape:two"}]
+    valid = {
+        "command_id": "drawing-and-layout",
+        "base_revision": 0,
+        "operations": [
+            {
+                "op": "draw",
+                "ref": "stroke",
+                "kind": "freehand",
+                "points": [
+                    {"x": 100, "y": 100},
+                    {"x": 120, "y": 110, "pressure": 0.7},
+                ],
+                "style": {"color": "red", "size": "m"},
+            },
+            {
+                "op": "draw",
+                "ref": "highlight",
+                "kind": "highlight",
+                "points": [{"x": 80, "y": 90}, {"x": 140, "y": 90}],
+                "style": {"color": "yellow", "size": "l"},
+            },
+            {
+                "op": "draw",
+                "ref": "line",
+                "kind": "line",
+                "points": [{"x": 0, "y": 0}, {"x": 50, "y": 20}],
+                "spline": "cubic",
+                "style": {"color": "blue", "dash": "solid"},
+            },
+            {"op": "group", "ref": "group", "targets": targets},
+            {"op": "ungroup", "targets": [{"ref": "group"}]},
+            {"op": "disconnect", "target": {"id": "shape:arrow"}},
+            {"op": "reparent", "targets": targets, "parent": None},
+            {"op": "reorder", "targets": targets, "position": "front"},
+            {"op": "rotate", "targets": targets, "degrees": 45},
+            {"op": "flip", "targets": targets, "axis": "horizontal"},
+            {"op": "align", "targets": targets, "alignment": "left"},
+            {
+                "op": "distribute",
+                "targets": [*targets, {"id": "shape:three"}],
+                "axis": "horizontal",
+            },
+            {"op": "stack", "targets": targets, "axis": "vertical", "gap": 16},
+            {"op": "pack", "targets": targets, "gap": 8},
+        ],
+    }
+    raw_draw = {
+        "command_id": "raw-draw",
+        "base_revision": 0,
+        "operations": [
+            {
+                "op": "create",
+                "ref": "stroke",
+                "shape": {
+                    "type": "draw",
+                    "x": 0,
+                    "y": 0,
+                    "props": {"segments": []},
+                },
+            }
+        ],
+    }
+
+    assert list(validator.iter_errors(valid)) == []
+    assert list(validator.iter_errors(raw_draw))
 
 
 def test_offline_semantic_summary_is_bounded():

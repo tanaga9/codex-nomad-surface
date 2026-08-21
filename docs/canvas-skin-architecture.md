@@ -264,13 +264,16 @@ the result reports that the visual preview is unavailable instead.
 Accepts a bounded, typed batch of document operations:
 
 - create;
+- draw freehand marks, highlights, and polylines from absolute Canvas points;
 - update;
 - move;
 - resize;
 - delete;
 - connect and disconnect;
 - group and ungroup;
-- reorder.
+- reparent and reorder;
+- rotate and flip;
+- align, distribute, stack, and pack.
 
 Each request includes:
 
@@ -281,6 +284,12 @@ Each request includes:
 New shapes use temporary logical references in the request. The live editor
 allocates tldraw IDs and returns the reference-to-ID mapping. The tool does not
 accept raw JavaScript.
+
+Drawing input stays independent of tldraw's stored stroke encoding. Codex sends
+ordinary `{x, y, pressure?}` points in page space with a `freehand`, `highlight`,
+or `line` kind. The browser converts them to local coordinates and uses tldraw's
+public point and index encoders. Raw `segments`, base64 paths, and shape records
+are not part of the tool contract.
 
 `canvas.apply_patch` requires an active editor in the initial architecture. If
 the editor is disconnected, the tool returns `canvas_unavailable`; Nomad

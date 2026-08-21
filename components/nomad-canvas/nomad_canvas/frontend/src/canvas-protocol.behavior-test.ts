@@ -2,10 +2,13 @@ import {
   HistoryManager,
   Store,
   StoreSchema,
+  b64Vecs,
   createRecordType,
+  createTLStore,
   type BaseRecord,
   type Editor,
   type RecordId,
+  type TLRecord,
 } from "tldraw";
 import {
   applyCanvasPatch,
@@ -32,6 +35,431 @@ import {
   SEMANTIC_ID_PATTERN,
   semanticReadSummary,
 } from "./canvas-semantic";
+
+{
+  const editor = {
+    getCurrentPageShapes: () => [],
+    getShape: () => undefined,
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+  const plan = validateCanvasPatch(editor, {
+    command_id: "intuitive-draw",
+    base_revision: 0,
+    operations: [
+      {
+        op: "draw",
+        ref: "stroke",
+        kind: "freehand",
+        points: [
+          { x: 120, y: 80 },
+          { x: 145, y: 92, pressure: 0.7 },
+          { x: 180, y: 76 },
+        ],
+        style: { color: "red", size: "m" },
+      },
+    ],
+  });
+  const operation = plan.operations[0];
+  assert(
+    operation?.op === "create" &&
+      operation.shape.type === "draw" &&
+      operation.shape.x === 120 &&
+      operation.shape.y === 80,
+    "The intuitive draw operation was not normalized into a tldraw draw shape.",
+  );
+  if (operation?.op === "create") {
+    const props = operation.shape.props as {
+      segments: Array<{ path: string }>;
+    };
+    const points = b64Vecs.decodePoints(props.segments[0].path);
+    assert(
+      points[0].x === 0 &&
+        points[0].y === 0 &&
+        points[1].x === 25 &&
+        points[1].y === 12,
+      "Absolute Canvas points were not converted to local tldraw coordinates.",
+    );
+  }
+}
+
+{
+  const editor = {
+    getCurrentPageShapes: () => [],
+    getShape: () => undefined,
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+  const plan = validateCanvasPatch(editor, {
+    command_id: "validate-draw-records",
+    base_revision: 0,
+    operations: [
+      {
+        op: "draw",
+        ref: "freehand",
+        kind: "freehand",
+        points: [
+          { x: 0, y: 0 },
+          { x: 20, y: 10 },
+        ],
+        style: { color: "black", fill: "none", dash: "draw", size: "m" },
+      },
+      {
+        op: "draw",
+        ref: "highlight",
+        kind: "highlight",
+        points: [
+          { x: 0, y: 20 },
+          { x: 20, y: 30 },
+        ],
+        style: { color: "yellow", size: "m" },
+      },
+      {
+        op: "draw",
+        ref: "line",
+        kind: "line",
+        points: [
+          { x: 0, y: 40 },
+          { x: 20, y: 50 },
+        ],
+        style: { color: "black", dash: "solid", size: "m" },
+      },
+    ],
+  });
+  const store = createTLStore();
+  store.put(
+    plan.operations.map((operation, index) => {
+      if (operation.op !== "create")
+        throw new Error("Draw did not normalize to create.");
+      return {
+        id: operation.id,
+        typeName: "shape" as const,
+        type: operation.shape.type as "draw" | "highlight" | "line",
+        x: operation.shape.x as number,
+        y: operation.shape.y as number,
+        rotation: 0,
+        index: `a${index + 1}` as `a${number}`,
+        parentId: "page:test" as const,
+        isLocked: false,
+        opacity: 1,
+        props: operation.shape.props,
+        meta: {},
+      } as unknown as TLRecord;
+    }),
+  );
+}
+
+{
+  const editor = {
+    getCurrentPageShapes: () => [],
+    getShape: () => undefined,
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+  let error: unknown;
+  try {
+    validateCanvasPatch(editor, {
+      command_id: "reject-raw-draw",
+      base_revision: 0,
+      operations: [
+        {
+          op: "create",
+          ref: "raw-stroke",
+          shape: {
+            type: "draw",
+            x: 0,
+            y: 0,
+            props: { segments: [] },
+          },
+        },
+      ],
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assert(
+    error instanceof CanvasProtocolError &&
+      error.operationErrors.some(
+        (item) => item.code === "unsupported_shape_type",
+      ),
+    "Raw tldraw draw props bypassed the intuitive drawing DTO.",
+  );
+}
+
+{
+  let currentToolId = "draw";
+  let rollbackCount = 0;
+  const editor = {
+    getCurrentPageShapes: () => [],
+    getCurrentToolId: () => currentToolId,
+    setCurrentTool: (toolId: string) => {
+      currentToolId = toolId;
+    },
+    markHistoryStoppingPoint: () => "group-failure",
+    run: (apply: () => void) => apply(),
+    groupShapes: () => undefined,
+    getShape: () => undefined,
+    bailToMark: () => {
+      rollbackCount += 1;
+    },
+  } as unknown as Editor;
+  const plan = {
+    commandId: "group-failure",
+    refs: {},
+    requestedHeights: {},
+    operations: [
+      {
+        op: "group",
+        id: "shape:group",
+        ref: "group",
+        ids: ["shape:one", "shape:two"],
+        metadata: {},
+      },
+    ],
+  } as unknown as NormalizedPatchPlan;
+
+  let error: unknown;
+  try {
+    applyCanvasPatch(editor, plan);
+  } catch (caught) {
+    error = caught;
+  }
+  assert(
+    error instanceof CanvasProtocolError &&
+      currentToolId === "draw" &&
+      rollbackCount === 1,
+    "A failed group operation did not restore the previous tool after rollback.",
+  );
+}
+
+{
+  const shapes = [
+    { id: "shape:one", type: "geo", meta: {} },
+    { id: "shape:two", type: "geo", meta: {} },
+    { id: "shape:three", type: "geo", meta: {} },
+    { id: "shape:frame", type: "frame", meta: {} },
+    { id: "shape:arrow", type: "arrow", meta: {} },
+  ];
+  const calls: string[] = [];
+  const bindings = [
+    {
+      id: "binding:end",
+      type: "arrow",
+      fromId: "shape:arrow",
+      toId: "shape:three",
+      props: { terminal: "end" },
+    },
+  ];
+  const shapeById = new Map(shapes.map((shape) => [shape.id, shape]));
+  let currentToolId = "draw";
+  const editor = {
+    getCurrentPageShapes: () => Array.from(shapeById.values()),
+    getShape: (id: string) => shapeById.get(id),
+    isShapeOrAncestorLocked: () => false,
+    hasAncestor: () => false,
+    getSortedChildIdsForParent: () => [],
+    markHistoryStoppingPoint: () => "expanded-operations",
+    run: (apply: () => void) => apply(),
+    getCurrentToolId: () => currentToolId,
+    setCurrentTool: (toolId: string) => {
+      currentToolId = toolId;
+      calls.push(`tool:${toolId}`);
+    },
+    bailToMark: () => calls.push("rollback"),
+    createShape: (shape: { id: string; type: string; meta: object }) => {
+      shapeById.set(shape.id, shape);
+      calls.push(`create:${shape.type}`);
+    },
+    groupShapes: (
+      _ids: string[],
+      options: { groupId: string; select: boolean },
+    ) => {
+      if (currentToolId !== "select") return;
+      shapeById.set(options.groupId, {
+        id: options.groupId,
+        type: "group",
+        meta: {},
+      });
+      calls.push("group");
+    },
+    updateShape: (update: { id: string; type: string; meta?: object }) => {
+      const existing = shapeById.get(update.id);
+      shapeById.set(update.id, {
+        ...existing,
+        ...update,
+        meta: update.meta ?? existing?.meta ?? {},
+      });
+    },
+    bringToFront: () => calls.push("front"),
+    rotateShapesBy: () => calls.push("rotate"),
+    flipShapes: () => calls.push("flip"),
+    alignShapes: () => calls.push("align"),
+    distributeShapes: () => calls.push("distribute"),
+    stackShapes: () => calls.push("stack"),
+    packShapes: () => calls.push("pack"),
+    reparentShapes: () => calls.push("reparent"),
+    getCurrentPageId: () => "page:one",
+    getBindingsFromShape: () => bindings,
+    deleteBindings: () => calls.push("disconnect"),
+    ungroupShapes: (ids: string[]) => {
+      if (currentToolId !== "select") return;
+      ids.forEach((id) => shapeById.delete(id));
+      calls.push("ungroup");
+    },
+  } as unknown as Editor;
+  const plan = validateCanvasPatch(editor, {
+    command_id: "expanded-operations",
+    base_revision: 0,
+    operations: [
+      {
+        op: "draw",
+        ref: "stroke",
+        kind: "highlight",
+        points: [
+          { x: 0, y: 0 },
+          { x: 20, y: 20 },
+        ],
+      },
+      {
+        op: "group",
+        ref: "cluster",
+        targets: [{ id: "shape:one" }, { id: "shape:two" }],
+      },
+      { op: "reorder", targets: [{ ref: "cluster" }], position: "front" },
+      { op: "rotate", targets: [{ ref: "cluster" }], degrees: 45 },
+      { op: "flip", targets: [{ ref: "cluster" }], axis: "horizontal" },
+      {
+        op: "align",
+        targets: [{ id: "shape:one" }, { id: "shape:two" }],
+        alignment: "left",
+      },
+      {
+        op: "distribute",
+        targets: [
+          { id: "shape:one" },
+          { id: "shape:two" },
+          { id: "shape:three" },
+        ],
+        axis: "horizontal",
+      },
+      {
+        op: "stack",
+        targets: [{ id: "shape:one" }, { id: "shape:two" }],
+        axis: "vertical",
+        gap: 16,
+      },
+      {
+        op: "pack",
+        targets: [{ id: "shape:one" }, { id: "shape:two" }],
+        gap: 8,
+      },
+      {
+        op: "reparent",
+        targets: [{ id: "shape:three" }],
+        parent: { id: "shape:frame" },
+      },
+      {
+        op: "disconnect",
+        target: { id: "shape:arrow" },
+        terminals: ["end"],
+      },
+      { op: "ungroup", targets: [{ ref: "cluster" }] },
+    ],
+  });
+  const applied = applyCanvasPatch(editor, plan);
+  assert(
+    [
+      "create:highlight",
+      "group",
+      "front",
+      "rotate",
+      "flip",
+      "align",
+      "distribute",
+      "stack",
+      "pack",
+      "reparent",
+      "disconnect",
+      "ungroup",
+      "tool:select",
+      "tool:draw",
+    ].every((call) => calls.includes(call)) &&
+      currentToolId === "draw" &&
+      applied.result.refs.cluster &&
+      applied.result.refs.stroke,
+    "Expanded Canvas operations did not dispatch through public tldraw APIs.",
+  );
+}
+
+{
+  const shapes = [
+    { id: "shape:group", type: "group", parentId: "page:one", meta: {} },
+    {
+      id: "shape:child",
+      type: "geo",
+      parentId: "shape:group",
+      meta: {},
+    },
+    { id: "shape:other", type: "geo", parentId: "page:one", meta: {} },
+  ];
+  const shapeById = new Map(shapes.map((shape) => [shape.id, shape]));
+  const editor = {
+    getCurrentPageShapes: () => shapes,
+    getShape: (id: string) => shapeById.get(id),
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+
+  let mixedHierarchyError: unknown;
+  try {
+    validateCanvasPatch(editor, {
+      command_id: "reject-mixed-hierarchy",
+      base_revision: 0,
+      operations: [
+        {
+          op: "flip",
+          targets: [{ id: "shape:group" }, { id: "shape:child" }],
+          axis: "horizontal",
+        },
+      ],
+    });
+  } catch (caught) {
+    mixedHierarchyError = caught;
+  }
+  assert(
+    mixedHierarchyError instanceof CanvasProtocolError &&
+      mixedHierarchyError.operationErrors.some(
+        (item) =>
+          item.path === "targets" && item.message.includes("descendants"),
+      ),
+    "A layout operation accepted both an ancestor and its descendant.",
+  );
+
+  let plannedCycleError: unknown;
+  try {
+    validateCanvasPatch(editor, {
+      command_id: "reject-planned-cycle",
+      base_revision: 0,
+      operations: [
+        {
+          op: "group",
+          ref: "new-group",
+          targets: [{ id: "shape:child" }, { id: "shape:other" }],
+        },
+        {
+          op: "reparent",
+          targets: [{ ref: "new-group" }],
+          parent: { id: "shape:child" },
+        },
+      ],
+    });
+  } catch (caught) {
+    plannedCycleError = caught;
+  }
+  assert(
+    plannedCycleError instanceof CanvasProtocolError &&
+      plannedCycleError.operationErrors.some(
+        (item) => item.path === "parent" && item.code === "invalid_operation",
+      ),
+    "A same-patch group could be reparented into its planned child.",
+  );
+}
 
 {
   assert(

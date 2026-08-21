@@ -1,5 +1,13 @@
-import { Editor, TLShapeId, createShapeId, toRichText } from "tldraw";
 import {
+  Editor,
+  TLShapeId,
+  b64Vecs,
+  createShapeId,
+  getIndices,
+  toRichText,
+} from "tldraw";
+import {
+  allDocumentShapes,
   buildSemanticIndex,
   CANVAS_MAX_SOURCE_REFS,
   type CanvasSourceRef,
@@ -45,7 +53,9 @@ export class CanvasProtocolError extends Error {
 }
 
 type JsonObject = Record<string, unknown>;
-type ShapeType = "geo" | "text" | "note" | "frame";
+type ShapeType =
+  "geo" | "text" | "note" | "frame" | "draw" | "highlight" | "line";
+type CreateShapeType = "geo" | "text" | "note" | "frame";
 type Target = { id: string } | { semantic_id: string } | { ref: string };
 type MetadataPatch = {
   semanticId?: string | null;
@@ -53,7 +63,7 @@ type MetadataPatch = {
 };
 type PlannedShape = {
   id: TLShapeId;
-  type: ShapeType | "arrow";
+  type: ShapeType | "arrow" | "group";
   availableAt: number;
 };
 type NormalizedOperation =
@@ -83,7 +93,52 @@ type NormalizedOperation =
       toId: TLShapeId;
       props: JsonObject;
       metadata: MetadataPatch;
-    };
+    }
+  | { op: "disconnect"; id: TLShapeId; terminals: ("start" | "end")[] }
+  | {
+      op: "group";
+      id: TLShapeId;
+      ref: string;
+      ids: TLShapeId[];
+      metadata: MetadataPatch;
+    }
+  | { op: "ungroup"; ids: TLShapeId[]; childIds: TLShapeId[] }
+  | {
+      op: "reparent";
+      ids: TLShapeId[];
+      parentId: TLShapeId | null;
+    }
+  | {
+      op: "reorder";
+      ids: TLShapeId[];
+      position: "back" | "backward" | "forward" | "front";
+      considerAllShapes: boolean;
+    }
+  | { op: "rotate"; ids: TLShapeId[]; radians: number }
+  | { op: "flip"; ids: TLShapeId[]; axis: "horizontal" | "vertical" }
+  | {
+      op: "align";
+      ids: TLShapeId[];
+      alignment:
+        | "bottom"
+        | "center-horizontal"
+        | "center-vertical"
+        | "left"
+        | "right"
+        | "top";
+    }
+  | {
+      op: "distribute";
+      ids: TLShapeId[];
+      axis: "horizontal" | "vertical";
+    }
+  | {
+      op: "stack";
+      ids: TLShapeId[];
+      axis: "horizontal" | "vertical";
+      gap?: number;
+    }
+  | { op: "pack"; ids: TLShapeId[]; gap?: number };
 
 export type NormalizedPatchPlan = Readonly<{
   commandId: string;
@@ -94,7 +149,21 @@ export type NormalizedPatchPlan = Readonly<{
 
 export const CANVAS_PATCH_MAX_CHANGED_IDS = 500;
 
-const SHAPE_TYPES = new Set<ShapeType>(["geo", "text", "note", "frame"]);
+const SHAPE_TYPES = new Set<ShapeType>([
+  "geo",
+  "text",
+  "note",
+  "frame",
+  "draw",
+  "highlight",
+  "line",
+]);
+const CREATE_SHAPE_TYPES = new Set<CreateShapeType>([
+  "geo",
+  "text",
+  "note",
+  "frame",
+]);
 const STYLE_KEYS: Record<ShapeType | "arrow", Set<string>> = {
   geo: new Set([
     "geo",
@@ -109,6 +178,9 @@ const STYLE_KEYS: Record<ShapeType | "arrow", Set<string>> = {
   text: new Set(["color", "size", "font", "align"]),
   note: new Set(["color", "size", "font", "align", "vertical_align"]),
   frame: new Set(["color"]),
+  draw: new Set(["color", "fill", "dash", "size"]),
+  highlight: new Set(["color", "size"]),
+  line: new Set(["color", "dash", "size"]),
   arrow: new Set(["color", "size", "dash", "arrowhead_start", "arrowhead_end"]),
 };
 const STYLE_VALUES: Record<string, Set<string>> = {
@@ -374,6 +446,74 @@ const normalizeStyle = (
   return props;
 };
 
+type CanvasPoint = { x: number; y: number; z: number };
+
+const normalizePoints = (
+  value: unknown,
+  operationIndex: number,
+  path: string,
+  errors: CanvasOperationError[],
+  maximum: number,
+): CanvasPoint[] | undefined => {
+  if (!Array.isArray(value) || value.length < 2 || value.length > maximum) {
+    errors.push({
+      operation_index: operationIndex,
+      path,
+      code: "invalid_operation",
+      message: `${path} must contain 2–${maximum} points.`,
+    });
+    return undefined;
+  }
+  const points: CanvasPoint[] = [];
+  value.forEach((rawPoint, pointIndex) => {
+    if (!isObject(rawPoint)) {
+      errors.push({
+        operation_index: operationIndex,
+        path: `${path}.${pointIndex}`,
+        code: "invalid_operation",
+        message: "Each point must be an object containing x and y.",
+      });
+      return;
+    }
+    rejectUnknownKeys(
+      rawPoint,
+      new Set(["x", "y", "pressure"]),
+      operationIndex,
+      `${path}.${pointIndex}`,
+      errors,
+    );
+    const x = finiteNumber(
+      rawPoint.x,
+      operationIndex,
+      `${path}.${pointIndex}.x`,
+      errors,
+    );
+    const y = finiteNumber(
+      rawPoint.y,
+      operationIndex,
+      `${path}.${pointIndex}.y`,
+      errors,
+    );
+    const pressure = rawPoint.pressure ?? 0.5;
+    if (
+      typeof pressure !== "number" ||
+      !Number.isFinite(pressure) ||
+      pressure < 0 ||
+      pressure > 1
+    ) {
+      errors.push({
+        operation_index: operationIndex,
+        path: `${path}.${pointIndex}.pressure`,
+        code: "invalid_number",
+        message: "Point pressure must be between 0 and 1.",
+      });
+      return;
+    }
+    if (x !== undefined && y !== undefined) points.push({ x, y, z: pressure });
+  });
+  return points.length === value.length ? points : undefined;
+};
+
 const parseTarget = (
   value: unknown,
   operationIndex: number,
@@ -452,6 +592,8 @@ export const validateCanvasPatch = (
   }
 
   const plannedByRef = new Map<string, PlannedShape>();
+  const plannedParentById = new Map<TLShapeId, TLShapeId | null>();
+  const plannedChildrenByParent = new Map<TLShapeId, Set<TLShapeId>>();
   const semanticIndex = buildSemanticIndex(editor);
   const semanticOwners = new Map<string, Set<TLShapeId>>();
   const semanticByShapeId = new Map<TLShapeId, string>();
@@ -462,7 +604,8 @@ export const validateCanvasPatch = (
   rawOperations.forEach((raw, index) => {
     if (!isObject(raw)) return;
     const op = raw.op;
-    if (op !== "create" && op !== "connect") return;
+    if (op !== "create" && op !== "draw" && op !== "connect" && op !== "group")
+      return;
     const ref = typeof raw.ref === "string" ? raw.ref : "";
     if (!ref) return;
     if (plannedByRef.has(ref)) {
@@ -477,13 +620,26 @@ export const validateCanvasPatch = (
     const type =
       op === "connect"
         ? "arrow"
-        : isObject(raw.shape)
-          ? raw.shape.type
-          : undefined;
+        : op === "group"
+          ? "group"
+          : op === "draw"
+            ? raw.kind === "freehand"
+              ? "draw"
+              : raw.kind === "highlight"
+                ? "highlight"
+                : "line"
+            : isObject(raw.shape)
+              ? raw.shape.type
+              : undefined;
     const id = createShapeId(`${safeRef(commandId)}-${safeRef(ref)}-${index}`);
     plannedByRef.set(ref, {
       id,
-      type: SHAPE_TYPES.has(type as ShapeType) ? (type as ShapeType) : "arrow",
+      type:
+        type === "group"
+          ? "group"
+          : SHAPE_TYPES.has(type as ShapeType)
+            ? (type as ShapeType)
+            : "arrow",
       availableAt: index,
     });
     if (editor.getShape(id)) {
@@ -495,7 +651,108 @@ export const validateCanvasPatch = (
       });
     }
   });
+  for (const shape of allDocumentShapes(editor)) {
+    const parentId = editor.getShape(shape.parentId as TLShapeId)
+      ? (shape.parentId as TLShapeId)
+      : null;
+    plannedParentById.set(shape.id, parentId);
+    if (parentId) {
+      const children = plannedChildrenByParent.get(parentId) ?? new Set();
+      children.add(shape.id);
+      plannedChildrenByParent.set(parentId, children);
+    }
+  }
+  for (const planned of plannedByRef.values()) {
+    if (!plannedParentById.has(planned.id))
+      plannedParentById.set(planned.id, null);
+  }
   const unavailableIds = new Set<TLShapeId>();
+
+  const setPlannedParent = (id: TLShapeId, parentId: TLShapeId | null) => {
+    const previousParentId = plannedParentById.get(id) ?? null;
+    if (previousParentId) {
+      const previousChildren = plannedChildrenByParent.get(previousParentId);
+      previousChildren?.delete(id);
+      if (!previousChildren?.size)
+        plannedChildrenByParent.delete(previousParentId);
+    }
+    plannedParentById.set(id, parentId);
+    if (parentId) {
+      const children = plannedChildrenByParent.get(parentId) ?? new Set();
+      children.add(id);
+      plannedChildrenByParent.set(parentId, children);
+    }
+  };
+
+  const removePlannedShape = (id: TLShapeId) => {
+    const parentId = plannedParentById.get(id) ?? null;
+    if (parentId) {
+      const siblings = plannedChildrenByParent.get(parentId);
+      siblings?.delete(id);
+      if (!siblings?.size) plannedChildrenByParent.delete(parentId);
+    }
+    plannedParentById.delete(id);
+    plannedChildrenByParent.delete(id);
+  };
+
+  const hasPlannedAncestor = (shapeId: TLShapeId, ancestorId: TLShapeId) => {
+    const visited = new Set<TLShapeId>();
+    let parentId = plannedParentById.get(shapeId) ?? null;
+    while (parentId) {
+      if (parentId === ancestorId) return true;
+      if (visited.has(parentId)) return false;
+      visited.add(parentId);
+      parentId = plannedParentById.get(parentId) ?? null;
+    }
+    return false;
+  };
+
+  const rejectMixedHierarchyTargets = (
+    ids: TLShapeId[],
+    index: number,
+    path: string,
+  ) => {
+    for (let left = 0; left < ids.length; left += 1) {
+      for (let right = left + 1; right < ids.length; right += 1) {
+        if (
+          hasPlannedAncestor(ids[left], ids[right]) ||
+          hasPlannedAncestor(ids[right], ids[left])
+        ) {
+          errors.push({
+            operation_index: index,
+            path,
+            code: "invalid_operation",
+            message:
+              "Targets must not contain both a shape and one of its descendants.",
+          });
+          return;
+        }
+      }
+    }
+  };
+
+  const plannedChildrenOf = (parentId: TLShapeId) =>
+    Array.from(plannedChildrenByParent.get(parentId) ?? []);
+
+  const nearestCommonPlannedAncestor = (ids: TLShapeId[]) => {
+    if (!ids.length) return null;
+    const chains = ids.map((id) => {
+      const chain: TLShapeId[] = [];
+      const visited = new Set<TLShapeId>();
+      let parentId = plannedParentById.get(id) ?? null;
+      while (parentId && !visited.has(parentId)) {
+        chain.push(parentId);
+        visited.add(parentId);
+        parentId = plannedParentById.get(parentId) ?? null;
+      }
+      return chain;
+    });
+    return (
+      chains[0].find((id) =>
+        chains.slice(1).every((chain) => chain.includes(id)),
+      ) ?? null
+    );
+  };
 
   const claimSemanticId = (id: TLShapeId, metadata: MetadataPatch) => {
     if (metadata.semanticId === undefined) return;
@@ -608,6 +865,39 @@ export const validateCanvasPatch = (
     return { id: shape.id, type: shape.type };
   };
 
+  const resolveTargets = (
+    value: unknown,
+    index: number,
+    path: string,
+    minimum = 1,
+  ) => {
+    if (!Array.isArray(value) || value.length < minimum || value.length > 100) {
+      errors.push({
+        operation_index: index,
+        path,
+        code: "invalid_operation",
+        message: `${path} must contain ${minimum}–100 targets.`,
+      });
+      return [] as { id: TLShapeId; type: string }[];
+    }
+    const resolved = value
+      .map((item, targetIndex) =>
+        resolveTarget(item, index, `${path}.${targetIndex}`),
+      )
+      .filter((target): target is { id: TLShapeId; type: string } =>
+        Boolean(target),
+      );
+    if (new Set(resolved.map((target) => target.id)).size !== resolved.length) {
+      errors.push({
+        operation_index: index,
+        path,
+        code: "invalid_operation",
+        message: `${path} must not contain duplicate targets.`,
+      });
+    }
+    return resolved;
+  };
+
   const normalized: NormalizedOperation[] = [];
   const requestedHeights: Record<string, number> = {};
   rawOperations.forEach((raw, index) => {
@@ -621,6 +911,131 @@ export const validateCanvasPatch = (
       return;
     }
     const op = raw.op;
+    if (op === "draw") {
+      rejectUnknownKeys(
+        raw,
+        new Set([
+          "op",
+          "ref",
+          "kind",
+          "points",
+          "closed",
+          "spline",
+          "style",
+          "semantic_id",
+          "source_refs",
+        ]),
+        index,
+        "",
+        errors,
+      );
+      const ref = typeof raw.ref === "string" ? raw.ref : "";
+      if (!ref || ref.length > 128)
+        errors.push({
+          operation_index: index,
+          path: "ref",
+          code: "invalid_operation",
+          message: "draw requires a non-empty ref.",
+        });
+      const shapeType =
+        raw.kind === "freehand"
+          ? "draw"
+          : raw.kind === "highlight"
+            ? "highlight"
+            : raw.kind === "line"
+              ? "line"
+              : undefined;
+      if (!shapeType) {
+        errors.push({
+          operation_index: index,
+          path: "kind",
+          code: "invalid_enum_value",
+          message: "draw kind must be freehand, highlight, or line.",
+        });
+        return;
+      }
+      const points = normalizePoints(
+        raw.points,
+        index,
+        "points",
+        errors,
+        shapeType === "line" ? 100 : 600,
+      );
+      const planned = plannedByRef.get(ref);
+      if (!points || !planned) return;
+      if (
+        raw.closed !== undefined &&
+        (shapeType !== "draw" || typeof raw.closed !== "boolean")
+      )
+        errors.push({
+          operation_index: index,
+          path: "closed",
+          code: "invalid_operation",
+          message:
+            "closed is supported only as a boolean for freehand drawing.",
+        });
+      if (
+        raw.spline !== undefined &&
+        (shapeType !== "line" ||
+          (raw.spline !== "line" && raw.spline !== "cubic"))
+      )
+        errors.push({
+          operation_index: index,
+          path: "spline",
+          code: "invalid_enum_value",
+          message:
+            "spline is supported only for line drawing as line or cubic.",
+        });
+      const props = normalizeStyle(
+        raw.style,
+        shapeType,
+        index,
+        "style",
+        errors,
+      );
+      const origin = points[0];
+      const localPoints = points.map((point) => ({
+        x: point.x - origin.x,
+        y: point.y - origin.y,
+        z: point.z,
+      }));
+      if (shapeType === "draw" || shapeType === "highlight") {
+        props.segments = [
+          { type: "free", path: b64Vecs.encodePoints(localPoints) },
+        ];
+        props.isComplete = true;
+        props.isPen = points.some((point) => point.z !== 0.5);
+        props.scale = 1;
+        props.scaleX = 1;
+        props.scaleY = 1;
+        if (shapeType === "draw") props.isClosed = raw.closed === true;
+      } else {
+        const indices = getIndices(localPoints.length);
+        props.points = Object.fromEntries(
+          localPoints.map((point, pointIndex) => [
+            `p${pointIndex + 1}`,
+            {
+              id: `p${pointIndex + 1}`,
+              index: indices[pointIndex],
+              x: point.x,
+              y: point.y,
+            },
+          ]),
+        );
+        props.spline = raw.spline === "cubic" ? "cubic" : "line";
+        props.scale = 1;
+      }
+      const metadata = normalizeMetadata(raw, index, "", errors);
+      claimSemanticId(planned.id, metadata);
+      normalized.push({
+        op: "create",
+        id: planned.id,
+        ref,
+        shape: { type: shapeType, x: origin.x, y: origin.y, props },
+        metadata,
+      });
+      return;
+    }
     if (op === "create") {
       rejectUnknownKeys(
         raw,
@@ -652,7 +1067,7 @@ export const validateCanvasPatch = (
         rejectUnknownKeys(props, new Set(), index, "shape.props", errors);
       }
       const type = shape.type;
-      if (!SHAPE_TYPES.has(type as ShapeType)) {
+      if (!CREATE_SHAPE_TYPES.has(type as CreateShapeType)) {
         errors.push({
           operation_index: index,
           path: "shape.type",
@@ -661,8 +1076,8 @@ export const validateCanvasPatch = (
         });
         return;
       }
-      const shapeType = type as ShapeType;
-      const shapeKeys: Record<ShapeType, Set<string>> = {
+      const shapeType = type as CreateShapeType;
+      const shapeKeys: Record<CreateShapeType, Set<string>> = {
         geo: new Set([
           "type",
           "x",
@@ -797,36 +1212,350 @@ export const validateCanvasPatch = (
 
     if (op === "delete") {
       rejectUnknownKeys(raw, new Set(["op", "targets"]), index, "", errors);
-      const targets = Array.isArray(raw.targets) ? raw.targets : [];
-      const ids = targets
-        .map(
-          (item, targetIndex) =>
-            resolveTarget(item, index, `targets.${targetIndex}`)?.id,
-        )
-        .filter((id): id is TLShapeId => Boolean(id));
-      if (!targets.length)
-        errors.push({
-          operation_index: index,
-          path: "targets",
-          code: "invalid_operation",
-          message: "delete requires at least one target.",
-        });
-      if (targets.length > 100)
-        errors.push({
-          operation_index: index,
-          path: "targets",
-          code: "invalid_operation",
-          message: "delete accepts at most 100 targets.",
-        });
+      const targetIds = resolveTargets(raw.targets, index, "targets").map(
+        (target) => target.id,
+      );
+      const expandedIds = new Set<TLShapeId>();
+      const pendingIds = [...targetIds];
+      while (pendingIds.length) {
+        const id = pendingIds.pop()!;
+        if (expandedIds.has(id)) continue;
+        expandedIds.add(id);
+        pendingIds.push(...plannedChildrenOf(id));
+      }
+      const ids = Array.from(expandedIds);
       normalized.push({ op: "delete", ids });
       ids.forEach((id) => {
         unavailableIds.add(id);
+        removePlannedShape(id);
         const semanticId = semanticByShapeId.get(id);
         const owners = semanticId ? semanticOwners.get(semanticId) : undefined;
         owners?.delete(id);
         if (semanticId && !owners?.size) semanticOwners.delete(semanticId);
         semanticByShapeId.delete(id);
       });
+      return;
+    }
+
+    if (op === "group") {
+      rejectUnknownKeys(
+        raw,
+        new Set(["op", "ref", "targets", "semantic_id", "source_refs"]),
+        index,
+        "",
+        errors,
+      );
+      const ref = typeof raw.ref === "string" ? raw.ref : "";
+      if (!ref || ref.length > 128)
+        errors.push({
+          operation_index: index,
+          path: "ref",
+          code: "invalid_operation",
+          message: "group requires a non-empty ref.",
+        });
+      const planned = plannedByRef.get(ref);
+      const ids = resolveTargets(raw.targets, index, "targets", 2).map(
+        (target) => target.id,
+      );
+      if (!planned || planned.type !== "group") return;
+      rejectMixedHierarchyTargets(ids, index, "targets");
+      const metadata = normalizeMetadata(raw, index, "", errors);
+      claimSemanticId(planned.id, metadata);
+      setPlannedParent(planned.id, nearestCommonPlannedAncestor(ids));
+      ids.forEach((id) => setPlannedParent(id, planned.id));
+      normalized.push({
+        op: "group",
+        id: planned.id,
+        ref,
+        ids,
+        metadata,
+      });
+      return;
+    }
+
+    if (op === "ungroup") {
+      rejectUnknownKeys(raw, new Set(["op", "targets"]), index, "", errors);
+      const targets = resolveTargets(raw.targets, index, "targets");
+      const childIds: TLShapeId[] = [];
+      for (const target of targets) {
+        if (target.type !== "group") {
+          errors.push({
+            operation_index: index,
+            path: "targets",
+            code: "target_type_mismatch",
+            message: "ungroup targets must be group shapes.",
+          });
+          continue;
+        }
+        const plannedChildren = plannedChildrenOf(target.id);
+        childIds.push(...plannedChildren);
+        const groupParentId = plannedParentById.get(target.id) ?? null;
+        plannedChildren.forEach((id) => setPlannedParent(id, groupParentId));
+        removePlannedShape(target.id);
+        unavailableIds.add(target.id);
+        const semanticId = semanticByShapeId.get(target.id);
+        semanticOwners.get(semanticId ?? "")?.delete(target.id);
+        semanticByShapeId.delete(target.id);
+      }
+      normalized.push({
+        op: "ungroup",
+        ids: targets.map((target) => target.id),
+        childIds,
+      });
+      return;
+    }
+
+    if (op === "disconnect") {
+      rejectUnknownKeys(
+        raw,
+        new Set(["op", "target", "terminals"]),
+        index,
+        "",
+        errors,
+      );
+      const target = resolveTarget(raw.target, index, "target");
+      if (!target) return;
+      if (target.type !== "arrow") {
+        errors.push({
+          operation_index: index,
+          path: "target",
+          code: "target_type_mismatch",
+          message: "disconnect target must be an arrow.",
+        });
+        return;
+      }
+      const terminals =
+        raw.terminals === undefined
+          ? ["start", "end"]
+          : Array.isArray(raw.terminals) &&
+              raw.terminals.length > 0 &&
+              raw.terminals.length <= 2 &&
+              raw.terminals.every(
+                (terminal) => terminal === "start" || terminal === "end",
+              )
+            ? Array.from(new Set(raw.terminals))
+            : undefined;
+      if (!terminals) {
+        errors.push({
+          operation_index: index,
+          path: "terminals",
+          code: "invalid_enum_value",
+          message: "terminals must contain start, end, or both.",
+        });
+        return;
+      }
+      normalized.push({
+        op: "disconnect",
+        id: target.id,
+        terminals: terminals as ("start" | "end")[],
+      });
+      return;
+    }
+
+    if (op === "reparent") {
+      rejectUnknownKeys(
+        raw,
+        new Set(["op", "targets", "parent"]),
+        index,
+        "",
+        errors,
+      );
+      const targets = resolveTargets(raw.targets, index, "targets");
+      const parent =
+        raw.parent === null ? null : resolveTarget(raw.parent, index, "parent");
+      if (raw.parent !== null && !parent) return;
+      if (parent && parent.type !== "frame" && parent.type !== "group") {
+        errors.push({
+          operation_index: index,
+          path: "parent",
+          code: "target_type_mismatch",
+          message:
+            "reparent parent must be a frame, group, or null for the page.",
+        });
+      }
+      if (
+        parent &&
+        targets.some(
+          (target) =>
+            target.id === parent.id || hasPlannedAncestor(parent.id, target.id),
+        )
+      )
+        errors.push({
+          operation_index: index,
+          path: "parent",
+          code: "invalid_operation",
+          message:
+            "A shape cannot be reparented into itself or its descendant.",
+        });
+      normalized.push({
+        op: "reparent",
+        ids: targets.map((target) => target.id),
+        parentId: parent?.id ?? null,
+      });
+      targets.forEach((target) =>
+        setPlannedParent(target.id, parent?.id ?? null),
+      );
+      return;
+    }
+
+    if (
+      op === "reorder" ||
+      op === "rotate" ||
+      op === "flip" ||
+      op === "align" ||
+      op === "distribute" ||
+      op === "stack" ||
+      op === "pack"
+    ) {
+      const minimum =
+        op === "distribute"
+          ? 3
+          : op === "align" || op === "stack" || op === "pack"
+            ? 2
+            : 1;
+      const targets = resolveTargets(raw.targets, index, "targets", minimum);
+      const ids = targets.map((target) => target.id);
+      if (op !== "reorder") rejectMixedHierarchyTargets(ids, index, "targets");
+      if (op === "reorder") {
+        rejectUnknownKeys(
+          raw,
+          new Set(["op", "targets", "position", "consider_all_shapes"]),
+          index,
+          "",
+          errors,
+        );
+        if (
+          !["back", "backward", "forward", "front"].includes(
+            String(raw.position),
+          )
+        )
+          errors.push({
+            operation_index: index,
+            path: "position",
+            code: "invalid_enum_value",
+            message: "position must be back, backward, forward, or front.",
+          });
+        if (
+          raw.consider_all_shapes !== undefined &&
+          typeof raw.consider_all_shapes !== "boolean"
+        )
+          errors.push({
+            operation_index: index,
+            path: "consider_all_shapes",
+            code: "invalid_operation",
+            message: "consider_all_shapes must be a boolean.",
+          });
+        normalized.push({
+          op,
+          ids,
+          position: raw.position as "back" | "backward" | "forward" | "front",
+          considerAllShapes: raw.consider_all_shapes === true,
+        });
+      } else if (op === "rotate") {
+        rejectUnknownKeys(
+          raw,
+          new Set(["op", "targets", "degrees"]),
+          index,
+          "",
+          errors,
+        );
+        const degrees = finiteNumber(raw.degrees, index, "degrees", errors);
+        if (degrees !== undefined)
+          normalized.push({ op, ids, radians: (degrees * Math.PI) / 180 });
+      } else if (op === "flip") {
+        rejectUnknownKeys(
+          raw,
+          new Set(["op", "targets", "axis"]),
+          index,
+          "",
+          errors,
+        );
+        if (raw.axis !== "horizontal" && raw.axis !== "vertical")
+          errors.push({
+            operation_index: index,
+            path: "axis",
+            code: "invalid_enum_value",
+            message: "axis must be horizontal or vertical.",
+          });
+        else normalized.push({ op, ids, axis: raw.axis });
+      } else if (op === "align") {
+        rejectUnknownKeys(
+          raw,
+          new Set(["op", "targets", "alignment"]),
+          index,
+          "",
+          errors,
+        );
+        const alignments = [
+          "bottom",
+          "center-horizontal",
+          "center-vertical",
+          "left",
+          "right",
+          "top",
+        ] as const;
+        if (!alignments.includes(raw.alignment as (typeof alignments)[number]))
+          errors.push({
+            operation_index: index,
+            path: "alignment",
+            code: "invalid_enum_value",
+            message: "alignment is not supported.",
+          });
+        else
+          normalized.push({
+            op,
+            ids,
+            alignment: raw.alignment as (typeof alignments)[number],
+          });
+      } else if (op === "distribute") {
+        rejectUnknownKeys(
+          raw,
+          new Set(["op", "targets", "axis"]),
+          index,
+          "",
+          errors,
+        );
+        if (raw.axis !== "horizontal" && raw.axis !== "vertical")
+          errors.push({
+            operation_index: index,
+            path: "axis",
+            code: "invalid_enum_value",
+            message: "axis must be horizontal or vertical.",
+          });
+        else normalized.push({ op, ids, axis: raw.axis });
+      } else {
+        rejectUnknownKeys(
+          raw,
+          op === "stack"
+            ? new Set(["op", "targets", "axis", "gap"])
+            : new Set(["op", "targets", "gap"]),
+          index,
+          "",
+          errors,
+        );
+        const gap =
+          raw.gap === undefined
+            ? undefined
+            : finiteNumber(raw.gap, index, "gap", errors);
+        if (op === "stack") {
+          if (raw.axis !== "horizontal" && raw.axis !== "vertical")
+            errors.push({
+              operation_index: index,
+              path: "axis",
+              code: "invalid_enum_value",
+              message: "axis must be horizontal or vertical.",
+            });
+          else if (raw.gap === undefined || gap !== undefined)
+            normalized.push({
+              op,
+              ids,
+              axis: raw.axis,
+              ...(gap !== undefined ? { gap } : {}),
+            });
+        } else if (raw.gap === undefined || gap !== undefined) {
+          normalized.push({ op, ids, ...(gap !== undefined ? { gap } : {}) });
+        }
+      }
       return;
     }
 
@@ -969,12 +1698,12 @@ export const validateCanvasPatch = (
     if (raw.y !== undefined) update.y = finiteNumber(raw.y, index, "y", errors);
     const props = normalizeStyle(raw.style, shapeType, index, "style", errors);
     if (raw.text !== undefined) {
-      if (shapeType === "frame")
+      if (!new Set<ShapeType>(["geo", "text", "note"]).has(shapeType))
         errors.push({
           operation_index: index,
           path: "text",
           code: "target_type_mismatch",
-          message: "Frame shapes use name instead of text.",
+          message: `${shapeType} shapes do not support text updates.`,
         });
       else {
         const text = boundedString(raw.text, index, "text", errors, 20_000);
@@ -995,23 +1724,33 @@ export const validateCanvasPatch = (
       }
     }
     if (raw.width !== undefined) {
-      if (shapeType === "note")
+      if (
+        shapeType === "note" ||
+        shapeType === "draw" ||
+        shapeType === "highlight" ||
+        shapeType === "line"
+      )
         errors.push({
           operation_index: index,
           path: "width",
           code: "target_type_mismatch",
-          message: "Use resize for note dimensions.",
+          message: `Use resize for ${shapeType} dimensions.`,
         });
       else props.w = finiteNumber(raw.width, index, "width", errors, true);
     }
     if (raw.height !== undefined) {
       const height = finiteNumber(raw.height, index, "height", errors, true);
-      if (shapeType === "note")
+      if (
+        shapeType === "note" ||
+        shapeType === "draw" ||
+        shapeType === "highlight" ||
+        shapeType === "line"
+      )
         errors.push({
           operation_index: index,
           path: "height",
           code: "target_type_mismatch",
-          message: "Use resize for note dimensions.",
+          message: `Use resize for ${shapeType} dimensions.`,
         });
       else if (shapeType === "text")
         errors.push({
@@ -1049,7 +1788,23 @@ export const validateCanvasPatch = (
 
   const changedIds = new Set<TLShapeId>();
   for (const operation of normalized) {
-    if (operation.op === "delete") {
+    if (
+      operation.op === "delete" ||
+      operation.op === "ungroup" ||
+      operation.op === "reparent" ||
+      operation.op === "reorder" ||
+      operation.op === "rotate" ||
+      operation.op === "flip" ||
+      operation.op === "align" ||
+      operation.op === "distribute" ||
+      operation.op === "stack" ||
+      operation.op === "pack"
+    ) {
+      operation.ids.forEach((id) => changedIds.add(id));
+      if (operation.op === "ungroup")
+        operation.childIds.forEach((id) => changedIds.add(id));
+    } else if (operation.op === "group") {
+      changedIds.add(operation.id);
       operation.ids.forEach((id) => changedIds.add(id));
     } else {
       changedIds.add(operation.id);
@@ -1088,10 +1843,29 @@ const bindingProps = (terminal: "start" | "end") => ({
 
 export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
   const changedIds = new Set<TLShapeId>();
+  const beforeShapes = new Map(
+    allDocumentShapes(editor).map((shape) => [shape.id, shape]),
+  );
+  const requiresSelectTool = plan.operations.some(
+    (operation) => operation.op === "group" || operation.op === "ungroup",
+  );
+  const previousToolId = requiresSelectTool
+    ? editor.getCurrentToolId()
+    : undefined;
+  let switchedTool = false;
+  const restoreTool = () => {
+    if (!switchedTool || !previousToolId) return;
+    editor.setCurrentTool(previousToolId);
+    switchedTool = false;
+  };
   const mark = editor.markHistoryStoppingPoint(
     `canvas:${safeRef(plan.commandId)}`,
   );
   try {
+    if (previousToolId && previousToolId !== "select") {
+      editor.setCurrentTool("select");
+      switchedTool = true;
+    }
     editor.run(() => {
       for (const operation of plan.operations) {
         if (operation.op === "create") {
@@ -1175,6 +1949,82 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
             y: operation.height / bounds.h,
           });
           changedIds.add(operation.id);
+        } else if (operation.op === "disconnect") {
+          const shape = editor.getShape(operation.id);
+          if (!shape)
+            throw new Error("Disconnect target disappeared during apply.");
+          const bindings = editor
+            .getBindingsFromShape(shape, "arrow")
+            .filter((binding) =>
+              operation.terminals.includes(
+                (binding.props as { terminal?: "start" | "end" }).terminal ??
+                  "start",
+              ),
+            );
+          editor.deleteBindings(bindings);
+          changedIds.add(operation.id);
+        } else if (operation.op === "group") {
+          editor.groupShapes(operation.ids, {
+            groupId: operation.id,
+            select: false,
+          });
+          const group = editor.getShape(operation.id);
+          if (!group) throw new Error("Group was not created.");
+          editor.updateShape({
+            id: group.id,
+            type: group.type,
+            meta: mergeNomadMetadata(
+              group.meta,
+              plan.commandId,
+              operation.metadata,
+              "codex",
+            ),
+          } as never);
+          changedIds.add(operation.id);
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "ungroup") {
+          editor.ungroupShapes(operation.ids, { select: false });
+          if (operation.ids.some((id) => editor.getShape(id)))
+            throw new Error("One or more groups were not ungrouped.");
+          operation.ids.forEach((id) => changedIds.add(id));
+          operation.childIds.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "reparent") {
+          editor.reparentShapes(
+            operation.ids,
+            operation.parentId ?? editor.getCurrentPageId(),
+          );
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "reorder") {
+          if (operation.position === "back") editor.sendToBack(operation.ids);
+          else if (operation.position === "front")
+            editor.bringToFront(operation.ids);
+          else if (operation.position === "backward")
+            editor.sendBackward(operation.ids, {
+              considerAllShapes: operation.considerAllShapes,
+            });
+          else
+            editor.bringForward(operation.ids, {
+              considerAllShapes: operation.considerAllShapes,
+            });
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "rotate") {
+          editor.rotateShapesBy(operation.ids, operation.radians);
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "flip") {
+          editor.flipShapes(operation.ids, operation.axis);
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "align") {
+          editor.alignShapes(operation.ids, operation.alignment);
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "distribute") {
+          editor.distributeShapes(operation.ids, operation.axis);
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "stack") {
+          editor.stackShapes(operation.ids, operation.axis, operation.gap);
+          operation.ids.forEach((id) => changedIds.add(id));
+        } else if (operation.op === "pack") {
+          editor.packShapes(operation.ids, operation.gap);
+          operation.ids.forEach((id) => changedIds.add(id));
         } else {
           const existing = editor.getShape(operation.id);
           if (!existing)
@@ -1193,12 +2043,28 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
         }
       }
     });
+    const afterShapes = new Map(
+      allDocumentShapes(editor).map((shape) => [shape.id, shape]),
+    );
+    for (const id of new Set([...beforeShapes.keys(), ...afterShapes.keys()])) {
+      if (beforeShapes.get(id) !== afterShapes.get(id)) changedIds.add(id);
+    }
+    if (changedIds.size > CANVAS_PATCH_MAX_CHANGED_IDS)
+      throw new Error(
+        `Patch changed more than ${CANVAS_PATCH_MAX_CHANGED_IDS} shapes after tldraw layout effects.`,
+      );
+    restoreTool();
   } catch (error) {
     let rollbackMessage = "";
     try {
       editor.bailToMark(mark);
     } catch (rollbackError) {
       rollbackMessage = ` Rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+    }
+    try {
+      restoreTool();
+    } catch (restoreError) {
+      rollbackMessage += ` Tool restoration also failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`;
     }
     throw new CanvasProtocolError("patch_apply_failed", [
       {
