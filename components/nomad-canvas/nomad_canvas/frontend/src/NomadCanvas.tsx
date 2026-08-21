@@ -1,12 +1,9 @@
 import {
   Editor,
-  TLShapeId,
   TLStoreSnapshot,
   Tldraw,
-  createShapeId,
   getSvgAsImage,
   getSnapshot,
-  toRichText,
 } from "tldraw";
 import "tldraw/tldraw.css";
 import {
@@ -17,6 +14,16 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  applyCanvasPatch,
+  CanvasProtocolError,
+  validateCanvasPatch,
+} from "./canvas-protocol";
+import {
+  canBroadcastCanvasSnapshot,
+  canCompleteCanvasRequest,
+  canProcessCanvasRequest,
+} from "./canvas-snapshot-gate";
 
 export type NomadCanvasStateShape = Record<string, never>;
 
@@ -34,7 +41,17 @@ type CanvasRequest = {
   arguments?: Record<string, unknown>;
 };
 
-type PatchOperation = Record<string, unknown> & { op?: string };
+type CanvasResponseAck = {
+  ok: boolean;
+  error?: string;
+};
+
+type PendingCanvasApply = {
+  payload: Record<string, unknown>;
+  commit: () => void;
+  rollback: () => void;
+};
+
 type ConnectionState =
   "connecting" | "connected" | "reconnecting" | "disconnected";
 
@@ -138,14 +155,6 @@ const renderSceneImageSafely = async (exported: SceneSvgExport | undefined) => {
   }
 };
 
-const bindingProps = (terminal: "start" | "end") => ({
-  terminal,
-  isExact: false,
-  isPrecise: false,
-  normalizedAnchor: { x: 0.5, y: 0.5 },
-  snap: "none" as const,
-});
-
 const compactShape = (
   shape: Record<string, unknown>,
   pageBounds: { x: number; y: number; w: number; h: number } | undefined,
@@ -174,11 +183,6 @@ const compactShape = (
       }
     : {}),
 });
-
-const safeRef = (value: unknown): string =>
-  String(value || "shape")
-    .replace(/[^a-zA-Z0-9_-]/g, "-")
-    .slice(0, 48);
 
 const readScene = (
   activeEditor: Editor,
@@ -225,11 +229,12 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const websocketRef = useRef<WebSocket | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const applyingRemoteRef = useRef(false);
+  const commitEpochRef = useRef(0);
   const publishQueueRef = useRef<Promise<void>>(Promise.resolve());
   const documentVersionRef = useRef(0);
 
   const publishSnapshot = useCallback(
-    (activeEditor: Editor) => {
+    (activeEditor: Editor, broadcast = true) => {
       const publish = async () => {
         for (
           let attempt = 0;
@@ -266,8 +271,16 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
             ...sceneImage,
           };
 
-          if (websocketRef.current?.readyState === WebSocket.OPEN) {
-            websocketRef.current.send(
+          const activeWebsocket = websocketRef.current;
+          if (
+            activeWebsocket &&
+            canBroadcastCanvasSnapshot(
+              broadcast,
+              applyingRemoteRef.current,
+              activeWebsocket.readyState,
+            )
+          ) {
+            activeWebsocket.send(
               JSON.stringify({
                 type: "snapshot",
                 canvas_id: canvasId,
@@ -305,169 +318,54 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   );
 
   const applyPatch = useCallback(
-    async (activeEditor: Editor, args: Record<string, unknown>) => {
-      const operations = Array.isArray(args.operations)
-        ? (args.operations as PatchOperation[])
-        : [];
-      if (operations.length > 100) {
-        throw new Error("A canvas patch may contain at most 100 operations.");
-      }
-
-      const idsByRef = new Map<string, TLShapeId>();
-      const changedIds = new Set<TLShapeId>();
-      const resolveId = (value: unknown): TLShapeId => {
-        const text = String(value || "");
-        const mapped = idsByRef.get(text);
-        return (mapped || text) as TLShapeId;
-      };
-
+    async (
+      activeEditor: Editor,
+      args: Record<string, unknown>,
+    ): Promise<PendingCanvasApply> => {
+      const plan = validateCanvasPatch(activeEditor, args);
+      commitEpochRef.current += 1;
       applyingRemoteRef.current = true;
-      try {
-        activeEditor.run(() => {
-          for (const [operationIndex, operation] of operations.entries()) {
-            const op = String(operation.op || "");
-            if (op === "create") {
-              const ref = String(operation.ref || "");
-              const shape =
-                operation.shape && typeof operation.shape === "object"
-                  ? (operation.shape as Record<string, unknown>)
-                  : operation;
-              const type = String(shape.type || "geo");
-              const id = createShapeId(
-                `${safeRef(args.command_id)}-${safeRef(ref)}-${operationIndex}`,
-              );
-              const props = {
-                ...((shape.props as Record<string, unknown>) || {}),
-              };
-              const text = String(shape.text || "");
-              if (text) props.richText = toRichText(text);
-              if (type === "geo") {
-                props.geo = props.geo || "rectangle";
-                props.w = Number(props.w || shape.w || 240);
-                props.h = Number(props.h || shape.h || 120);
-              }
-              activeEditor.createShape({
-                id,
-                type,
-                x: Number(shape.x || 0),
-                y: Number(shape.y || 0),
-                props,
-                meta: { source: "codex", logicalRef: ref },
-              } as never);
-              if (ref) idsByRef.set(ref, id);
-              changedIds.add(id);
-              continue;
-            }
-
-            if (op === "delete") {
-              const ids = Array.isArray(operation.ids)
-                ? operation.ids.map(resolveId)
-                : [resolveId(operation.id)];
-              activeEditor.deleteShapes(ids.filter(Boolean));
-              ids.forEach((id) => changedIds.add(id));
-              continue;
-            }
-
-            if (op === "connect") {
-              const fromId = resolveId(operation.from);
-              const toId = resolveId(operation.to);
-              const from = activeEditor.getShape(fromId);
-              const to = activeEditor.getShape(toId);
-              if (!from || !to)
-                throw new Error("Connector endpoint not found.");
-              const fromBounds = activeEditor.getShapePageBounds(fromId);
-              const toBounds = activeEditor.getShapePageBounds(toId);
-              if (!fromBounds || !toBounds)
-                throw new Error("Connector bounds not found.");
-              const arrowId = createShapeId(
-                `${safeRef(args.command_id)}-arrow-${changedIds.size}`,
-              );
-              activeEditor.createShape({
-                id: arrowId,
-                type: "arrow",
-                x: fromBounds.center.x,
-                y: fromBounds.center.y,
-                props: {
-                  start: { x: 0, y: 0 },
-                  end: {
-                    x: toBounds.center.x - fromBounds.center.x,
-                    y: toBounds.center.y - fromBounds.center.y,
-                  },
-                },
-                meta: { source: "codex" },
-              } as never);
-              activeEditor.createBindings([
-                {
-                  type: "arrow",
-                  fromId: arrowId,
-                  toId: fromId,
-                  props: bindingProps("start"),
-                },
-                {
-                  type: "arrow",
-                  fromId: arrowId,
-                  toId,
-                  props: bindingProps("end"),
-                },
-              ] as never);
-              changedIds.add(arrowId);
-              continue;
-            }
-
-            const id = resolveId(operation.id);
-            const existing = activeEditor.getShape(id);
-            if (!existing)
-              throw new Error(`Shape not found: ${String(operation.id)}`);
-            if (op === "move") {
-              activeEditor.updateShape({
-                id,
-                type: existing.type,
-                x: Number(operation.x ?? existing.x),
-                y: Number(operation.y ?? existing.y),
-              } as never);
-            } else if (op === "resize") {
-              activeEditor.updateShape({
-                id,
-                type: existing.type,
-                props: {
-                  w: Number(operation.w || 100),
-                  h: Number(operation.h || 100),
-                },
-              } as never);
-            } else if (op === "update") {
-              const props = {
-                ...((operation.props as Record<string, unknown>) || {}),
-              };
-              if (operation.text !== undefined) {
-                props.richText = toRichText(String(operation.text));
-              }
-              activeEditor.updateShape({
-                id,
-                type: existing.type,
-                ...(operation.x !== undefined
-                  ? { x: Number(operation.x) }
-                  : {}),
-                ...(operation.y !== undefined
-                  ? { y: Number(operation.y) }
-                  : {}),
-                props,
-              } as never);
-            } else {
-              throw new Error(`Unsupported canvas operation: ${op}`);
-            }
-            changedIds.add(id);
-          }
-        });
-      } finally {
-        applyingRemoteRef.current = false;
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
       }
-
-      const snapshot = await publishSnapshot(activeEditor);
-      return {
-        ...snapshot,
-        changed_ids: Array.from(changedIds),
-        refs: Object.fromEntries(idsByRef),
+      const wasReadonly = activeEditor.getIsReadonly();
+      let rollback: (() => void) | undefined;
+      const finish = () => {
+        activeEditor.updateInstanceState({ isReadonly: wasReadonly });
+        applyingRemoteRef.current = false;
       };
+      try {
+        const applied = applyCanvasPatch(activeEditor, plan);
+        rollback = applied.rollback;
+        activeEditor.updateInstanceState({ isReadonly: true });
+        const snapshot = await publishSnapshot(activeEditor, false);
+        let settled = false;
+        return {
+          payload: { ...snapshot, ...applied.result },
+          commit: () => {
+            if (settled) return;
+            settled = true;
+            finish();
+          },
+          rollback: () => {
+            if (settled) return;
+            settled = true;
+            try {
+              applied.rollback();
+            } finally {
+              finish();
+            }
+          },
+        };
+      } catch (error) {
+        try {
+          rollback?.();
+        } finally {
+          finish();
+        }
+        throw error;
+      }
     },
     [publishSnapshot],
   );
@@ -499,6 +397,67 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
     let disposed = false;
     let retryTimer: number | null = null;
     let websocket: WebSocket | null = null;
+    const responseAcks = new Map<
+      string,
+      {
+        arguments: Record<string, unknown>;
+        resolve: (ack: CanvasResponseAck) => void;
+      }
+    >();
+    const failPendingAcks = (error: string) => {
+      for (const pending of responseAcks.values()) {
+        pending.resolve({ ok: false, error });
+      }
+      responseAcks.clear();
+    };
+    const requestPendingCommitStatuses = (activeWebsocket: WebSocket) => {
+      if (activeWebsocket.readyState !== WebSocket.OPEN) return;
+      for (const [requestId, pending] of responseAcks) {
+        activeWebsocket.send(
+          JSON.stringify({
+            type: "command_status",
+            id: requestId,
+            arguments: pending.arguments,
+          }),
+        );
+      }
+    };
+    const waitForResponseAck = (
+      requestId: string,
+      args: Record<string, unknown>,
+    ) =>
+      new Promise<CanvasResponseAck>((resolve) => {
+        responseAcks.set(requestId, {
+          arguments: args,
+          resolve: (ack) => {
+            responseAcks.delete(requestId);
+            resolve(ack);
+          },
+        });
+      });
+    const statusTimer = window.setInterval(() => {
+      if (websocket) requestPendingCommitStatuses(websocket);
+    }, 5_000);
+    const sendCommitPending = (
+      activeWebsocket: WebSocket,
+      requestId: string,
+    ) => {
+      if (activeWebsocket.readyState !== WebSocket.OPEN) return;
+      activeWebsocket.send(
+        JSON.stringify({
+          type: "response",
+          id: requestId,
+          ok: false,
+          error: "canvas_commit_pending",
+          payload: {
+            error: "canvas_commit_pending",
+            retryable: true,
+            message:
+              "The previous Canvas command is still awaiting commit acknowledgement.",
+          },
+        }),
+      );
+    };
 
     const connect = () => {
       if (disposed) return;
@@ -513,7 +472,10 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         nextWebsocket.send(
           JSON.stringify({ type: "hello", canvas_id: canvasId }),
         );
-        void publishSnapshot(editor).catch(() => undefined);
+        requestPendingCommitStatuses(nextWebsocket);
+        if (responseAcks.size === 0) {
+          void publishSnapshot(editor).catch(() => undefined);
+        }
       };
       nextWebsocket.onclose = (event) => {
         if (disposed) return;
@@ -521,6 +483,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           websocketRef.current = null;
         }
         if ([4001, 4401, 4404].includes(event.code)) {
+          failPendingAcks("canvas_commit_status_unavailable");
           setConnectionState("disconnected");
           return;
         }
@@ -530,19 +493,82 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       nextWebsocket.onerror = () => nextWebsocket.close();
       nextWebsocket.onmessage = (event) => {
         void (async () => {
-          let message: { type?: string; request?: CanvasRequest };
+          let message: {
+            type?: string;
+            request?: CanvasRequest;
+            id?: string;
+            ok?: boolean;
+            error?: string;
+          };
           try {
             message = JSON.parse(String(event.data));
           } catch {
             return;
           }
+          if (message.type === "response_ack" && message.id) {
+            responseAcks.get(message.id)?.resolve({
+              ok: Boolean(message.ok),
+              error: message.error,
+            });
+            return;
+          }
           const request = message.request;
           if (message.type !== "request" || !request) return;
+          if (!canProcessCanvasRequest(applyingRemoteRef.current)) {
+            sendCommitPending(nextWebsocket, request.id);
+            return;
+          }
+          if (request.method === "apply_patch") {
+            let pendingApply: PendingCanvasApply;
+            try {
+              pendingApply = await applyPatch(editor, request.arguments || {});
+            } catch (error) {
+              if (nextWebsocket.readyState === WebSocket.OPEN) {
+                const payload =
+                  error instanceof CanvasProtocolError
+                    ? error.toPayload()
+                    : undefined;
+                nextWebsocket.send(
+                  JSON.stringify({
+                    type: "response",
+                    id: request.id,
+                    ok: false,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                    ...(payload ? { payload } : {}),
+                  }),
+                );
+              }
+              return;
+            }
+
+            const ack = waitForResponseAck(request.id, request.arguments || {});
+            nextWebsocket.send(
+              JSON.stringify({
+                type: "response",
+                id: request.id,
+                ok: true,
+                payload: pendingApply.payload,
+              }),
+            );
+            const commitResult = await ack;
+            if (commitResult.ok) pendingApply.commit();
+            else pendingApply.rollback();
+            return;
+          }
           try {
-            const payload =
-              request.method === "read_scene"
-                ? await publishSnapshot(editor)
-                : await applyPatch(editor, request.arguments || {});
+            const startedAtCommitEpoch = commitEpochRef.current;
+            const payload = await publishSnapshot(editor);
+            if (
+              !canCompleteCanvasRequest(
+                startedAtCommitEpoch,
+                commitEpochRef.current,
+                applyingRemoteRef.current,
+              )
+            ) {
+              sendCommitPending(nextWebsocket, request.id);
+              return;
+            }
             nextWebsocket.send(
               JSON.stringify({
                 type: "response",
@@ -553,12 +579,17 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
             );
           } catch (error) {
             if (nextWebsocket.readyState === WebSocket.OPEN) {
+              const payload =
+                error instanceof CanvasProtocolError
+                  ? error.toPayload()
+                  : undefined;
               nextWebsocket.send(
                 JSON.stringify({
                   type: "response",
                   id: request.id,
                   ok: false,
                   error: error instanceof Error ? error.message : String(error),
+                  ...(payload ? { payload } : {}),
                 }),
               );
             }
@@ -571,6 +602,8 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
 
     return () => {
       disposed = true;
+      failPendingAcks("canvas_component_disposed_before_commit");
+      window.clearInterval(statusTimer);
       if (retryTimer !== null) window.clearTimeout(retryTimer);
       websocket?.close();
       websocketRef.current = null;

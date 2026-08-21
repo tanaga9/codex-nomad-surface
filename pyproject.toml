@@ -21,6 +21,7 @@ asset_dir = "ui_components/nomad_canvas"
 
 [project.optional-dependencies]
 test = [
+    "jsonschema>=4.0",
     "pytest>=8.0",
 ]
 

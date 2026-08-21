@@ -10,6 +10,7 @@
     "dev": "cross-env NODE_ENV=development vite build --watch",
     "format": "prettier --write src/**/*.{ts,tsx} scripts/*.mjs vite.config.ts",
     "sync:runtime": "node scripts/sync-runtime-build.mjs",
+    "test:protocol": "node scripts/test-canvas-protocol.mjs",
     "typecheck": "tsc --noEmit"
   },
   "browserslist": [

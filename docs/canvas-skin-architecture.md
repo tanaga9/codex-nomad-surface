@@ -22,8 +22,14 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   instead of backing files or unrelated offline integrations.
 - The Canvas Skin mounts tldraw through a packaged Streamlit CCv2 component.
 - A same-origin WebSocket brokers `read_scene` and bounded `apply_patch` calls.
+- `apply_patch` exposes closed schemas for create, update, move, resize, delete,
+  and connect. The browser validates and normalizes the complete batch before
+  writing, then applies it as one undoable transaction with rollback on error.
 - The editable tldraw snapshot, SVG preview, manifest, and bounded revisions
   are saved atomically under `.nomad_surface/canvases/`.
+- Successful apply commands persist hashed, versioned receipts. Repeated
+  commands replay the committed result, conflicts fail closed, and missing
+  receipts can be reconstructed from bounded revision metadata.
 - A Canvas is bound to its App Server thread after the first turn starts.
 - Canvas drafts are restored from their manifests after a browser refresh or
   process restart, even before they have an App Server thread.
@@ -40,8 +46,8 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   without polling and redrawing the completed history.
 - Canvas metadata and export actions are kept in a compact disclosure.
 
-The prototype does not yet implement asset ingestion, command receipt files,
-fork-copy behavior, or the full proposed operation vocabulary.
+The prototype does not yet implement asset ingestion, fork-copy behavior, or
+the full proposed operation vocabulary beyond the six operations above.
 Before production distribution, the tldraw production-license prompt visible
 in the editor must also be resolved under the chosen tldraw license.
 
@@ -163,6 +169,10 @@ SQLite service, or tldraw sync service.
 - Produces document snapshots and rendered previews.
 - Applies validated Codex operations as one editor transaction and one undo
   unit.
+- Holds that transaction behind a short read-only commit barrier. The Runtime
+  acknowledges it only after the revision and receipt are durable. If the
+  acknowledgement is lost, reconnect/status checks reconcile the receipt
+  before the editor commits or rolls back its mark.
 - Assigns valid tldraw record IDs to newly created objects.
 - Creates real bindings for meaningful connectors.
 - Keeps camera, zoom, selection, and active-tool state local to the browser.
@@ -282,11 +292,15 @@ the command.
    checkpoint when a live read is not required.
 6. Codex calls `canvas.apply_patch` with the observed base revision.
 7. The Runtime rejects a stale revision or forwards the command to the editor.
-8. The editor validates and applies the batch as one undoable transaction.
-9. The updated document is checkpointed immediately.
-10. The tool result returns the resulting revision, changed IDs, logical-ID
+8. The editor validates and applies the batch as one rollback-capable
+   transaction, then temporarily blocks local editing.
+9. The updated document and command receipt are checkpointed immediately.
+10. The Runtime acknowledges the commit. A rejection rolls the editor back;
+    an uncertain disconnect is reconciled against the durable receipt before
+    local editing resumes.
+11. The tool result returns the resulting revision, changed IDs, logical-ID
    mapping, warnings, and current file references.
-11. Codex continues the same turn and explains the completed change.
+12. Codex continues the same turn and explains the completed change.
 
 ## File-Backed Storage
 
@@ -350,7 +364,7 @@ An illustrative manifest is:
   "draft_id": "local-draft-123",
   "thread_id": "thread-123",
   "current_revision": 42,
-  "document": "current/document.json",
+  "document": "revisions/00000042/document.json",
   "preview": "current/preview.svg",
   "updated_at": "2026-08-15T12:34:56Z"
 }
@@ -368,14 +382,18 @@ A document commit follows this sequence:
    a Codex command.
 3. Create the next numbered revision directory, or reuse it if an interrupted
    save left it uncommitted.
-4. Atomically replace the revision files, current document, and SVG preview.
-5. Atomically update the manifest last, making the revision current.
-6. Prune old revisions beyond the retention limit.
+4. Atomically replace the numbered revision document and metadata.
+5. Atomically update the manifest last, making that immutable document current.
+6. Best-effort materialize the `current/` compatibility cache.
+7. Prune old revisions beyond the retention limit.
 
 This intentionally uses individual atomic file replacements instead of a
 cross-file transaction. The manifest is the commit authority: if a save stops
-before it is updated, the next save safely overwrites and completes that same
-revision.
+before step 5, readers continue using the preceding revision. A failure after
+step 5 cannot turn a durable command into a negative acknowledgement; readers
+resolve the document path from the manifest instead of depending on the cache.
+An interrupted pre-commit revision directory is safely overwritten and
+completed by the next save.
 
 ### Save Triggers
 
@@ -393,7 +411,9 @@ in-process lock is sufficient for writes.
 
 Every Codex apply request has a command ID. The corresponding receipt file
 makes retries idempotent: a repeated command returns the stored result instead
-of applying the operations again.
+of applying the operations again. Every newly accepted command creates one
+revision, including a command whose resulting document is unchanged; this
+keeps receipt persistence on a single commit path.
 
 Optimistic revision checks protect user edits:
 
@@ -427,8 +447,11 @@ problem.
 
 ## Failure Behavior
 
-- **Browser disconnect:** fail pending apply calls promptly with
-  `canvas_unavailable`; retain the last committed checkpoint.
+- **Uncertain browser disconnect:** keep the commit barrier active and reconcile
+  the durable receipt after reconnecting; terminal connection failures reject
+  the apply and retain the last committed checkpoint.
+- **Concurrent request during commit:** return the retryable
+  `canvas_commit_pending` error without exposing the uncommitted document.
 - **Stale revision:** return `revision_conflict` and the current revision.
 - **Repeated command:** return the existing command receipt.
 - **Preview failure:** keep the document commit and expose a retryable warning.

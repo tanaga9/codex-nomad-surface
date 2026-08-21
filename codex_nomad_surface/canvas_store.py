@@ -16,6 +16,10 @@ CANVAS_ROOT = Path(".nomad_surface") / "canvases"
 CANVAS_ID_PATTERN = re.compile(r"^canvas-[0-9a-f]{24}$")
 CANVAS_REVISION_LIMIT = 40
 CANVAS_SCHEMA_VERSION = 3
+CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION = 1
+CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS = 500
+CANVAS_COMMAND_RECEIPT_MAX_REFS = 500
+CANVAS_COMMAND_RECEIPT_MAX_WARNINGS = 100
 CANVAS_PREVIEW_IMAGE_MIME_TYPE = "image/webp"
 CANVAS_PREVIEW_IMAGE_MIME_TYPES = frozenset(
     {"image/webp", "image/jpeg", "image/png"}
@@ -38,6 +42,10 @@ class CanvasManifestVersionError(RuntimeError):
             f"{schema_version} is newer than supported version {CANVAS_SCHEMA_VERSION}."
         )
         self.schema_version = schema_version
+
+
+class CanvasCommandReceiptError(RuntimeError):
+    pass
 
 
 def canvas_id_for_thread(thread_id: str) -> str:
@@ -92,6 +100,139 @@ def _atomic_write(path: Path, content: bytes) -> None:
 
 def _manifest_path(canvas_id: str) -> Path:
     return canvas_directory(canvas_id) / "manifest.json"
+
+
+def _command_receipt_path(canvas_id: str, command_id: str) -> Path:
+    digest = hashlib.sha256(command_id.encode("utf-8")).hexdigest()
+    return canvas_directory(canvas_id) / "commands" / f"{digest}.json"
+
+
+def _validate_command_receipt(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CanvasCommandReceiptError("Canvas command receipt is not an object.")
+    required = {
+        "schema_version",
+        "command_id",
+        "input_hash",
+        "base_revision",
+        "result_revision",
+        "changed_ids",
+        "refs",
+        "warnings",
+        "committed_at",
+    }
+    if set(value) != required:
+        raise CanvasCommandReceiptError("Canvas command receipt fields are invalid.")
+    if value.get("schema_version") != CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION:
+        raise CanvasCommandReceiptError("Canvas command receipt version is unsupported.")
+    command_id = value.get("command_id")
+    input_hash = value.get("input_hash")
+    changed_ids = value.get("changed_ids")
+    refs = value.get("refs")
+    warnings = value.get("warnings")
+    if not isinstance(command_id, str) or not 1 <= len(command_id) <= 128:
+        raise CanvasCommandReceiptError("Canvas command receipt command ID is invalid.")
+    if not isinstance(input_hash, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", input_hash):
+        raise CanvasCommandReceiptError("Canvas command receipt input hash is invalid.")
+    if type(value.get("base_revision")) is not int or value["base_revision"] < 0:
+        raise CanvasCommandReceiptError("Canvas command receipt base revision is invalid.")
+    if type(value.get("result_revision")) is not int or value["result_revision"] < 0:
+        raise CanvasCommandReceiptError("Canvas command receipt result revision is invalid.")
+    if (
+        not isinstance(changed_ids, list)
+        or len(changed_ids) > CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS
+        or any(not isinstance(item, str) or len(item) > 256 for item in changed_ids)
+    ):
+        raise CanvasCommandReceiptError("Canvas command receipt changed IDs are invalid.")
+    if (
+        not isinstance(refs, dict)
+        or len(refs) > CANVAS_COMMAND_RECEIPT_MAX_REFS
+        or any(
+            not isinstance(key, str)
+            or not isinstance(item, str)
+            or len(key) > 128
+            or len(item) > 256
+            for key, item in refs.items()
+        )
+    ):
+        raise CanvasCommandReceiptError("Canvas command receipt refs are invalid.")
+    if (
+        not isinstance(warnings, list)
+        or len(warnings) > CANVAS_COMMAND_RECEIPT_MAX_WARNINGS
+        or any(not isinstance(item, str) or len(item) > 500 for item in warnings)
+    ):
+        raise CanvasCommandReceiptError("Canvas command receipt warnings are invalid.")
+    if not isinstance(value.get("committed_at"), str) or len(value["committed_at"]) > 64:
+        raise CanvasCommandReceiptError("Canvas command receipt timestamp is invalid.")
+    return value
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise CanvasCommandReceiptError("Canvas command receipt could not be read.") from exc
+    if not isinstance(value, dict):
+        raise CanvasCommandReceiptError("Canvas command receipt is not an object.")
+    return value
+
+
+def _materialize_command_receipt(path: Path, receipt: dict[str, Any]) -> None:
+    """Best-effort cache for receipts whose committed metadata is authoritative."""
+    try:
+        _atomic_write(path, _json_bytes(receipt))
+    except OSError:
+        pass
+
+
+def read_canvas_command_receipt(
+    canvas_id: str, command_id: str
+) -> dict[str, Any] | None:
+    if not isinstance(command_id, str) or not 1 <= len(command_id) <= 128:
+        raise CanvasCommandReceiptError("Canvas command ID is invalid.")
+    with _canvas_lock(canvas_id):
+        manifest = read_canvas_manifest(canvas_id)
+        if not manifest:
+            raise FileNotFoundError("Canvas manifest was not found.")
+        current_revision = int(manifest.get("current_revision") or 0)
+        receipt_path = _command_receipt_path(canvas_id, command_id)
+        raw = _read_json_object(receipt_path)
+        if raw is not None:
+            receipt = _validate_command_receipt(raw)
+            if receipt["command_id"] != command_id:
+                raise CanvasCommandReceiptError("Canvas command receipt ID does not match.")
+            if receipt["result_revision"] > current_revision:
+                raise CanvasCommandReceiptError(
+                    "Canvas command receipt references an uncommitted revision."
+                )
+            return receipt
+
+        revisions = canvas_directory(canvas_id) / "revisions"
+        lower_bound = max(1, current_revision - CANVAS_REVISION_LIMIT + 1)
+        for revision in range(current_revision, lower_bound - 1, -1):
+            metadata = _read_json_object(
+                revisions / f"{revision:08d}" / "metadata.json"
+            )
+            if not metadata:
+                continue
+            candidate = metadata.get("command_receipt")
+            if not (
+                isinstance(candidate, dict)
+                and candidate.get("command_id") == command_id
+            ):
+                candidate = None
+            if candidate is None:
+                continue
+            receipt = _validate_command_receipt(candidate)
+            if receipt["result_revision"] != revision:
+                raise CanvasCommandReceiptError(
+                    "Canvas command receipt revision metadata does not match."
+                )
+            _materialize_command_receipt(receipt_path, receipt)
+            return receipt
+        return None
 
 
 def read_canvas_manifest(canvas_id: str) -> dict[str, Any] | None:
@@ -249,7 +390,13 @@ def list_canvas_manifests() -> list[dict[str, Any]]:
 
 
 def load_canvas_document(canvas_id: str) -> dict[str, Any] | None:
-    path = canvas_directory(canvas_id) / "current" / "document.json"
+    manifest = read_canvas_manifest(canvas_id)
+    if not manifest:
+        return None
+    relative_path = Path(str(manifest.get("document") or "current/document.json"))
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return None
+    path = canvas_directory(canvas_id) / relative_path
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -299,6 +446,26 @@ def _prune_revisions(directory: Path) -> None:
         revision.rmdir()
 
 
+def _materialize_current_snapshot(
+    document_path: Path,
+    document_bytes: bytes,
+    preview_path: Path,
+    preview_bytes: bytes,
+    visual_preview_path: Path,
+    visual_preview_bytes: bytes,
+) -> None:
+    """Best-effort compatibility cache written only after the manifest commit."""
+    for path, content in (
+        (document_path, document_bytes),
+        (preview_path, preview_bytes),
+        (visual_preview_path, visual_preview_bytes),
+    ):
+        try:
+            _atomic_write(path, content)
+        except OSError:
+            pass
+
+
 def save_canvas_snapshot(
     canvas_id: str,
     document: dict[str, Any],
@@ -307,6 +474,7 @@ def save_canvas_snapshot(
     preview_image_mime_type: str = CANVAS_PREVIEW_IMAGE_MIME_TYPE,
     *,
     expected_revision: int | None = None,
+    command_receipt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise ValueError("Canvas document must be a JSON object.")
@@ -338,6 +506,20 @@ def save_canvas_snapshot(
         if expected_revision is not None and expected_revision != current_revision:
             raise CanvasRevisionConflict(current_revision)
 
+        receipt_base: dict[str, Any] | None = None
+        if command_receipt is not None:
+            receipt_base = {
+                "schema_version": CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION,
+                "command_id": command_receipt.get("command_id"),
+                "input_hash": command_receipt.get("input_hash"),
+                "base_revision": command_receipt.get("base_revision"),
+                "result_revision": current_revision,
+                "changed_ids": command_receipt.get("changed_ids", []),
+                "refs": command_receipt.get("refs", {}),
+                "warnings": command_receipt.get("warnings", []),
+                "committed_at": _timestamp(),
+            }
+
         directory = canvas_directory(canvas_id)
         current_document = directory / "current" / "document.json"
         current_preview = directory / "current" / "preview.svg"
@@ -346,7 +528,7 @@ def save_canvas_snapshot(
             preview_image is not None
             and manifest.get("visual_preview_mime_type") != preview_image_mime_type
         )
-        if manifest.get("content_hash") == content_hash:
+        if manifest.get("content_hash") == content_hash and receipt_base is None:
             if preview_svg != load_canvas_preview(canvas_id):
                 _atomic_write(current_preview, preview_svg.encode("utf-8"))
             if (
@@ -366,30 +548,61 @@ def save_canvas_snapshot(
         # The manifest remains the authority for the current revision.
         revision_directory.mkdir(parents=True, exist_ok=True)
         _atomic_write(revision_directory / "document.json", document_bytes)
+        revision_metadata: dict[str, Any] = {
+            "revision": revision,
+            "created_at": _timestamp(),
+        }
+        if receipt_base is not None:
+            receipt_base["result_revision"] = revision
+            receipt_base["committed_at"] = _timestamp()
+            revision_metadata["command_receipt"] = _validate_command_receipt(
+                receipt_base
+            )
         _atomic_write(
-            revision_directory / "metadata.json",
-            _json_bytes({"revision": revision, "created_at": _timestamp()}),
+            revision_directory / "metadata.json", _json_bytes(revision_metadata)
         )
-        _atomic_write(current_document, document_bytes)
-        _atomic_write(current_preview, preview_svg.encode("utf-8"))
-        _atomic_write(current_visual_preview, preview_image or b"")
 
         manifest = {
             **manifest,
             "current_revision": revision,
+            "document": f"revisions/{revision:08d}/document.json",
             "content_hash": content_hash,
             "updated_at": _timestamp(),
             "visual_preview_mime_type": preview_image_mime_type,
         }
         _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
-        _prune_revisions(directory / "revisions")
+        _materialize_current_snapshot(
+            current_document,
+            document_bytes,
+            current_preview,
+            preview_svg.encode("utf-8"),
+            current_visual_preview,
+            preview_image or b"",
+        )
+        if receipt_base is not None:
+            receipt = _validate_command_receipt(receipt_base)
+            _materialize_command_receipt(
+                _command_receipt_path(canvas_id, receipt["command_id"]), receipt
+            )
+        try:
+            _prune_revisions(directory / "revisions")
+        except OSError:
+            # Retention cleanup happens after the manifest commit and must not turn a
+            # durable command into a negative acknowledgement.
+            pass
         return manifest
 
 
 def canvas_file_references(canvas_id: str) -> dict[str, str]:
     directory = canvas_directory(canvas_id).resolve()
+    manifest = read_canvas_manifest(canvas_id) or {}
+    document_path = Path(
+        str(manifest.get("document") or "current/document.json")
+    )
+    if document_path.is_absolute() or ".." in document_path.parts:
+        document_path = Path("current/document.json")
     return {
-        "document_path": str(directory / "current" / "document.json"),
+        "document_path": str(directory / document_path),
         "preview_path": str(directory / "current" / "preview.svg"),
         "visual_preview_path": str(directory / CANVAS_VISUAL_PREVIEW_PATH),
     }
