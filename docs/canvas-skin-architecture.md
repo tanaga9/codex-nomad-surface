@@ -232,9 +232,11 @@ The initial Canvas Skin exposes only two dynamic tools.
 
 ### `canvas.read_scene`
 
-Returns a compact semantic representation plus a whole-canvas WebP image rather
-than relying on the raw tldraw store alone. Codex uses the image for visual
-composition and the structured scene for exact object identity and geometry.
+Returns a bounded semantic representation for an `all`, `viewport`,
+`selection`, `bounds`, `frame`, or `shape_ids` scope rather than relying on the
+raw tldraw store alone. Detail can be `compact`, `standard`, or bounded `full`.
+Codex uses an optional scope-specific image for visual composition and the
+structured scene for exact object identity and geometry.
 
 The result includes:
 
@@ -243,15 +245,19 @@ The result includes:
 - shape IDs, types, bounds, and text;
 - groups and parent-child relationships;
 - bindings and connector endpoints;
-- optionally the current selection or viewport subset;
+- explicit truncation counts and a narrower-scope suggestion;
 - file references for the latest document and preview.
-- an `inputImage` content item containing the whole current canvas when it is
-  non-empty.
+- an optional `inputImage` content item containing only the requested scope.
 
 When the live editor is disconnected, this tool may read the most recent saved
 document. Its result must state that it is a saved checkpoint rather than live
-state. Raster export or validation failure never blocks the canonical document
-or SVG save; the result reports that the visual preview is unavailable instead.
+state. `viewport` and `selection` require a live editor; saved checkpoints can
+resolve `frame` and `shape_ids`, `all` for a single-page checkpoint, and
+`bounds` when every saved shape has directly resolvable page-space geometry.
+Ambiguous page or bounds reads fail closed and require the live editor. A
+scoped offline read never substitutes an unrelated whole-canvas preview. Raster
+export or validation failure never blocks the canonical document or SVG save;
+the result reports that the visual preview is unavailable instead.
 
 ### `canvas.apply_patch`
 

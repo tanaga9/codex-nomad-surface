@@ -13,7 +13,7 @@ It does not cover automatic layout, a tldraw sync server, arbitrary JavaScript,
 or the future page/group/reorder operation vocabulary. Those features should
 build on the hardened contracts described here.
 
-Phase 1 is implemented. Phases 2 and 3 remain planned work.
+Phases 1 and 2 are implemented. Phase 3 remains planned work.
 
 ## Baseline before hardening
 
@@ -271,6 +271,10 @@ Rules:
 
 ## Phase 2: Compact results and scoped reads
 
+Implementation status: complete. Live reads use tldraw 5.3.1 public Editor
+APIs for page-space viewport/bounds queries, descendants, bindings, sorted
+shapes, and scoped SVG export.
+
 ### Separate persistence from model output
 
 Replace the coupled `publishSnapshot` responsibility with:
@@ -358,6 +362,12 @@ connector or either endpoint is in scope; mark the other endpoint
 Bound requested IDs, resolved shapes, bounds dimensions, image dimensions,
 encoded image bytes, and included text/metadata lengths.
 
+The implemented limits are 100 requested IDs, 500 returned shapes, 1,000
+returned bindings,
+1,000,000 page units per coordinate or dimension, 2,000 characters per text
+summary, 20,000 serialized characters per full props/meta value, a 2,048-pixel
+maximum image dimension, and 8 MiB of encoded source image bytes.
+
 ```json
 {
   "truncated": true,
@@ -375,7 +385,9 @@ Offline behavior:
 
 - set `live` to `false`;
 - return `scope_requires_live_editor` for `viewport` and `selection`;
-- allow document-resolvable scopes from the saved checkpoint;
+- allow document-resolvable scopes from the saved checkpoint, but require the
+  live editor when an offline bounds read would need parent or rotation
+  transforms;
 - report preview availability instead of inventing live state.
 
 ### Phase 2 completion criteria

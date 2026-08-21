@@ -108,15 +108,17 @@ def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
     canvas_id = manifest["canvas_id"]
     canvas_store.save_canvas_snapshot(
         canvas_id,
-        {
-            "store": {
-                "shape:one": {
-                    "id": "shape:one",
-                    "typeName": "shape",
-                    "type": "text",
+            {
+                "store": {
+                    "page:one": {"id": "page:one", "typeName": "page"},
+                    "shape:one": {
+                        "id": "shape:one",
+                        "typeName": "shape",
+                        "type": "text",
+                        "parentId": "page:one",
+                    }
                 }
-            }
-        },
+            },
         "<svg />",
         b"RIFF\x04\x00\x00\x00WEBP",
     )
@@ -129,12 +131,196 @@ def test_offline_read_scene_returns_saved_canvas(isolated_canvas_root):
     assert result["success"] is True
     assert payload["live"] is False
     assert payload["revision"] == 1
-    assert payload["scene"]["shapes"][0]["id"] == "shape:one"
+    assert payload["shapes"][0]["id"] == "shape:one"
+    assert payload["scope"] == {"type": "all"}
+    assert payload["detail"] == "compact"
     assert payload["document_path"].endswith("revisions/00000001/document.json")
     assert result["contentItems"][1]["type"] == "inputImage"
     assert result["contentItems"][1]["imageUrl"].startswith(
         "data:image/webp;base64,"
     )
+
+
+def test_offline_scoped_reads_resolve_frames_and_fail_closed_for_nested_bounds(
+    isolated_canvas_root,
+):
+    manifest = canvas_store.initialize_canvas("thread-offline-scopes")
+    canvas_id = manifest["canvas_id"]
+    document = {
+        "store": {
+            "page:one": {"id": "page:one", "typeName": "page"},
+            "page:two": {"id": "page:two", "typeName": "page"},
+            "shape:frame": {
+                "id": "shape:frame",
+                "typeName": "shape",
+                "type": "frame",
+                "parentId": "page:two",
+                "index": "a1",
+                "x": 0,
+                "y": 0,
+                "props": {"w": 400, "h": 300, "name": "Process"},
+            },
+            "shape:child": {
+                "id": "shape:child",
+                "typeName": "shape",
+                "type": "geo",
+                "parentId": "shape:frame",
+                "index": "a2",
+                "x": 20,
+                "y": 20,
+                "props": {
+                    "w": 100,
+                    "h": 60,
+                    "richText": {
+                        "type": "doc",
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [
+                                    {"type": "text", "text": "Child label"}
+                                ],
+                            }
+                        ],
+                    },
+                },
+            },
+            "shape:outside": {
+                "id": "shape:outside",
+                "typeName": "shape",
+                "type": "arrow",
+                "parentId": "page:two",
+                "index": "a3",
+                "x": 700,
+                "y": 700,
+                "props": {"start": {"x": 0, "y": 0}, "end": {"x": 20, "y": 20}},
+            },
+            "binding:outside-child": {
+                "id": "binding:outside-child",
+                "typeName": "binding",
+                "type": "arrow",
+                "fromId": "shape:outside",
+                "toId": "shape:child",
+                "props": {},
+            },
+        }
+    }
+    canvas_store.save_canvas_snapshot(canvas_id, document)
+    handler = canvas_dynamic_tool_handler_for_canvas(canvas_id)
+
+    frame_result = handler(
+        {
+            "namespace": "canvas",
+            "tool": "read_scene",
+            "arguments": {
+                "scope": {"type": "frame", "id": "shape:frame"},
+                "include_image": True,
+            },
+        }
+    )
+    frame_payload = json.loads(frame_result["contentItems"][0]["text"])
+    bounds_result = handler(
+        {
+            "namespace": "canvas",
+            "tool": "read_scene",
+            "arguments": {
+                "scope": {"type": "bounds", "x": 10, "y": 10, "width": 150, "height": 100},
+                "include_image": False,
+            },
+        }
+    )
+    bounds_payload = json.loads(bounds_result["contentItems"][0]["text"])
+
+    assert {shape["id"] for shape in frame_payload["shapes"]} == {
+        "shape:frame",
+        "shape:child",
+    }
+    assert frame_payload["page_id"] == "page:two"
+    assert frame_payload["image"]["error"] == "scoped_preview_requires_live_editor"
+    assert len(frame_result["contentItems"]) == 1
+    assert frame_payload["bindings"][0]["from"]["external_to_scope"] is True
+    assert frame_payload["bindings"][0]["to"]["external_to_scope"] is False
+    assert next(
+        shape["text"]
+        for shape in frame_payload["shapes"]
+        if shape["id"] == "shape:child"
+    ) == "Child label"
+    assert "live editor for page bounds" in frame_payload["warnings"][0]
+    assert bounds_result["success"] is False
+    assert bounds_payload["error"] == "scope_requires_live_editor"
+
+
+def test_offline_bounds_resolve_top_level_unrotated_shapes(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-offline-simple-bounds")
+    canvas_id = manifest["canvas_id"]
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        {
+            "store": {
+                "page:one": {"id": "page:one", "typeName": "page"},
+                "shape:inside": {
+                    "id": "shape:inside",
+                    "typeName": "shape",
+                    "type": "geo",
+                    "parentId": "page:one",
+                    "index": "a1",
+                    "x": 20,
+                    "y": 20,
+                    "rotation": 0,
+                    "props": {"w": 50, "h": 40},
+                },
+                "shape:outside": {
+                    "id": "shape:outside",
+                    "typeName": "shape",
+                    "type": "geo",
+                    "parentId": "page:one",
+                    "index": "a2",
+                    "x": 500,
+                    "y": 500,
+                    "rotation": 0,
+                    "props": {"w": 50, "h": 40},
+                },
+            }
+        },
+    )
+    result = canvas_dynamic_tool_handler_for_canvas(canvas_id)(
+        {
+            "namespace": "canvas",
+            "tool": "read_scene",
+            "arguments": {
+                "scope": {
+                    "type": "bounds",
+                    "x": 0,
+                    "y": 0,
+                    "width": 100,
+                    "height": 100,
+                },
+                "include_image": False,
+            },
+        }
+    )
+    payload = json.loads(result["contentItems"][0]["text"])
+
+    assert result["success"] is True
+    assert [shape["id"] for shape in payload["shapes"]] == ["shape:inside"]
+
+
+def test_offline_viewport_and_selection_scopes_require_live_editor(
+    isolated_canvas_root,
+):
+    manifest = canvas_store.initialize_canvas("thread-live-scopes")
+    handler = canvas_dynamic_tool_handler_for_canvas(manifest["canvas_id"])
+
+    for scope_type in ("viewport", "selection"):
+        result = handler(
+            {
+                "namespace": "canvas",
+                "tool": "read_scene",
+                "arguments": {"scope": {"type": scope_type}},
+            }
+        )
+        payload = json.loads(result["contentItems"][0]["text"])
+        assert result["success"] is False
+        assert payload["error"] == "scope_requires_live_editor"
 
 
 def test_draft_canvas_binds_to_thread_without_moving_files(isolated_canvas_root):
@@ -161,7 +347,16 @@ def test_dynamic_tool_handler_can_target_draft_canvas(isolated_canvas_root):
     canvas_id = manifest["canvas_id"]
     canvas_store.save_canvas_snapshot(
         canvas_id,
-        {"store": {"shape:draft": {"id": "shape:draft", "typeName": "shape"}}},
+        {
+            "store": {
+                "page:one": {"id": "page:one", "typeName": "page"},
+                "shape:draft": {
+                    "id": "shape:draft",
+                    "typeName": "shape",
+                    "parentId": "page:one",
+                },
+            }
+        },
     )
 
     result = canvas_dynamic_tool_handler_for_canvas(canvas_id)(
@@ -170,7 +365,7 @@ def test_dynamic_tool_handler_can_target_draft_canvas(isolated_canvas_root):
     payload = json.loads(result["contentItems"][0]["text"])
 
     assert result["success"] is True
-    assert payload["scene"]["shapes"][0]["id"] == "shape:draft"
+    assert payload["shapes"][0]["id"] == "shape:draft"
 
 
 def test_live_read_scene_returns_visual_input_without_embedding_it_in_text(
@@ -394,8 +589,19 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
         "read_scene",
         "apply_patch",
     ]
-    assert "page-space bounds" in namespace["tools"][0]["description"]
-    assert "whole-canvas image" in namespace["tools"][0]["description"]
+    assert "viewport" in namespace["tools"][0]["description"]
+    read_schema = namespace["tools"][0]["inputSchema"]
+    Draft202012Validator.check_schema(read_schema)
+    scopes = read_schema["properties"]["scope"]["oneOf"]
+    assert [item["properties"]["type"]["const"] for item in scopes] == [
+        "all",
+        "viewport",
+        "selection",
+        "bounds",
+        "frame",
+        "shape_ids",
+    ]
+    assert all(item["additionalProperties"] is False for item in scopes)
     apply_schema = namespace["tools"][1]["inputSchema"]
     assert apply_schema["required"] == ["command_id", "base_revision", "operations"]
     assert apply_schema["properties"]["command_id"] == {
@@ -424,6 +630,42 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
         "frame",
     ]
     assert all(item["additionalProperties"] is False for item in create_shapes)
+
+
+def test_canvas_read_scene_schema_rejects_open_or_oversized_scopes():
+    schema = canvas_runtime._canvas_read_scene_schema()
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+
+    assert list(
+        validator.iter_errors(
+            {
+                "scope": {
+                    "type": "bounds",
+                    "x": 0,
+                    "y": 0,
+                    "width": 100,
+                    "height": 100,
+                },
+                "detail": "standard",
+                "include_image": False,
+                "max_image_dimension": 1024,
+            }
+        )
+    ) == []
+    assert list(
+        validator.iter_errors({"scope": {"type": "all", "extra": True}})
+    )
+    assert list(
+        validator.iter_errors(
+            {
+                "scope": {
+                    "type": "shape_ids",
+                    "ids": [f"shape:{index}" for index in range(101)],
+                }
+            }
+        )
+    )
 
 
 def test_canvas_apply_patch_schema_accepts_nomad_dto_and_rejects_raw_props():
@@ -937,6 +1179,86 @@ def test_apply_response_without_document_fails_closed_and_is_not_receipted(
     )
 
 
+def test_successful_apply_result_excludes_document_scene_and_images(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-compact-apply")
+    canvas_id = manifest["canvas_id"]
+    broker = CanvasBroker()
+    monkeypatch.setattr(canvas_runtime, "CANVAS_BROKER", broker)
+    monkeypatch.setattr(canvas_runtime, "auth_required", lambda: False)
+
+    async def exercise_websocket():
+        request_id = "compact-apply-response"
+        pending = canvas_runtime.PendingCanvasRequest(
+            context={
+                "command_id": "compact-command",
+                "input_hash": "sha256:" + ("a" * 64),
+                "base_revision": 0,
+            }
+        )
+        ack_received = asyncio.Event()
+
+        class FakeWebSocket:
+            scope = {}
+            path_params = {"canvas_id": canvas_id}
+            receive_count = 0
+
+            async def accept(self):
+                return None
+
+            async def close(self, code=1000):
+                return None
+
+            async def receive_json(self):
+                if self.receive_count == 0:
+                    self.receive_count += 1
+                    with broker._lock:
+                        broker._pending[request_id] = pending
+                    return {
+                        "type": "response",
+                        "id": request_id,
+                        "ok": True,
+                        "payload": {
+                            "document": {
+                                "store": {
+                                    "shape:one": {
+                                        "id": "shape:one",
+                                        "typeName": "shape",
+                                    }
+                                }
+                            },
+                            "scene": {"shapes": [{"id": "shape:one"}]},
+                            "preview_svg": "<svg />",
+                            "preview_image_url": "data:image/webp;base64,UklGRg==",
+                            "changed_ids": ["shape:one"],
+                            "refs": {"one": "shape:one"},
+                            "warnings": [],
+                        },
+                    }
+                await asyncio.wait_for(ack_received.wait(), timeout=1)
+                raise WebSocketDisconnect()
+
+            async def send_json(self, message):
+                if message.get("type") == "response_ack":
+                    ack_received.set()
+
+        await canvas_runtime.canvas_websocket(FakeWebSocket())
+        return pending.result
+
+    result = asyncio.run(exercise_websocket())
+    payload = result["payload"]
+
+    assert result["ok"] is True
+    assert payload["revision"] == 1
+    assert payload["changed_ids"] == ["shape:one"]
+    assert payload["refs"] == {"one": "shape:one"}
+    assert "document" not in payload
+    assert "scene" not in payload
+    assert "preview_svg" not in payload
+    assert "preview_image_url" not in payload
+
+
 def test_canvas_command_status_reconciles_a_lost_commit_ack(isolated_canvas_root):
     manifest = canvas_store.initialize_canvas("thread-command-status")
     canvas_id = manifest["canvas_id"]
@@ -998,4 +1320,4 @@ def test_canvas_initial_context_is_a_developer_message():
     assert "canvas dynamic tools as the primary interface" in items[0]["content"][0][
         "text"
     ]
-    assert "whole-canvas image" in items[0]["content"][0]["text"]
+    assert "narrowest useful" in items[0]["content"][0]["text"]

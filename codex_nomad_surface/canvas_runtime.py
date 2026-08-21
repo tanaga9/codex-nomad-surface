@@ -36,6 +36,14 @@ from codex_nomad_surface.http_gate import (
 CANVAS_TOOL_TIMEOUT_SECONDS = 25.0
 CANVAS_REPLACED_CLOSE_CODE = 4001
 CANVAS_PREVIEW_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+CANVAS_READ_MAX_REQUESTED_IDS = 100
+CANVAS_READ_MAX_SHAPES = 500
+CANVAS_READ_MAX_BINDINGS = 1_000
+CANVAS_READ_MAX_BOUND_DIMENSION = 1_000_000
+CANVAS_READ_MIN_IMAGE_DIMENSION = 64
+CANVAS_READ_MAX_IMAGE_DIMENSION = 2048
+CANVAS_READ_MAX_TEXT_LENGTH = 2_000
+CANVAS_READ_MAX_FULL_VALUE_LENGTH = 20_000
 CANVAS_PREVIEW_IMAGE_PREFIXES = {
     "data:image/webp;base64,": "image/webp",
     "data:image/jpeg;base64,": "image/jpeg",
@@ -46,8 +54,9 @@ _CANVAS_APPLY_LOCKS_GUARD = threading.Lock()
 CANVAS_DEVELOPER_INSTRUCTIONS = (
     "This thread uses the Nomad Surface embedded Canvas. When a request concerns "
     "the canvas, use the canvas dynamic tools as the primary interface. Read the "
-    "current scene before scene-dependent edits. A non-empty read_scene result "
-    "normally includes a whole-canvas image; interpret it together with the "
+    "current scene before scene-dependent edits. Prefer the narrowest useful "
+    "read_scene scope. When requested, a non-empty result may include a scoped "
+    "image; interpret it together with the "
     "structured shape and binding data so freehand marks are understood as a "
     "composition, not only as isolated objects. If the result reports that the "
     "visual preview is unavailable, state that limitation rather than guessing. "
@@ -553,6 +562,151 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
     )
 
 
+def _canvas_read_scene_schema() -> dict[str, Any]:
+    coordinate = {
+        "type": "number",
+        "minimum": -CANVAS_READ_MAX_BOUND_DIMENSION,
+        "maximum": CANVAS_READ_MAX_BOUND_DIMENSION,
+    }
+    dimension = {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": CANVAS_READ_MAX_BOUND_DIMENSION,
+    }
+    scopes = [
+        _closed_object({"type": {"const": scope_type}}, ["type"])
+        for scope_type in ("all", "viewport", "selection")
+    ]
+    scopes.extend(
+        [
+            _closed_object(
+                {
+                    "type": {"const": "bounds"},
+                    "x": coordinate,
+                    "y": coordinate,
+                    "width": dimension,
+                    "height": dimension,
+                },
+                ["type", "x", "y", "width", "height"],
+            ),
+            _closed_object(
+                {
+                    "type": {"const": "frame"},
+                    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+                },
+                ["type", "id"],
+            ),
+            _closed_object(
+                {
+                    "type": {"const": "shape_ids"},
+                    "ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": CANVAS_READ_MAX_REQUESTED_IDS,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                        },
+                    },
+                    "include_descendants": {"type": "boolean"},
+                },
+                ["type", "ids"],
+            ),
+        ]
+    )
+    return _closed_object(
+        {
+            "scope": {"oneOf": scopes},
+            "detail": {"type": "string", "enum": ["compact", "standard", "full"]},
+            "include_image": {"type": "boolean"},
+            "max_image_dimension": {
+                "type": "integer",
+                "minimum": CANVAS_READ_MIN_IMAGE_DIMENSION,
+                "maximum": CANVAS_READ_MAX_IMAGE_DIMENSION,
+            },
+        }
+    )
+
+
+def _normalize_canvas_read_arguments(arguments: object) -> dict[str, Any]:
+    if not isinstance(arguments, dict):
+        raise ValueError("Canvas read arguments must be an object.")
+    if set(arguments) - {"scope", "detail", "include_image", "max_image_dimension"}:
+        raise ValueError("Canvas read arguments contain unsupported fields.")
+    detail = arguments.get("detail", "compact")
+    include_image = arguments.get("include_image", True)
+    max_image_dimension = arguments.get("max_image_dimension", 1536)
+    if detail not in {"compact", "standard", "full"}:
+        raise ValueError("Canvas read detail is invalid.")
+    if type(include_image) is not bool:
+        raise ValueError("Canvas read include_image must be a boolean.")
+    if (
+        type(max_image_dimension) is not int
+        or not CANVAS_READ_MIN_IMAGE_DIMENSION
+        <= max_image_dimension
+        <= CANVAS_READ_MAX_IMAGE_DIMENSION
+    ):
+        raise ValueError("Canvas read image dimension is invalid.")
+    scope = arguments.get("scope", {"type": "all"})
+    if not isinstance(scope, dict) or not isinstance(scope.get("type"), str):
+        raise ValueError("Canvas read scope is invalid.")
+    scope_type = scope["type"]
+    if scope_type in {"all", "viewport", "selection"}:
+        if set(scope) != {"type"}:
+            raise ValueError("Canvas read scope fields are invalid.")
+        normalized_scope = {"type": scope_type}
+    elif scope_type == "bounds":
+        if set(scope) != {"type", "x", "y", "width", "height"}:
+            raise ValueError("Canvas bounds scope fields are invalid.")
+        values = [scope.get(key) for key in ("x", "y", "width", "height")]
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not -CANVAS_READ_MAX_BOUND_DIMENSION
+            <= value
+            <= CANVAS_READ_MAX_BOUND_DIMENSION
+            for value in values
+        ) or scope["width"] <= 0 or scope["height"] <= 0:
+            raise ValueError("Canvas bounds scope values are invalid.")
+        normalized_scope = dict(scope)
+    elif scope_type == "frame":
+        frame_id = scope.get("id")
+        if (
+            set(scope) != {"type", "id"}
+            or not isinstance(frame_id, str)
+            or not 1 <= len(frame_id) <= 256
+        ):
+            raise ValueError("Canvas frame scope is invalid.")
+        normalized_scope = dict(scope)
+    elif scope_type == "shape_ids":
+        ids = scope.get("ids")
+        include_descendants = scope.get("include_descendants", True)
+        if (
+            set(scope) - {"type", "ids", "include_descendants"}
+            or not isinstance(ids, list)
+            or not 1 <= len(ids) <= CANVAS_READ_MAX_REQUESTED_IDS
+            or len(set(ids)) != len(ids)
+            or any(not isinstance(item, str) or not 1 <= len(item) <= 256 for item in ids)
+            or type(include_descendants) is not bool
+        ):
+            raise ValueError("Canvas shape_ids scope is invalid.")
+        normalized_scope = {
+            "type": "shape_ids",
+            "ids": ids,
+            "include_descendants": include_descendants,
+        }
+    else:
+        raise ValueError("Canvas read scope type is unsupported.")
+    return {
+        "scope": normalized_scope,
+        "detail": detail,
+        "include_image": include_image,
+        "max_image_dimension": max_image_dimension,
+    }
+
+
 def canvas_dynamic_tools() -> list[dict[str, Any]]:
     return [
         {
@@ -567,16 +721,12 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                     "type": "function",
                     "name": "read_scene",
                     "description": (
-                        "Read the current canvas before editing it. Returns shapes, "
-                        "their page-space bounds when available, bindings, page "
-                        "information, the current revision, and a whole-canvas image "
-                        "for visual interpretation when the canvas is non-empty."
+                        "Read a bounded scope of the current canvas before editing. "
+                        "Supports all, viewport, selection, bounds, frame, and "
+                        "shape_ids scopes with compact, standard, or full detail. "
+                        "Images are returned separately and may be omitted."
                     ),
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": False,
-                    },
+                    "inputSchema": _canvas_read_scene_schema(),
                 },
                 {
                     "type": "function",
@@ -613,6 +763,340 @@ def canvas_initial_context_items() -> list[dict[str, Any]]:
             ],
         }
     ]
+
+
+def _bounded_canvas_value(value: Any, maximum: int = CANVAS_READ_MAX_FULL_VALUE_LENGTH) -> Any:
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return {"truncated": True}
+    if len(serialized) <= maximum:
+        return value
+    return {"truncated": True, "preview": serialized[:maximum]}
+
+
+def _canvas_text_summary(value: Any) -> str:
+    parts: list[str] = []
+
+    def visit(item: Any) -> None:
+        if sum(len(part) for part in parts) >= CANVAS_READ_MAX_TEXT_LENGTH:
+            return
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+        elif isinstance(item, dict):
+            if isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif isinstance(item.get("content"), list):
+                visit(item["content"])
+
+    visit(value)
+    summary = " ".join(" ".join(parts).split())
+    if len(summary) > CANVAS_READ_MAX_TEXT_LENGTH:
+        return summary[:CANVAS_READ_MAX_TEXT_LENGTH] + "…"
+    return summary
+
+
+def _offline_shape_bounds(
+    shape: dict[str, Any], page_ids: set[str]
+) -> dict[str, float] | None:
+    x = shape.get("x")
+    y = shape.get("y")
+    props = shape.get("props")
+    rotation = shape.get("rotation", 0)
+    if (
+        shape.get("parentId") not in page_ids
+        or not isinstance(x, (int, float))
+        or isinstance(x, bool)
+        or not isinstance(y, (int, float))
+        or isinstance(y, bool)
+        or not isinstance(rotation, (int, float))
+        or isinstance(rotation, bool)
+        or rotation != 0
+    ):
+        return None
+    if not isinstance(props, dict):
+        props = {}
+    scale = props.get("scale", 1)
+    if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale != 1:
+        return None
+    width = props.get("w")
+    height = props.get("h")
+    if shape.get("type") == "arrow":
+        start = props.get("start")
+        end = props.get("end")
+        if isinstance(start, dict) and isinstance(end, dict):
+            coordinates = [start.get("x"), start.get("y"), end.get("x"), end.get("y")]
+            if all(
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+                for item in coordinates
+            ):
+                sx, sy, ex, ey = coordinates
+                return {
+                    "x": float(x + min(sx, ex)),
+                    "y": float(y + min(sy, ey)),
+                    "width": float(abs(ex - sx)),
+                    "height": float(abs(ey - sy)),
+                }
+    if (
+        not isinstance(width, (int, float))
+        or isinstance(width, bool)
+        or not isinstance(height, (int, float))
+        or isinstance(height, bool)
+    ):
+        return None
+    return {
+        "x": float(x),
+        "y": float(y),
+        "width": float(width),
+        "height": float(height),
+    }
+
+
+def _offline_shape_result(
+    shape: dict[str, Any], detail: str, page_ids: set[str]
+) -> dict[str, Any]:
+    props = shape.get("props") if isinstance(shape.get("props"), dict) else {}
+    meta = shape.get("meta") if isinstance(shape.get("meta"), dict) else {}
+    text = _canvas_text_summary(
+        props.get("richText") or props.get("text") or props.get("name") or ""
+    )
+    bounds = _offline_shape_bounds(shape, page_ids)
+    result: dict[str, Any] = {
+        "id": shape.get("id"),
+        "type": shape.get("type"),
+        "parent_id": shape.get("parentId"),
+        "index": shape.get("index"),
+    }
+    if bounds:
+        result["page_bounds"] = bounds
+    if text:
+        result["text"] = text
+    semantic = {
+        key: meta[key]
+        for key in ("logicalRef", "source")
+        if isinstance(meta.get(key), str)
+    }
+    if semantic:
+        result["semantic"] = {
+            "logical_ref" if key == "logicalRef" else key: value
+            for key, value in semantic.items()
+        }
+    if detail in {"standard", "full"}:
+        result.update(
+            {
+                "x": shape.get("x"),
+                "y": shape.get("y"),
+                "rotation": shape.get("rotation"),
+            }
+        )
+        allowed = {
+            "w",
+            "h",
+            "geo",
+            "color",
+            "fill",
+            "dash",
+            "size",
+            "font",
+            "align",
+            "verticalAlign",
+            "autoSize",
+            "start",
+            "end",
+            "arrowheadStart",
+            "arrowheadEnd",
+            "name",
+        }
+        result["props"] = {key: value for key, value in props.items() if key in allowed}
+    if detail == "full":
+        result["props"] = _bounded_canvas_value(props)
+        result["meta"] = _bounded_canvas_value(meta)
+    return result
+
+
+def _offline_shape_page_id(
+    shape: dict[str, Any],
+    shapes_by_id: dict[str, dict[str, Any]],
+    page_ids: set[str],
+) -> str | None:
+    parent_id = shape.get("parentId")
+    visited: set[str] = set()
+    while isinstance(parent_id, str) and parent_id not in visited:
+        if parent_id in page_ids:
+            return parent_id
+        visited.add(parent_id)
+        parent = shapes_by_id.get(parent_id)
+        if parent is None:
+            return None
+        parent_id = parent.get("parentId")
+    return None
+
+
+def _offline_canvas_read(
+    canvas_id: str,
+    document: dict[str, Any] | None,
+    request: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    scope = request["scope"]
+    if scope["type"] in {"viewport", "selection"}:
+        raise ValueError("scope_requires_live_editor")
+    scene = scene_from_document(document)
+    shapes = [item for item in scene["shapes"] if isinstance(item.get("id"), str)]
+    shapes_by_id = {item["id"]: item for item in shapes}
+    page_ids = {
+        page["id"]
+        for page in scene["pages"]
+        if isinstance(page.get("id"), str)
+    }
+    if scope["type"] in {"all", "bounds"} and len(page_ids) > 1:
+        raise ValueError("scope_requires_live_editor")
+    offline_warnings: list[str] = []
+    selected_ids: set[str]
+    if scope["type"] == "all":
+        selected_ids = set(shapes_by_id)
+    elif scope["type"] == "frame":
+        frame = shapes_by_id.get(scope["id"])
+        if not frame or frame.get("type") != "frame":
+            raise LookupError("scope_not_found")
+        selected_ids = {scope["id"]}
+    elif scope["type"] == "shape_ids":
+        if any(shape_id not in shapes_by_id for shape_id in scope["ids"]):
+            raise LookupError("scope_not_found")
+        selected_ids = set(scope["ids"])
+    else:
+        bounds = scope
+        selected_ids = set()
+        for shape in shapes:
+            shape_bounds = _offline_shape_bounds(shape, page_ids)
+            if not shape_bounds:
+                raise ValueError("scope_requires_live_editor")
+            if not (
+                shape_bounds["x"] + shape_bounds["width"] < bounds["x"]
+                or bounds["x"] + bounds["width"] < shape_bounds["x"]
+                or shape_bounds["y"] + shape_bounds["height"] < bounds["y"]
+                or bounds["y"] + bounds["height"] < shape_bounds["y"]
+            ):
+                selected_ids.add(shape["id"])
+    include_descendants = scope["type"] == "frame" or (
+        scope["type"] == "shape_ids" and scope["include_descendants"]
+    )
+    if include_descendants:
+        changed = True
+        while changed:
+            changed = False
+            for shape in shapes:
+                if shape.get("parentId") in selected_ids and shape["id"] not in selected_ids:
+                    selected_ids.add(shape["id"])
+                    changed = True
+    selected_page_ids = {
+        page_id
+        for shape_id in selected_ids
+        if (
+            page_id := _offline_shape_page_id(
+                shapes_by_id[shape_id], shapes_by_id, page_ids
+            )
+        )
+    }
+    if len(selected_page_ids) > 1 or (
+        selected_ids and len(selected_page_ids) != 1
+    ):
+        raise ValueError("scope_requires_live_editor")
+    ordered = sorted(
+        (shape for shape in shapes if shape["id"] in selected_ids),
+        key=lambda item: str(item.get("index") or ""),
+    )
+    total_shapes = len(ordered)
+    returned = ordered[:CANVAS_READ_MAX_SHAPES]
+    returned_ids = {shape["id"] for shape in returned}
+    unresolved_returned_bounds = sum(
+        _offline_shape_bounds(shape, page_ids) is None for shape in returned
+    )
+    if unresolved_returned_bounds:
+        offline_warnings.append(
+            f"{unresolved_returned_bounds} saved shapes require the live editor for page bounds."
+        )
+    bindings = []
+    for binding in scene["bindings"]:
+        from_id = binding.get("fromId")
+        to_id = binding.get("toId")
+        if from_id not in returned_ids and to_id not in returned_ids:
+            continue
+        binding_result = {
+            "id": binding.get("id"),
+            "type": binding.get("type"),
+            "from": {
+                "id": from_id,
+                "external_to_scope": from_id not in returned_ids,
+            },
+            "to": {
+                "id": to_id,
+                "external_to_scope": to_id not in returned_ids,
+            },
+        }
+        binding_props = (
+            binding.get("props") if isinstance(binding.get("props"), dict) else {}
+        )
+        if request["detail"] == "standard":
+            allowed_binding_props = {
+                "terminal",
+                "normalizedAnchor",
+                "isPrecise",
+                "isExact",
+                "snap",
+            }
+            binding_result["props"] = {
+                key: value
+                for key, value in binding_props.items()
+                if key in allowed_binding_props
+            }
+        elif request["detail"] == "full":
+            binding_result["props"] = _bounded_canvas_value(binding_props)
+        bindings.append(binding_result)
+    total_bindings = len(bindings)
+    bindings = bindings[:CANVAS_READ_MAX_BINDINGS]
+    truncated = total_shapes > len(returned) or total_bindings > len(bindings)
+    page_id = next(iter(selected_page_ids or page_ids), "")
+    image_url = ""
+    image_available = False
+    image_error = ""
+    if request["include_image"]:
+        if scope["type"] == "all":
+            image_url = canvas_visual_preview_data_url(canvas_id)
+            image_available = bool(image_url)
+        else:
+            image_error = "scoped_preview_requires_live_editor"
+    result = {
+        "page_id": page_id,
+        "scope": scope,
+        "detail": request["detail"],
+        "truncated": truncated,
+        "total_shapes": total_shapes,
+        "returned_shapes": len(returned),
+        "total_bindings": total_bindings,
+        "returned_bindings": len(bindings),
+        **(
+            {"suggested_scope": "Use frame, viewport, bounds, or shape_ids."}
+            if truncated
+            else {}
+        ),
+        "shapes": [
+            _offline_shape_result(shape, request["detail"], page_ids)
+            for shape in returned
+        ],
+        "bindings": bindings,
+        "warnings": offline_warnings,
+        "image": {
+            "included": image_available,
+            "width": 0,
+            "height": 0,
+            "scope": scope,
+            **({"error": image_error} if image_error else {}),
+        },
+    }
+    return result, image_url
 
 
 def _content_result(
@@ -724,17 +1208,41 @@ def canvas_dynamic_tool_handler_for_canvas(
                     return _content_result(False, {"error": str(exc)})
         else:
             try:
+                arguments = _normalize_canvas_read_arguments(arguments)
+            except ValueError as exc:
+                return _content_result(
+                    False,
+                    {"error": "read_validation_failed", "message": str(exc)},
+                )
+            try:
                 broker_result = CANVAS_BROKER.call(canvas_id, tool, arguments)
             except RuntimeError as exc:
                 document = load_canvas_document(canvas_id)
-                image_url = canvas_visual_preview_data_url(canvas_id)
+                try:
+                    offline_scene, image_url = _offline_canvas_read(
+                        canvas_id, document, arguments
+                    )
+                except ValueError as read_error:
+                    if str(read_error) == "scope_requires_live_editor":
+                        return _content_result(
+                            False,
+                            {
+                                "error": "scope_requires_live_editor",
+                                "scope": arguments["scope"],
+                            },
+                        )
+                    raise
+                except LookupError:
+                    return _content_result(
+                        False,
+                        {"error": "scope_not_found", "scope": arguments["scope"]},
+                    )
                 return _content_result(
                     True,
                     {
                         "live": False,
                         "revision": revision,
-                        "scene": scene_from_document(document),
-                        "visual_preview_available": bool(image_url),
+                        **offline_scene,
                         **canvas_file_references(canvas_id),
                     },
                     image_url=image_url,
@@ -748,6 +1256,8 @@ def canvas_dynamic_tool_handler_for_canvas(
             payload = {"error": broker_result.get("error") or "canvas_call_failed"}
         image_url = str(payload.pop("preview_image_url", "") or "")
         payload.setdefault("live", True)
+        if tool == "read_scene":
+            payload.setdefault("revision", revision)
         return _content_result(
             success,
             payload,

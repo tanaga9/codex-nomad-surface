@@ -19,10 +19,204 @@ import {
   canCompleteCanvasRequest,
   canProcessCanvasRequest,
 } from "./canvas-snapshot-gate";
+import {
+  CANVAS_READ_MAX_SHAPES,
+  CanvasReadError,
+  normalizeCanvasReadRequest,
+  readCanvasScene,
+} from "./canvas-read-protocol";
+import { renderCanvasPreview } from "./canvas-preview";
 
 const assert = (condition: unknown, message: string) => {
   if (!condition) throw new Error(message);
 };
+
+{
+  const scopeFixtures = [
+    { type: "all" },
+    { type: "viewport" },
+    { type: "selection" },
+    { type: "bounds", x: 0, y: 0, width: 100, height: 100 },
+    { type: "frame", id: "shape:frame" },
+    { type: "shape_ids", ids: ["shape:one"] },
+  ];
+  for (const scope of scopeFixtures) {
+    const request = normalizeCanvasReadRequest({ scope });
+    assert(
+      request.scope.type === scope.type,
+      `Scope ${scope.type} was rejected.`,
+    );
+  }
+  let error: unknown;
+  try {
+    normalizeCanvasReadRequest({ scope: { type: "all", extra: true } });
+  } catch (caught) {
+    error = caught;
+  }
+  assert(
+    error instanceof CanvasReadError,
+    "A read scope with unknown fields passed validation.",
+  );
+  error = undefined;
+  try {
+    normalizeCanvasReadRequest({
+      scope: { type: "shape_ids", ids: ["shape:one", "shape:one"] },
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assert(
+    error instanceof CanvasReadError,
+    "Duplicate shape IDs passed browser-side validation.",
+  );
+}
+
+{
+  const preview = await renderCanvasPreview(
+    {
+      getSvgString: async () => {
+        throw new Error("forced SVG failure");
+      },
+    } as unknown as Editor,
+    [{ id: "shape:preview" }] as never,
+  );
+  assert(
+    preview.preview_svg === "" &&
+      preview.preview_image_url === "" &&
+      preview.preview_image_error === "forced SVG failure",
+    "A preview export failure escaped its best-effort boundary.",
+  );
+}
+
+{
+  const frame = {
+    id: "shape:frame",
+    type: "frame",
+    parentId: "page:one",
+    index: "a1",
+    x: 0,
+    y: 0,
+    rotation: 0,
+    props: { w: 400, h: 300, name: "Process" },
+    meta: {},
+  };
+  const child = {
+    id: "shape:child",
+    type: "geo",
+    parentId: frame.id,
+    index: "a2",
+    x: 20,
+    y: 20,
+    rotation: 0,
+    props: {
+      w: 100,
+      h: 50,
+      richText: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: "Hello world" }],
+          },
+        ],
+      },
+    },
+    meta: { logicalRef: "child" },
+  };
+  const unrelated = {
+    id: "shape:outside",
+    type: "geo",
+    parentId: "page:one",
+    index: "a3",
+    x: 800,
+    y: 800,
+    rotation: 0,
+    props: { w: 100, h: 50 },
+    meta: {},
+  };
+  const binding = {
+    id: "binding:external",
+    type: "arrow",
+    fromId: unrelated.id,
+    toId: child.id,
+    props: {},
+  };
+  const shapes = [frame, child, unrelated];
+  const editor = {
+    getShape: (id: string) => shapes.find((shape) => shape.id === id),
+    isShapeInPage: () => true,
+    getShapeAndDescendantIds: () => new Set([frame.id, child.id]),
+    getCurrentPageShapesSorted: () => shapes,
+    getCurrentPageShapeIds: () => new Set(shapes.map((shape) => shape.id)),
+    getCurrentPageId: () => "page:one",
+    getTextOptions: () => ({}),
+    getShapePageBounds: (shape: (typeof shapes)[number]) => ({
+      x: shape.x,
+      y: shape.y,
+      w: shape.props.w,
+      h: shape.props.h,
+    }),
+    getBindingsInvolvingShape: (shape: (typeof shapes)[number]) =>
+      shape.id === child.id ? [binding] : [],
+  } as unknown as Editor;
+
+  const scoped = readCanvasScene(editor, {
+    scope: { type: "frame", id: frame.id },
+    include_image: false,
+  });
+  assert(
+    scoped.result.returned_shapes === 2 &&
+      !scoped.shapesForExport.some((shape) => shape.id === unrelated.id),
+    "A frame read included unrelated canvas content.",
+  );
+  assert(
+    scoped.result.shapes.find((shape) => shape.id === child.id)?.text ===
+      "Hello world",
+    "A rich-text summary included TipTap structure fields.",
+  );
+  const scopedBinding = scoped.result.bindings[0];
+  assert(
+    scopedBinding.from.external_to_scope && !scopedBinding.to.external_to_scope,
+    "A scoped binding lost its external endpoint marker.",
+  );
+}
+
+{
+  const shapes = Array.from(
+    { length: CANVAS_READ_MAX_SHAPES + 1 },
+    (_, index) => ({
+      id: `shape:${index}`,
+      type: "geo",
+      parentId: "page:one",
+      index: String(index).padStart(4, "0"),
+      x: index,
+      y: index,
+      rotation: 0,
+      props: { w: 10, h: 10 },
+      meta: {},
+    }),
+  );
+  const editor = {
+    getCurrentPageShapeIds: () => new Set(shapes.map((shape) => shape.id)),
+    getCurrentPageShapesSorted: () => shapes,
+    getCurrentPageId: () => "page:one",
+    getShapePageBounds: (shape: (typeof shapes)[number]) => ({
+      x: shape.x,
+      y: shape.y,
+      w: 10,
+      h: 10,
+    }),
+    getBindingsInvolvingShape: () => [],
+  } as unknown as Editor;
+  const result = readCanvasScene(editor, { include_image: false }).result;
+  assert(
+    result.truncated &&
+      result.total_shapes === CANVAS_READ_MAX_SHAPES + 1 &&
+      result.returned_shapes === CANVAS_READ_MAX_SHAPES &&
+      Boolean(result.suggested_scope),
+    "An oversized read did not report structured truncation.",
+  );
+}
 
 interface HistoryShapeRecord extends BaseRecord<
   "history-shape",
