@@ -15,6 +15,7 @@ import {
 } from "./canvas-protocol";
 import { CanvasReadError, readCanvasScene } from "./canvas-read-protocol";
 import { renderCanvasPreview } from "./canvas-preview";
+import { lintCanvasPatch } from "./canvas-semantic";
 import {
   canBroadcastCanvasSnapshot,
   canCompleteCanvasRequest,
@@ -52,6 +53,22 @@ type ConnectionState =
   "connecting" | "connected" | "reconnecting" | "disconnected";
 
 const CANVAS_SNAPSHOT_STABILITY_ATTEMPTS = 3;
+
+const waitForCanvasGeometry = () =>
+  new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    const frame = window.requestAnimationFrame(finish);
+    const timeout = window.setTimeout(() => {
+      window.cancelAnimationFrame(frame);
+      finish();
+    }, 100);
+  });
 
 const captureDocument = (activeEditor: Editor) =>
   getSnapshot(activeEditor.store).document;
@@ -210,10 +227,24 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         const applied = applyCanvasPatch(activeEditor, plan);
         rollback = applied.rollback;
         activeEditor.updateInstanceState({ isReadonly: true });
+        await activeEditor.fonts.loadRequiredFontsForCurrentPage(20);
+        await waitForCanvasGeometry();
+        const warnings = lintCanvasPatch(
+          activeEditor,
+          applied.result.changed_ids,
+          plan.requestedHeights,
+        );
         const snapshot = await persistSnapshot(activeEditor, false);
         let settled = false;
         return {
-          payload: { ...snapshot, ...applied.result },
+          payload: {
+            ...snapshot,
+            ...applied.result,
+            warnings,
+            semantic_success: !warnings.some(
+              (warning) => warning.severity === "error",
+            ),
+          },
           commit: () => {
             if (settled) return;
             settled = true;

@@ -16,10 +16,24 @@ CANVAS_ROOT = Path(".nomad_surface") / "canvases"
 CANVAS_ID_PATTERN = re.compile(r"^canvas-[0-9a-f]{24}$")
 CANVAS_REVISION_LIMIT = 40
 CANVAS_SCHEMA_VERSION = 3
-CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION = 1
+CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION = 2
+CANVAS_COMMAND_RECEIPT_LEGACY_SCHEMA_VERSION = 1
 CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS = 500
 CANVAS_COMMAND_RECEIPT_MAX_REFS = 500
 CANVAS_COMMAND_RECEIPT_MAX_WARNINGS = 100
+CANVAS_LINT_CODES = frozenset(
+    {
+        "duplicate_semantic_id",
+        "missing_semantic_id",
+        "invalid_source_ref",
+        "text_overflow",
+        "unexpected_grow_y",
+        "shape_overlap",
+        "outside_frame",
+        "unbound_semantic_arrow",
+        "dangling_connector",
+    }
+)
 CANVAS_PREVIEW_IMAGE_MIME_TYPE = "image/webp"
 CANVAS_PREVIEW_IMAGE_MIME_TYPES = frozenset(
     {"image/webp", "image/jpeg", "image/png"}
@@ -46,6 +60,43 @@ class CanvasManifestVersionError(RuntimeError):
 
 class CanvasCommandReceiptError(RuntimeError):
     pass
+
+
+def _valid_canvas_receipt_warning(item: Any) -> bool:
+    if isinstance(item, str):
+        return len(item) <= 500
+    if not isinstance(item, dict) or set(item) != {
+        "code",
+        "severity",
+        "shape_ids",
+        "semantic_ids",
+        "message",
+        "details",
+        "suggested_action",
+    }:
+        return False
+    return (
+        item.get("code") in CANVAS_LINT_CODES
+        and item.get("severity") in {"error", "warning"}
+        and isinstance(item.get("shape_ids"), list)
+        and len(item["shape_ids"]) <= 20
+        and all(
+            isinstance(entry, str) and len(entry) <= 256
+            for entry in item["shape_ids"]
+        )
+        and isinstance(item.get("semantic_ids"), list)
+        and len(item["semantic_ids"]) <= 20
+        and all(
+            isinstance(entry, str) and len(entry) <= 128
+            for entry in item["semantic_ids"]
+        )
+        and isinstance(item.get("message"), str)
+        and len(item["message"]) <= 500
+        and isinstance(item.get("details"), dict)
+        and len(json.dumps(item["details"], ensure_ascii=False)) <= 2_000
+        and isinstance(item.get("suggested_action"), str)
+        and len(item["suggested_action"]) <= 500
+    )
 
 
 def canvas_id_for_thread(thread_id: str) -> str:
@@ -123,7 +174,11 @@ def _validate_command_receipt(value: Any) -> dict[str, Any]:
     }
     if set(value) != required:
         raise CanvasCommandReceiptError("Canvas command receipt fields are invalid.")
-    if value.get("schema_version") != CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        CANVAS_COMMAND_RECEIPT_LEGACY_SCHEMA_VERSION,
+        CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION,
+    }:
         raise CanvasCommandReceiptError("Canvas command receipt version is unsupported.")
     command_id = value.get("command_id")
     input_hash = value.get("input_hash")
@@ -156,11 +211,26 @@ def _validate_command_receipt(value: Any) -> dict[str, Any]:
         )
     ):
         raise CanvasCommandReceiptError("Canvas command receipt refs are invalid.")
-    if (
+    warnings_are_invalid = (
         not isinstance(warnings, list)
         or len(warnings) > CANVAS_COMMAND_RECEIPT_MAX_WARNINGS
-        or any(not isinstance(item, str) or len(item) > 500 for item in warnings)
+    )
+    if (
+        not warnings_are_invalid
+        and schema_version == CANVAS_COMMAND_RECEIPT_LEGACY_SCHEMA_VERSION
     ):
+        warnings_are_invalid = any(
+            not isinstance(item, str) or len(item) > 500 for item in warnings
+        )
+    if (
+        not warnings_are_invalid
+        and schema_version == CANVAS_COMMAND_RECEIPT_SCHEMA_VERSION
+    ):
+        warnings_are_invalid = any(
+            not isinstance(item, dict) or not _valid_canvas_receipt_warning(item)
+            for item in warnings
+        )
+    if warnings_are_invalid:
         raise CanvasCommandReceiptError("Canvas command receipt warnings are invalid.")
     if not isinstance(value.get("committed_at"), str) or len(value["committed_at"]) > 64:
         raise CanvasCommandReceiptError("Canvas command receipt timestamp is invalid.")

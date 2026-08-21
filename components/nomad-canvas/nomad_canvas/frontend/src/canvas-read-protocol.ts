@@ -7,6 +7,7 @@ import {
   TLShapeId,
   renderPlaintextFromRichText,
 } from "tldraw";
+import { semanticReadSummary } from "./canvas-semantic";
 
 export const CANVAS_READ_MAX_REQUESTED_IDS = 100;
 export const CANVAS_READ_MAX_SHAPES = 500;
@@ -296,7 +297,7 @@ const shapeResult = (
     editor,
     props.richText ?? props.text ?? props.name ?? "",
   );
-  const meta = shape.meta as Record<string, unknown>;
+  const semantic = semanticReadSummary(shape);
   const compact = {
     id: shape.id,
     type: shape.type,
@@ -313,15 +314,7 @@ const shapeResult = (
         }
       : {}),
     ...(text ? { text } : {}),
-    ...((typeof meta.logicalRef === "string" ||
-      typeof meta.source === "string") && {
-      semantic: {
-        ...(typeof meta.logicalRef === "string"
-          ? { logical_ref: meta.logicalRef }
-          : {}),
-        ...(typeof meta.source === "string" ? { source: meta.source } : {}),
-      },
-    }),
+    ...(Object.keys(semantic).length ? { semantic } : {}),
   };
   if (detail === "compact") return compact;
   const standard = {

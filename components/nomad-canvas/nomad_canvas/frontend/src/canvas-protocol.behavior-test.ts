@@ -26,10 +26,265 @@ import {
   readCanvasScene,
 } from "./canvas-read-protocol";
 import { renderCanvasPreview } from "./canvas-preview";
+import {
+  lintCanvasPatch,
+  mergeNomadMetadata,
+  SEMANTIC_ID_PATTERN,
+  semanticReadSummary,
+} from "./canvas-semantic";
 
-const assert = (condition: unknown, message: string) => {
+{
+  assert(
+    SEMANTIC_ID_PATTERN.test("gate.diagnosis-type") &&
+      !SEMANTIC_ID_PATTERN.test("invalid semantic id"),
+    "The documented semantic-ID character set was not enforced.",
+  );
+  const merged = mergeNomadMetadata(
+    {
+      plugin: { keep: true },
+      nomad: { source_refs: [{ document: "old", locator: "section:1" }] },
+    },
+    "semantic-update",
+    { semanticId: "gate.diagnosis-type" },
+  );
+  assert(
+    ((merged as Record<string, unknown>).plugin as { keep?: boolean }).keep ===
+      true &&
+      Array.isArray((merged.nomad as { source_refs?: unknown }).source_refs) &&
+      !("created_by" in merged.nomad),
+    "A semantic-only update discarded unrelated metadata or provenance.",
+  );
+  const created = mergeNomadMetadata(
+    {},
+    "semantic-create",
+    { semanticId: "node.created" },
+    "codex",
+  );
+  assert(
+    created.nomad.created_by === "codex",
+    "A Codex-created shape lost its creator attribution.",
+  );
+}
+
+{
+  const semanticShape = {
+    id: "shape:semantic",
+    type: "geo",
+    meta: { nomad: { semantic_id: "gate.diagnosis-type" } },
+  };
+  const editor = {
+    getCurrentPageShapes: () => [semanticShape],
+    getShape: (id: string) =>
+      id === semanticShape.id ? semanticShape : undefined,
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+  const plan = validateCanvasPatch(editor, {
+    command_id: "semantic-target",
+    base_revision: 0,
+    operations: [
+      {
+        op: "update",
+        target: { semantic_id: "gate.diagnosis-type" },
+        text: "Updated",
+      },
+    ],
+  });
+  assert(
+    plan.operations[0]?.op === "update" &&
+      plan.operations[0].id === semanticShape.id,
+    "A unique semantic target did not resolve to its tldraw shape ID.",
+  );
+}
+
+{
+  const shapes = ["shape:first", "shape:second"].map((id) => ({
+    id,
+    type: "geo",
+    meta: { nomad: { semantic_id: "duplicate.repairable" } },
+  }));
+  const editor = {
+    getCurrentPageShapes: () => shapes,
+    getShape: (id: string) => shapes.find((shape) => shape.id === id),
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+  const plan = validateCanvasPatch(editor, {
+    command_id: "repair-duplicate-semantic",
+    base_revision: 0,
+    operations: [
+      {
+        op: "update",
+        target: { id: shapes[1].id },
+        semantic_id: "duplicate.repaired",
+      },
+    ],
+  });
+  assert(
+    plan.operations[0]?.op === "update" &&
+      plan.operations[0].id === shapes[1].id,
+    "An exact-ID patch could not repair duplicate semantic IDs.",
+  );
+}
+
+{
+  const shapes = ["shape:first", "shape:second"].map((id) => ({
+    id,
+    type: "geo",
+    meta: { nomad: { semantic_id: "duplicate.node" } },
+  }));
+  const editor = {
+    getCurrentPageShapes: () => shapes,
+    getShape: (id: string) => shapes.find((shape) => shape.id === id),
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+  let error: unknown;
+  try {
+    validateCanvasPatch(editor, {
+      command_id: "duplicate-semantic",
+      base_revision: 0,
+      operations: [{ op: "move", target: { id: shapes[0].id }, x: 1, y: 1 }],
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assert(
+    error instanceof CanvasProtocolError &&
+      error.operationErrors.some(
+        (item) => item.code === "duplicate_semantic_id",
+      ),
+    "Duplicate semantic IDs were not rejected deterministically.",
+  );
+}
+
+{
+  const shape = {
+    id: "shape:provenance",
+    type: "geo",
+    parentId: "page:one",
+    props: { w: 100, h: 50 },
+    meta: {
+      nomad: {
+        source_refs: [{ document: "requirements.md", locator: "section:3" }],
+      },
+    },
+  };
+  const editor = {
+    getCurrentPageShapes: () => [shape],
+    getShape: (id: string) => (id === shape.id ? shape : undefined),
+    getShapePageBounds: () => ({ x: 0, y: 0, w: 100, h: 50 }),
+    getShapeMaskedPageBounds: () => ({ x: 0, y: 0, w: 100, h: 50 }),
+    getBindingsInvolvingShape: () => [],
+    getShapeIdsInsideBounds: () => new Set([shape.id]),
+  } as unknown as Editor;
+  const before = JSON.stringify(shape);
+  const warnings = lintCanvasPatch(editor, [shape.id as never]);
+  assert(
+    warnings.some((item) => item.code === "missing_semantic_id") &&
+      JSON.stringify(shape) === before,
+    "Semantic lint either missed provenance identity or mutated the document.",
+  );
+}
+
+{
+  const arrow = {
+    id: "shape:nomad-arrow",
+    type: "arrow",
+    parentId: "page:one",
+    props: {},
+    meta: {
+      nomad: {
+        schema_version: 1,
+        created_by: "codex",
+        last_command_id: "create-arrow",
+      },
+    },
+  };
+  const editor = {
+    getCurrentPageShapes: () => [arrow],
+    getShape: (id: string) => (id === arrow.id ? arrow : undefined),
+    getShapePageBounds: () => ({ x: 0, y: 0, w: 100, h: 20 }),
+    getBindingsInvolvingShape: () => [],
+    getBindingsFromShape: () => [],
+  } as unknown as Editor;
+  const warnings = lintCanvasPatch(editor, [arrow.id as never]);
+  assert(
+    warnings.some((item) => item.code === "dangling_connector"),
+    "A Nomad connector with a missing endpoint was not reported as dangling.",
+  );
+}
+
+{
+  const summary = semanticReadSummary({
+    meta: {
+      nomad: {
+        semantic_id: "invalid semantic id",
+        created_by: "x".repeat(65),
+        last_command_id: "x".repeat(129),
+        source_refs: [
+          { document: "requirements.md", locator: "section:1" },
+          { document: "x".repeat(501), locator: "section:oversized" },
+        ],
+      },
+    },
+  } as never);
+  assert(
+    !("semantic_id" in summary) &&
+      !("created_by" in summary) &&
+      !("last_command_id" in summary) &&
+      summary.source_refs?.length === 1,
+    "A compact semantic read exposed malformed or oversized metadata.",
+  );
+}
+
+{
+  const changed = {
+    id: "shape:changed-node",
+    type: "geo",
+    parentId: "page:one",
+    props: {},
+    meta: { nomad: { semantic_id: "node.changed" } },
+  };
+  const neighbor = {
+    id: "shape:spatial-neighbor",
+    type: "geo",
+    parentId: "page:one",
+    props: {},
+    meta: { nomad: { semantic_id: "node.neighbor" } },
+  };
+  const unrelated = Array.from({ length: 250 }, (_, index) => ({
+    id: `shape:unrelated-${index}`,
+    type: "geo",
+    parentId: "page:one",
+    props: {},
+    meta: {},
+  }));
+  const shapes = [...unrelated, changed, neighbor];
+  const editor = {
+    getCurrentPageShapes: () => shapes,
+    getShape: (id: string) => shapes.find((shape) => shape.id === id),
+    getShapePageBounds: (shape: { id: string }) =>
+      shape.id === changed.id
+        ? { x: 0, y: 0, w: 100, h: 100 }
+        : { x: 50, y: 50, w: 100, h: 100 },
+    getShapeMaskedPageBounds: (shape: { id: string }) =>
+      shape.id === changed.id
+        ? { x: 0, y: 0, w: 100, h: 100 }
+        : { x: 50, y: 50, w: 100, h: 100 },
+    getShapeIdsInsideBounds: () => new Set([changed.id, neighbor.id]),
+    getBindingsInvolvingShape: () => [],
+  } as unknown as Editor;
+  const warnings = lintCanvasPatch(editor, [changed.id as never]);
+  assert(
+    warnings.some(
+      (item) =>
+        item.code === "shape_overlap" && item.shape_ids.includes(neighbor.id),
+    ),
+    "Spatial overlap lint missed a neighbor beyond the first 200 page shapes.",
+  );
+}
+
+function assert(condition: unknown, message: string) {
   if (!condition) throw new Error(message);
-};
+}
 
 {
   const scopeFixtures = [
@@ -121,7 +376,17 @@ const assert = (condition: unknown, message: string) => {
         ],
       },
     },
-    meta: { logicalRef: "child" },
+    meta: {
+      nomad: {
+        schema_version: 1,
+        semantic_id: "node.child",
+        source_refs: [
+          { document: "requirements.md", locator: "section:child" },
+        ],
+        created_by: "codex",
+        last_command_id: "create-child",
+      },
+    },
   };
   const unrelated = {
     id: "shape:outside",
@@ -173,6 +438,16 @@ const assert = (condition: unknown, message: string) => {
     scoped.result.shapes.find((shape) => shape.id === child.id)?.text ===
       "Hello world",
     "A rich-text summary included TipTap structure fields.",
+  );
+  const childResult = scoped.result.shapes.find(
+    (shape) => shape.id === child.id,
+  );
+  assert(
+    childResult?.semantic?.semantic_id === "node.child" &&
+      JSON.stringify(childResult.semantic.source_refs).includes(
+        "section:child",
+      ),
+    "A scoped read did not round-trip semantic identity and provenance.",
   );
   const scopedBinding = scoped.result.bindings[0];
   assert(

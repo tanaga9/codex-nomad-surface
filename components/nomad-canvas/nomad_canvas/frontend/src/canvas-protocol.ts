@@ -1,4 +1,12 @@
 import { Editor, TLShapeId, createShapeId, toRichText } from "tldraw";
+import {
+  buildSemanticIndex,
+  CANVAS_MAX_SOURCE_REFS,
+  type CanvasSourceRef,
+  isValidSourceRef,
+  mergeNomadMetadata,
+  SEMANTIC_ID_PATTERN,
+} from "./canvas-semantic";
 
 export type CanvasOperationError = {
   operation_index: number;
@@ -10,6 +18,7 @@ export type CanvasOperationError = {
     | "invalid_enum_value"
     | "invalid_number"
     | "duplicate_ref"
+    | "duplicate_semantic_id"
     | "target_not_found"
     | "target_locked"
     | "target_type_mismatch"
@@ -37,7 +46,11 @@ export class CanvasProtocolError extends Error {
 
 type JsonObject = Record<string, unknown>;
 type ShapeType = "geo" | "text" | "note" | "frame";
-type Target = { id: string } | { ref: string };
+type Target = { id: string } | { semantic_id: string } | { ref: string };
+type MetadataPatch = {
+  semanticId?: string | null;
+  sourceRefs?: CanvasSourceRef[];
+};
 type PlannedShape = {
   id: TLShapeId;
   type: ShapeType | "arrow";
@@ -49,9 +62,16 @@ type NormalizedOperation =
       id: TLShapeId;
       ref: string;
       shape: JsonObject;
+      metadata: MetadataPatch;
       resize?: { width: number; height: number };
     }
-  | { op: "update"; id: TLShapeId; type: string; update: JsonObject }
+  | {
+      op: "update";
+      id: TLShapeId;
+      type: string;
+      update: JsonObject;
+      metadata: MetadataPatch;
+    }
   | { op: "move"; id: TLShapeId; type: string; x: number; y: number }
   | { op: "resize"; id: TLShapeId; type: string; width: number; height: number }
   | { op: "delete"; ids: TLShapeId[] }
@@ -62,12 +82,14 @@ type NormalizedOperation =
       fromId: TLShapeId;
       toId: TLShapeId;
       props: JsonObject;
+      metadata: MetadataPatch;
     };
 
 export type NormalizedPatchPlan = Readonly<{
   commandId: string;
   operations: readonly NormalizedOperation[];
   refs: Readonly<Record<string, TLShapeId>>;
+  requestedHeights: Readonly<Record<string, number>>;
 }>;
 
 export const CANVAS_PATCH_MAX_CHANGED_IDS = 500;
@@ -213,6 +235,78 @@ const boundedString = (
   return value;
 };
 
+const normalizeSemanticId = (
+  value: unknown,
+  operationIndex: number,
+  path: string,
+  errors: CanvasOperationError[],
+  allowNull = false,
+): string | null | undefined => {
+  if (allowNull && value === null) return null;
+  if (typeof value !== "string" || !SEMANTIC_ID_PATTERN.test(value)) {
+    errors.push({
+      operation_index: operationIndex,
+      path,
+      code: "invalid_operation",
+      message: `${path} must be 1–128 characters using letters, digits, dot, underscore, colon, or hyphen.`,
+    });
+    return undefined;
+  }
+  return value;
+};
+
+const normalizeSourceRefs = (
+  value: unknown,
+  operationIndex: number,
+  path: string,
+  errors: CanvasOperationError[],
+): CanvasSourceRef[] | undefined => {
+  if (
+    !Array.isArray(value) ||
+    value.length > CANVAS_MAX_SOURCE_REFS ||
+    value.some((item) => !isValidSourceRef(item))
+  ) {
+    errors.push({
+      operation_index: operationIndex,
+      path,
+      code: "invalid_operation",
+      message: `${path} must contain at most ${CANVAS_MAX_SOURCE_REFS} bounded source locators with optional sha256 hashes.`,
+    });
+    return undefined;
+  }
+  return value as CanvasSourceRef[];
+};
+
+const normalizeMetadata = (
+  value: JsonObject,
+  operationIndex: number,
+  pathPrefix: string,
+  errors: CanvasOperationError[],
+  allowClearSemanticId = false,
+): MetadataPatch => ({
+  ...(value.semantic_id !== undefined
+    ? {
+        semanticId: normalizeSemanticId(
+          value.semantic_id,
+          operationIndex,
+          `${pathPrefix}semantic_id`,
+          errors,
+          allowClearSemanticId,
+        ),
+      }
+    : {}),
+  ...(value.source_refs !== undefined
+    ? {
+        sourceRefs: normalizeSourceRefs(
+          value.source_refs,
+          operationIndex,
+          `${pathPrefix}source_refs`,
+          errors,
+        ),
+      }
+    : {}),
+});
+
 const rejectUnknownKeys = (
   value: JsonObject,
   allowed: Set<string>,
@@ -291,13 +385,13 @@ const parseTarget = (
       operation_index: operationIndex,
       path,
       code: "invalid_operation",
-      message: `${path} must contain exactly one id or ref.`,
+      message: `${path} must contain exactly one id, semantic_id, or ref.`,
     });
     return undefined;
   }
   rejectUnknownKeys(
     value,
-    new Set(["id", "ref"]),
+    new Set(["id", "semantic_id", "ref"]),
     operationIndex,
     path,
     errors,
@@ -310,16 +404,21 @@ const parseTarget = (
     typeof value.ref === "string" && value.ref && value.ref.length <= 128
       ? value.ref
       : undefined;
-  if ((id ? 1 : 0) + (ref ? 1 : 0) !== 1) {
+  const semanticId =
+    typeof value.semantic_id === "string" &&
+    SEMANTIC_ID_PATTERN.test(value.semantic_id)
+      ? value.semantic_id
+      : undefined;
+  if ((id ? 1 : 0) + (semanticId ? 1 : 0) + (ref ? 1 : 0) !== 1) {
     errors.push({
       operation_index: operationIndex,
       path,
       code: "invalid_operation",
-      message: `${path} must contain exactly one non-empty id or ref.`,
+      message: `${path} must contain exactly one valid id, semantic_id, or ref.`,
     });
     return undefined;
   }
-  return id ? { id } : { ref: ref! };
+  return id ? { id } : semanticId ? { semantic_id: semanticId } : { ref: ref! };
 };
 
 export const validateCanvasPatch = (
@@ -353,6 +452,13 @@ export const validateCanvasPatch = (
   }
 
   const plannedByRef = new Map<string, PlannedShape>();
+  const semanticIndex = buildSemanticIndex(editor);
+  const semanticOwners = new Map<string, Set<TLShapeId>>();
+  const semanticByShapeId = new Map<TLShapeId, string>();
+  for (const [semanticId, shapes] of semanticIndex) {
+    semanticOwners.set(semanticId, new Set(shapes.map((shape) => shape.id)));
+    for (const shape of shapes) semanticByShapeId.set(shape.id, semanticId);
+  }
   rawOperations.forEach((raw, index) => {
     if (!isObject(raw)) return;
     const op = raw.op;
@@ -391,6 +497,24 @@ export const validateCanvasPatch = (
   });
   const unavailableIds = new Set<TLShapeId>();
 
+  const claimSemanticId = (id: TLShapeId, metadata: MetadataPatch) => {
+    if (metadata.semanticId === undefined) return;
+    const currentSemanticId = semanticByShapeId.get(id);
+    if (currentSemanticId) {
+      const currentOwners = semanticOwners.get(currentSemanticId);
+      currentOwners?.delete(id);
+      if (!currentOwners?.size) semanticOwners.delete(currentSemanticId);
+      semanticByShapeId.delete(id);
+    }
+    if (metadata.semanticId === null) {
+      return;
+    }
+    const owners = semanticOwners.get(metadata.semanticId) ?? new Set();
+    owners.add(id);
+    semanticOwners.set(metadata.semanticId, owners);
+    semanticByShapeId.set(id, metadata.semanticId);
+  };
+
   const resolveTarget = (
     targetValue: unknown,
     index: number,
@@ -420,6 +544,38 @@ export const validateCanvasPatch = (
         return undefined;
       }
       return { id: planned.id, type: planned.type };
+    }
+    if ("semantic_id" in target) {
+      const matches = semanticIndex.get(target.semantic_id) ?? [];
+      if (matches.length > 1) {
+        errors.push({
+          operation_index: index,
+          path,
+          code: "duplicate_semantic_id",
+          message: `Semantic target is ambiguous because ${target.semantic_id} is duplicated.`,
+        });
+        return undefined;
+      }
+      const shape = matches[0];
+      if (!shape || unavailableIds.has(shape.id)) {
+        errors.push({
+          operation_index: index,
+          path,
+          code: endpoint ? "connector_endpoint_not_found" : "target_not_found",
+          message: `Canvas semantic target was not found: ${target.semantic_id}`,
+        });
+        return undefined;
+      }
+      if (!endpoint && editor.isShapeOrAncestorLocked(shape)) {
+        errors.push({
+          operation_index: index,
+          path,
+          code: "target_locked",
+          message: `Canvas semantic target is locked: ${target.semantic_id}`,
+        });
+        return undefined;
+      }
+      return { id: shape.id, type: shape.type };
     }
     const shape = editor.getShape(target.id as TLShapeId);
     if (!shape) {
@@ -453,6 +609,7 @@ export const validateCanvasPatch = (
   };
 
   const normalized: NormalizedOperation[] = [];
+  const requestedHeights: Record<string, number> = {};
   rawOperations.forEach((raw, index) => {
     if (!isObject(raw) || typeof raw.op !== "string") {
       errors.push({
@@ -506,10 +663,49 @@ export const validateCanvasPatch = (
       }
       const shapeType = type as ShapeType;
       const shapeKeys: Record<ShapeType, Set<string>> = {
-        geo: new Set(["type", "x", "y", "width", "height", "text", "style"]),
-        text: new Set(["type", "x", "y", "width", "text", "style"]),
-        note: new Set(["type", "x", "y", "width", "height", "text", "style"]),
-        frame: new Set(["type", "x", "y", "width", "height", "name", "style"]),
+        geo: new Set([
+          "type",
+          "x",
+          "y",
+          "width",
+          "height",
+          "text",
+          "style",
+          "semantic_id",
+          "source_refs",
+        ]),
+        text: new Set([
+          "type",
+          "x",
+          "y",
+          "width",
+          "text",
+          "style",
+          "semantic_id",
+          "source_refs",
+        ]),
+        note: new Set([
+          "type",
+          "x",
+          "y",
+          "width",
+          "height",
+          "text",
+          "style",
+          "semantic_id",
+          "source_refs",
+        ]),
+        frame: new Set([
+          "type",
+          "x",
+          "y",
+          "width",
+          "height",
+          "name",
+          "style",
+          "semantic_id",
+          "source_refs",
+        ]),
       };
       rejectUnknownKeys(shape, shapeKeys[shapeType], index, "shape", errors);
       const x = finiteNumber(shape.x, index, "shape.x", errors);
@@ -544,6 +740,8 @@ export const validateCanvasPatch = (
         "shape.style",
         errors,
       );
+      const metadata = normalizeMetadata(shape, index, "shape.", errors);
+      claimSemanticId(planned.id, metadata);
       const shapeText =
         shape.text === undefined
           ? undefined
@@ -587,12 +785,13 @@ export const validateCanvasPatch = (
           x,
           y,
           props,
-          meta: { source: "codex", logicalRef: ref },
         },
+        metadata,
         ...(shapeType === "note" && width !== undefined && height !== undefined
           ? { resize: { width, height } }
           : {}),
       });
+      if (height !== undefined) requestedHeights[planned.id] = height;
       return;
     }
 
@@ -620,14 +819,30 @@ export const validateCanvasPatch = (
           message: "delete accepts at most 100 targets.",
         });
       normalized.push({ op: "delete", ids });
-      ids.forEach((id) => unavailableIds.add(id));
+      ids.forEach((id) => {
+        unavailableIds.add(id);
+        const semanticId = semanticByShapeId.get(id);
+        const owners = semanticId ? semanticOwners.get(semanticId) : undefined;
+        owners?.delete(id);
+        if (semanticId && !owners?.size) semanticOwners.delete(semanticId);
+        semanticByShapeId.delete(id);
+      });
       return;
     }
 
     if (op === "connect") {
       rejectUnknownKeys(
         raw,
-        new Set(["op", "ref", "from", "to", "text", "style"]),
+        new Set([
+          "op",
+          "ref",
+          "from",
+          "to",
+          "text",
+          "style",
+          "semantic_id",
+          "source_refs",
+        ]),
         index,
         "",
         errors,
@@ -646,6 +861,8 @@ export const validateCanvasPatch = (
       const planned = plannedByRef.get(ref);
       if (!from || !to || !planned) return;
       const props = normalizeStyle(raw.style, "arrow", index, "style", errors);
+      const metadata = normalizeMetadata(raw, index, "", errors);
+      claimSemanticId(planned.id, metadata);
       if (raw.text !== undefined) {
         const text = boundedString(raw.text, index, "text", errors, 20_000);
         if (text !== undefined) props.richText = toRichText(text);
@@ -657,6 +874,7 @@ export const validateCanvasPatch = (
         fromId: from.id,
         toId: to.id,
         props,
+        metadata,
       });
       return;
     }
@@ -682,6 +900,8 @@ export const validateCanvasPatch = (
             "text",
             "name",
             "style",
+            "semantic_id",
+            "source_refs",
           ])
         : op === "move"
           ? new Set(["op", "target", "x", "y"])
@@ -698,7 +918,9 @@ export const validateCanvasPatch = (
       ].some((key) => raw[key] !== undefined);
       const hasStyleUpdate =
         isObject(raw.style) && Object.keys(raw.style).length > 0;
-      if (!hasDirectUpdate && !hasStyleUpdate) {
+      const hasMetadataUpdate =
+        raw.semantic_id !== undefined || raw.source_refs !== undefined;
+      if (!hasDirectUpdate && !hasStyleUpdate && !hasMetadataUpdate) {
         errors.push({
           operation_index: index,
           path: "operation",
@@ -727,6 +949,7 @@ export const validateCanvasPatch = (
           width,
           height,
         });
+      if (height !== undefined) requestedHeights[target.id] = height;
       return;
     }
     if (!SHAPE_TYPES.has(target.type as ShapeType)) {
@@ -740,6 +963,8 @@ export const validateCanvasPatch = (
     }
     const shapeType = target.type as ShapeType;
     const update: JsonObject = {};
+    const metadata = normalizeMetadata(raw, index, "", errors, true);
+    claimSemanticId(target.id, metadata);
     if (raw.x !== undefined) update.x = finiteNumber(raw.x, index, "x", errors);
     if (raw.y !== undefined) update.y = finiteNumber(raw.y, index, "y", errors);
     const props = normalizeStyle(raw.style, shapeType, index, "style", errors);
@@ -799,8 +1024,28 @@ export const validateCanvasPatch = (
       else props.h = height;
     }
     update.props = props;
-    normalized.push({ op: "update", id: target.id, type: target.type, update });
+    normalized.push({
+      op: "update",
+      id: target.id,
+      type: target.type,
+      update,
+      metadata,
+    });
+    if (typeof raw.height === "number")
+      requestedHeights[target.id] = raw.height;
   });
+
+  for (const [semanticId, owners] of semanticOwners) {
+    if (owners.size < 2) continue;
+    errors.push({
+      operation_index: -1,
+      path: "document.meta.nomad.semantic_id",
+      code: "duplicate_semantic_id",
+      message: `Canvas document would contain duplicate semantic ID ${semanticId}: ${Array.from(owners).join(", ")}`,
+      suggestion:
+        "Use exact tldraw IDs to delete or assign a unique semantic_id to each duplicate.",
+    });
+  }
 
   const changedIds = new Set<TLShapeId>();
   for (const operation of normalized) {
@@ -829,6 +1074,7 @@ export const validateCanvasPatch = (
         Array.from(plannedByRef, ([ref, shape]) => [ref, shape.id]),
       ),
     ),
+    requestedHeights: Object.freeze(requestedHeights),
   });
 };
 
@@ -849,7 +1095,16 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
     editor.run(() => {
       for (const operation of plan.operations) {
         if (operation.op === "create") {
-          editor.createShape({ id: operation.id, ...operation.shape } as never);
+          editor.createShape({
+            id: operation.id,
+            ...operation.shape,
+            meta: mergeNomadMetadata(
+              {},
+              plan.commandId,
+              operation.metadata,
+              "codex",
+            ),
+          } as never);
           if (operation.resize) {
             const bounds = editor.getShapeGeometry(operation.id).bounds;
             if (bounds.w <= 0 || bounds.h <= 0)
@@ -881,7 +1136,12 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
               },
               ...operation.props,
             },
-            meta: { source: "codex", logicalRef: operation.ref },
+            meta: mergeNomadMetadata(
+              {},
+              plan.commandId,
+              operation.metadata,
+              "codex",
+            ),
           } as never);
           editor.createBindings([
             {
@@ -916,10 +1176,18 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
           });
           changedIds.add(operation.id);
         } else {
+          const existing = editor.getShape(operation.id);
+          if (!existing)
+            throw new Error("Update target disappeared during apply.");
           editor.updateShape({
             id: operation.id,
             type: operation.type,
             ...operation.update,
+            meta: mergeNomadMetadata(
+              existing.meta,
+              plan.commandId,
+              operation.metadata,
+            ),
           } as never);
           changedIds.add(operation.id);
         }
@@ -945,7 +1213,7 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
     result: {
       changed_ids: Array.from(changedIds),
       refs: plan.refs,
-      warnings: [] as string[],
+      warnings: [],
     },
     rollback: () => editor.bailToMark(mark),
   };

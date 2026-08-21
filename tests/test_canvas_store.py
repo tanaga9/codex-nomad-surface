@@ -687,13 +687,22 @@ def test_canvas_apply_patch_schema_accepts_nomad_dto_and_rejects_raw_props():
                     "height": 120,
                     "text": "Gate",
                     "style": {"geo": "diamond", "fill": "semi"},
+                    "semantic_id": "gate.diagnosis-type",
+                    "source_refs": [
+                        {
+                            "document": "requirements.md",
+                            "locator": "section:3.2",
+                            "content_hash": "sha256:" + ("a" * 64),
+                        }
+                    ],
                 },
             },
             {
                 "op": "connect",
                 "ref": "edge",
                 "from": {"ref": "gate"},
-                "to": {"id": "shape:existing"},
+                "to": {"semantic_id": "outcome.approved"},
+                "semantic_id": "flow.diagnosis-to-approved",
             },
         ],
     }
@@ -715,6 +724,18 @@ def test_canvas_apply_patch_schema_accepts_nomad_dto_and_rejects_raw_props():
 
     assert list(validator.iter_errors(valid)) == []
     assert list(validator.iter_errors(raw_props))
+    invalid_semantic = {
+        **valid,
+        "operations": [
+            {
+                "op": "move",
+                "target": {"semantic_id": "contains spaces"},
+                "x": 1,
+                "y": 2,
+            }
+        ],
+    }
+    assert list(validator.iter_errors(invalid_semantic))
 
     empty_update = {
         "command_id": "empty-update",
@@ -747,6 +768,29 @@ def test_canvas_apply_patch_schema_accepts_nomad_dto_and_rejects_raw_props():
     assert list(validator.iter_errors(empty_update))
     assert list(validator.iter_errors(empty_style_update))
     assert list(validator.iter_errors(valid_update)) == []
+
+
+def test_offline_semantic_summary_is_bounded():
+    summary = canvas_runtime._offline_semantic_summary(
+        {
+            "nomad": {
+                "semantic_id": "invalid semantic id",
+                "created_by": "x" * 65,
+                "last_command_id": "x" * 129,
+                "source_refs": [
+                    {"document": "requirements.md", "locator": "section:1"},
+                    {"document": "x" * 501, "locator": "section:oversized"},
+                ],
+            }
+        }
+    )
+
+    assert "semantic_id" not in summary
+    assert "created_by" not in summary
+    assert "last_command_id" not in summary
+    assert summary["source_refs"] == [
+        {"document": "requirements.md", "locator": "section:1"}
+    ]
 
 
 def test_canvas_command_receipt_is_committed_and_replayed(isolated_canvas_root):
@@ -798,6 +842,79 @@ def test_canvas_command_receipt_is_committed_and_replayed(isolated_canvas_root):
     assert payload["revision"] == 1
     assert payload["refs"] == {"gate": "shape:gate"}
     assert canvas_store.read_canvas_manifest(canvas_id)["current_revision"] == 1
+
+
+def test_canvas_command_receipt_round_trips_structured_lint(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-structured-lint")
+    canvas_id = manifest["canvas_id"]
+    warning = {
+        "code": "missing_semantic_id",
+        "severity": "warning",
+        "shape_ids": ["shape:gate"],
+        "semantic_ids": [],
+        "message": "A shape with provenance has no semantic ID.",
+        "details": {},
+        "suggested_action": "Assign a document-unique semantic_id.",
+    }
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        {"store": {}},
+        command_receipt={
+            "command_id": "structured-lint",
+            "input_hash": "sha256:" + ("a" * 64),
+            "base_revision": 0,
+            "changed_ids": ["shape:gate"],
+            "refs": {},
+            "warnings": [warning],
+        },
+    )
+
+    receipt = canvas_store.read_canvas_command_receipt(canvas_id, "structured-lint")
+    assert receipt["schema_version"] == 2
+    assert receipt["warnings"] == [warning]
+    assert canvas_runtime._receipt_payload(canvas_id, receipt)["semantic_success"] is True
+
+
+def test_canvas_command_receipt_schema_versions_keep_warning_formats_distinct():
+    base_receipt = {
+        "command_id": "warning-schema",
+        "input_hash": "sha256:" + ("a" * 64),
+        "base_revision": 0,
+        "result_revision": 1,
+        "changed_ids": [],
+        "refs": {},
+        "committed_at": "2026-08-21T00:00:00+00:00",
+    }
+    legacy = {
+        **base_receipt,
+        "schema_version": 1,
+        "warnings": ["Legacy warning"],
+    }
+    structured_warning = {
+        "code": "missing_semantic_id",
+        "severity": "warning",
+        "shape_ids": ["shape:gate"],
+        "semantic_ids": [],
+        "message": "A shape with provenance has no semantic ID.",
+        "details": {},
+        "suggested_action": "Assign a document-unique semantic_id.",
+    }
+    current = {
+        **base_receipt,
+        "schema_version": 2,
+        "warnings": [structured_warning],
+    }
+
+    assert canvas_store._validate_command_receipt(legacy) == legacy
+    assert canvas_store._validate_command_receipt(current) == current
+    with pytest.raises(canvas_store.CanvasCommandReceiptError):
+        canvas_store._validate_command_receipt(
+            {**legacy, "warnings": [structured_warning]}
+        )
+    with pytest.raises(canvas_store.CanvasCommandReceiptError):
+        canvas_store._validate_command_receipt(
+            {**current, "warnings": ["Legacy warning"]}
+        )
 
 
 def test_canvas_command_id_conflict_precedes_revision_conflict(isolated_canvas_root):

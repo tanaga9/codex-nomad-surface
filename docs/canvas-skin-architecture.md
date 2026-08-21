@@ -287,6 +287,33 @@ the editor is disconnected, the tool returns `canvas_unavailable`; Nomad
 Surface does not introduce a separate headless tldraw process merely to apply
 the command.
 
+### Semantic identity, provenance, and lint
+
+Domain shapes and semantic connectors may carry metadata under `meta.nomad`.
+The namespace contains `schema_version`, a document-unique `semantic_id`,
+bounded `source_refs`, `created_by`, and `last_command_id`; updates merge this
+namespace and preserve unrelated tldraw metadata. Semantic IDs use
+`[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`. Source references contain a document and
+locator, with an optional label and `sha256:` content hash; they are descriptive
+and are never dereferenced by the Canvas tool.
+
+`created_by` is added to shapes created through the Canvas tool and preserved
+thereafter. Updating a pre-existing shape does not invent creator attribution.
+
+Mutation targets accept exactly one tldraw ID, semantic ID, or earlier
+same-patch ref. Duplicate semantic IDs make semantic lookup ambiguous and fail
+instead of selecting the first match; an exact tldraw-ID patch may still repair
+the duplicate, and final-state uniqueness is validated before apply. Scoped
+reads return the tldraw ID and a bounded, validated `nomad` semantic summary so
+later domain edits can use durable identity.
+
+After fonts and geometry settle, a bounded, read-only lint pass checks semantic
+identity, provenance, connector bindings, requested text height, node overlap,
+and frame containment for changed shapes and their directly affected neighbors.
+Structured lint entries are stored in the command receipt. `semantic_success`
+is false when an identity or binding error remains; visual warnings do not roll
+back a valid edit.
+
 ## Command Flow
 
 1. The user sends a message through the Canvas Skin chat.

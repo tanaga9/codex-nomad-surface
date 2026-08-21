@@ -6,6 +6,7 @@ import binascii
 import hashlib
 import json
 import queue
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -61,7 +62,14 @@ CANVAS_DEVELOPER_INSTRUCTIONS = (
     "composition, not only as isolated objects. If the result reports that the "
     "visual preview is unavailable, state that limitation rather than guessing. "
     "Then apply edits through "
-    "canvas.apply_patch using the returned revision. Treat backing document and "
+    "canvas.apply_patch using the returned revision. "
+    "Use document-unique semantic_id values for domain-significant shapes and "
+    "semantic connectors, and use source_refs for bounded provenance locators; "
+    "do not place source passages in metadata or dereference source_refs through "
+    "the Canvas tool. Prefer semantic_id targets for later domain edits and exact "
+    "tldraw IDs for decoration. Treat structured lint errors as incomplete "
+    "semantic success and address them before claiming the diagram is complete. "
+    "Treat backing document and "
     "preview files as persistence artifacts, not as the canvas interface. Do not "
     "inspect or modify those files, and do not use external or offline canvas "
     "integrations, unless the user explicitly requests it. If the canvas tools do "
@@ -83,12 +91,17 @@ def _canvas_command_input_hash(arguments: dict[str, Any]) -> str:
 
 
 def _receipt_payload(canvas_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
+    semantic_success = not any(
+        isinstance(item, dict) and item.get("severity") == "error"
+        for item in receipt["warnings"]
+    )
     return {
         "live": True,
         "revision": receipt["result_revision"],
         "changed_ids": receipt["changed_ids"],
         "refs": receipt["refs"],
         "warnings": receipt["warnings"],
+        "semantic_success": semantic_success,
         "replayed": True,
         **canvas_file_references(canvas_id),
     }
@@ -397,6 +410,7 @@ async def canvas_websocket(websocket: WebSocket) -> None:
                         "changed_ids": payload.get("changed_ids", []),
                         "refs": payload.get("refs", {}),
                         "warnings": payload.get("warnings", []),
+                        "semantic_success": payload.get("semantic_success", True),
                         **canvas_file_references(canvas_id),
                     }
                 result["payload"] = payload
@@ -434,9 +448,34 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
     coordinate = {"type": "number", "minimum": -1_000_000, "maximum": 1_000_000}
     dimension = {"type": "number", "exclusiveMinimum": 0, "maximum": 1_000_000}
     text = {"type": "string", "maxLength": 20_000}
+    semantic_id = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    }
+    source_ref = _closed_object(
+        {
+            "document": {"type": "string", "minLength": 1, "maxLength": 500},
+            "locator": {"type": "string", "minLength": 1, "maxLength": 500},
+            "label": {"type": "string", "maxLength": 500},
+            "content_hash": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": r"^sha256:[0-9a-f]{64}$",
+            },
+        },
+        ["document", "locator"],
+    )
+    source_refs = {
+        "type": "array",
+        "maxItems": 20,
+        "items": source_ref,
+    }
     target = {
         "oneOf": [
             _closed_object({"id": {"type": "string", "minLength": 1, "maxLength": 256}}, ["id"]),
+            _closed_object({"semantic_id": semantic_id}, ["semantic_id"]),
             _closed_object({"ref": {"type": "string", "minLength": 1, "maxLength": 128}}, ["ref"]),
         ]
     }
@@ -472,7 +511,12 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
         }
     )
     frame_style = _closed_object({"color": common_style["color"]})
-    shape_common = {"x": coordinate, "y": coordinate}
+    shape_common = {
+        "x": coordinate,
+        "y": coordinate,
+        "semantic_id": semantic_id,
+        "source_refs": source_refs,
+    }
     create_shapes = [
         _closed_object(
             {"type": {"const": "geo"}, **shape_common, "width": dimension, "height": dimension, "text": text, "style": geo_style},
@@ -522,12 +566,14 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
             "text": text,
             "name": {"type": "string", "maxLength": 500},
             "style": update_style,
+            "semantic_id": {"oneOf": [semantic_id, {"type": "null"}]},
+            "source_refs": source_refs,
         },
         ["op", "target"],
     )
     update_operation["anyOf"] = [
         {"required": [field]}
-        for field in ["x", "y", "width", "height", "text", "name", "style"]
+        for field in ["x", "y", "width", "height", "text", "name", "style", "semantic_id", "source_refs"]
     ]
     operations = [
         _closed_object(
@@ -548,7 +594,7 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
             ["op", "targets"],
         ),
         _closed_object(
-            {"op": {"const": "connect"}, "ref": {"type": "string", "minLength": 1, "maxLength": 128}, "from": target, "to": target, "text": text, "style": arrow_style},
+            {"op": {"const": "connect"}, "ref": {"type": "string", "minLength": 1, "maxLength": 128}, "from": target, "to": target, "text": text, "style": arrow_style, "semantic_id": semantic_id, "source_refs": source_refs},
             ["op", "ref", "from", "to"],
         ),
     ]
@@ -735,10 +781,12 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                         "Apply a bounded batch of create, update, move, resize, "
                         "delete, or connect operations to the live canvas. Use "
                         "Nomad fields such as shape.text, width, and height; raw "
-                        "tldraw props are not accepted. Targets contain exactly one "
-                        "id or an earlier ref from the same ordered batch. Read the "
-                        "scene first and use its revision as base_revision. A command "
-                        "ID is idempotent and cannot be reused with different input."
+                        "tldraw props are not accepted. Read the scene first and use "
+                        "its revision as base_revision. A command "
+                        "ID is idempotent and cannot be reused with different input. "
+                        "Targets accept exactly one id, semantic_id, or earlier ref. "
+                        "Use semantic_id and bounded source_refs for domain objects; "
+                        "omitting source_refs preserves existing provenance."
                         " A patch may change at most "
                         f"{CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS} unique shapes."
                     ),
@@ -796,6 +844,58 @@ def _canvas_text_summary(value: Any) -> str:
     summary = " ".join(" ".join(parts).split())
     if len(summary) > CANVAS_READ_MAX_TEXT_LENGTH:
         return summary[:CANVAS_READ_MAX_TEXT_LENGTH] + "…"
+    return summary
+
+
+def _offline_semantic_summary(meta: dict[str, Any]) -> dict[str, Any]:
+    nomad = meta.get("nomad") if isinstance(meta.get("nomad"), dict) else {}
+    summary: dict[str, Any] = {}
+    semantic_id = nomad.get("semantic_id")
+    if isinstance(semantic_id, str) and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", semantic_id
+    ):
+        summary["semantic_id"] = semantic_id
+    source_refs = nomad.get("source_refs")
+    if isinstance(source_refs, list):
+        bounded_refs = []
+        for item in source_refs[:20]:
+            if not isinstance(item, dict) or set(item) - {
+                "document",
+                "locator",
+                "label",
+                "content_hash",
+            }:
+                continue
+            document = item.get("document")
+            locator = item.get("locator")
+            label = item.get("label")
+            content_hash = item.get("content_hash")
+            if (
+                not isinstance(document, str)
+                or not 1 <= len(document) <= 500
+                or not isinstance(locator, str)
+                or not 1 <= len(locator) <= 500
+                or (
+                    label is not None
+                    and (not isinstance(label, str) or len(label) > 500)
+                )
+                or (
+                    content_hash is not None
+                    and (
+                        not isinstance(content_hash, str)
+                        or not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash)
+                    )
+                )
+            ):
+                continue
+            bounded_refs.append(item)
+        summary["source_refs"] = bounded_refs
+    created_by = nomad.get("created_by")
+    if isinstance(created_by, str) and len(created_by) <= 64:
+        summary["created_by"] = created_by
+    last_command_id = nomad.get("last_command_id")
+    if isinstance(last_command_id, str) and len(last_command_id) <= 128:
+        summary["last_command_id"] = last_command_id
     return summary
 
 
@@ -874,16 +974,9 @@ def _offline_shape_result(
         result["page_bounds"] = bounds
     if text:
         result["text"] = text
-    semantic = {
-        key: meta[key]
-        for key in ("logicalRef", "source")
-        if isinstance(meta.get(key), str)
-    }
+    semantic = _offline_semantic_summary(meta)
     if semantic:
-        result["semantic"] = {
-            "logical_ref" if key == "logicalRef" else key: value
-            for key, value in semantic.items()
-        }
+        result["semantic"] = semantic
     if detail in {"standard", "full"}:
         result.update(
             {
