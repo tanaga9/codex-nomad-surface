@@ -545,6 +545,116 @@ def test_empty_canvas_clears_saved_preview(isolated_canvas_root):
     assert canvas_store.load_canvas_visual_preview(canvas_id) == b""
 
 
+def test_document_only_websocket_save_preserves_saved_preview(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-document-only-save")
+    canvas_id = manifest["canvas_id"]
+    preview_svg = "<svg>saved preview</svg>"
+    preview_image = b"saved preview image"
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        {"store": {"shape:one": {"id": "shape:one", "typeName": "shape"}}},
+        preview_svg,
+        preview_image,
+        "image/png",
+    )
+
+    monkeypatch.setattr(canvas_runtime, "auth_required", lambda: False)
+
+    class FakeWebSocket:
+        scope = {}
+        path_params = {"canvas_id": canvas_id}
+        received = False
+
+        async def accept(self):
+            return None
+
+        async def close(self, code=1000):
+            return None
+
+        async def receive_json(self):
+            if not self.received:
+                self.received = True
+                return {
+                    "type": "snapshot",
+                    "document": {
+                        "store": {
+                            "shape:two": {
+                                "id": "shape:two",
+                                "typeName": "shape",
+                            }
+                        }
+                    },
+                }
+            raise WebSocketDisconnect()
+
+        async def send_json(self, message):
+            return None
+
+    asyncio.run(canvas_runtime.canvas_websocket(FakeWebSocket()))
+    saved = canvas_store.read_canvas_manifest(canvas_id)
+    references = canvas_store.canvas_file_references(canvas_id)
+
+    assert saved["current_revision"] == 2
+    assert saved["preview_content_hash"] != saved["content_hash"]
+    assert saved["visual_preview_content_hash"] != saved["content_hash"]
+    assert Path(references["preview_path"]).read_text(encoding="utf-8") == preview_svg
+    assert Path(references["visual_preview_path"]).read_bytes() == preview_image
+    assert canvas_store.load_canvas_preview(canvas_id) == ""
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == b""
+    assert canvas_store.canvas_visual_preview_data_url(canvas_id) == ""
+    assert saved["visual_preview_mime_type"] == "image/png"
+
+    current_document = canvas_store.load_canvas_document(canvas_id)
+    refreshed, preview_error = canvas_runtime._save_canvas_payload(
+        canvas_id,
+        current_document,
+        "<svg>refreshed preview</svg>",
+        "data:image/png;base64,aW1hZ2U=",
+    )
+
+    assert preview_error == ""
+    assert refreshed["current_revision"] == 2
+    assert refreshed["preview_content_hash"] == refreshed["content_hash"]
+    assert refreshed["visual_preview_content_hash"] == refreshed["content_hash"]
+    assert canvas_store.load_canvas_preview(canvas_id) == "<svg>refreshed preview</svg>"
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == b"image"
+
+
+def test_empty_delayed_preview_clears_stale_preview(isolated_canvas_root):
+    manifest = canvas_store.initialize_canvas("thread-empty-delayed-preview")
+    canvas_id = manifest["canvas_id"]
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        {"store": {"shape:one": {"id": "shape:one", "typeName": "shape"}}},
+        "<svg>old preview</svg>",
+        b"old preview image",
+    )
+    empty_document = {"store": {}}
+
+    canvas_store.save_canvas_snapshot(
+        canvas_id,
+        empty_document,
+        None,
+        None,
+    )
+    saved = canvas_store.save_canvas_snapshot(
+        canvas_id,
+        empty_document,
+        "",
+        b"",
+    )
+
+    references = canvas_store.canvas_file_references(canvas_id)
+    assert saved["preview_content_hash"] == saved["content_hash"]
+    assert saved["visual_preview_content_hash"] == saved["content_hash"]
+    assert Path(references["preview_path"]).read_text(encoding="utf-8") == ""
+    assert Path(references["visual_preview_path"]).read_bytes() == b""
+    assert canvas_store.load_canvas_preview(canvas_id) == ""
+    assert canvas_store.load_canvas_visual_preview(canvas_id) == b""
+
+
 def test_canvas_save_reuses_an_incomplete_next_revision(isolated_canvas_root):
     manifest = canvas_store.initialize_canvas("thread-interrupted-save")
     canvas_id = manifest["canvas_id"]
@@ -1236,9 +1346,47 @@ def test_current_cache_failure_after_commit_keeps_canonical_document_readable(
     assert references["document_path"].endswith(
         "revisions/00000001/document.json"
     )
+    assert saved["preview_content_hash"] != saved["content_hash"]
+    assert saved["visual_preview_content_hash"] != saved["content_hash"]
+    assert canvas_store.load_canvas_preview(canvas_id) == ""
+    assert canvas_store.canvas_visual_preview_data_url(canvas_id) == ""
     assert canvas_store.read_canvas_command_receipt(
         canvas_id, "committed-without-cache"
     )["result_revision"] == 1
+
+
+def test_preview_manifest_failure_keeps_committed_preview_unpublished(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-preview-manifest-failure")
+    canvas_id = manifest["canvas_id"]
+    original_atomic_write = canvas_store._atomic_write
+    manifest_writes = 0
+
+    def fail_preview_manifest(path, content):
+        nonlocal manifest_writes
+        if path.name == "manifest.json":
+            manifest_writes += 1
+            if manifest_writes == 2:
+                raise OSError("preview manifest update failed")
+        original_atomic_write(path, content)
+
+    monkeypatch.setattr(canvas_store, "_atomic_write", fail_preview_manifest)
+
+    saved = canvas_store.save_canvas_snapshot(
+        canvas_id,
+        {"store": {"shape:saved": {"id": "shape:saved", "typeName": "shape"}}},
+        "<svg>saved</svg>",
+        b"saved image",
+    )
+
+    persisted = canvas_store.read_canvas_manifest(canvas_id)
+    assert saved["current_revision"] == 1
+    assert persisted == saved
+    assert saved["preview_content_hash"] != saved["content_hash"]
+    assert saved["visual_preview_content_hash"] != saved["content_hash"]
+    assert canvas_store.load_canvas_preview(canvas_id) == ""
+    assert canvas_store.canvas_visual_preview_data_url(canvas_id) == ""
 
 
 def test_noop_command_gets_its_own_revision_and_reconstructable_receipt(

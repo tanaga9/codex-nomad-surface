@@ -53,6 +53,8 @@ type ConnectionState =
   "connecting" | "connected" | "reconnecting" | "disconnected";
 
 const CANVAS_SNAPSHOT_STABILITY_ATTEMPTS = 3;
+const CANVAS_DOCUMENT_SAVE_DELAY_MS = 700;
+const CANVAS_PREVIEW_SAVE_DELAY_MS = 4_000;
 
 const waitForCanvasGeometry = () =>
   new Promise<void>((resolve) => {
@@ -84,13 +86,14 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const initialDocumentRef = useRef(initialDocument);
   const websocketRef = useRef<WebSocket | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const previewTimerRef = useRef<number | null>(null);
   const applyingRemoteRef = useRef(false);
   const commitEpochRef = useRef(0);
   const publishQueueRef = useRef<Promise<void>>(Promise.resolve());
   const documentVersionRef = useRef(0);
 
   const persistSnapshot = useCallback(
-    (activeEditor: Editor, broadcast = true) => {
+    (activeEditor: Editor, broadcast = true, includePreview = true) => {
       const publish = async () => {
         for (
           let attempt = 0;
@@ -101,7 +104,9 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           const document = captureDocument(activeEditor);
           const documentFingerprint = JSON.stringify(document);
           const shapes = activeEditor.getCurrentPageShapes();
-          const preview = await renderCanvasPreview(activeEditor, shapes);
+          const preview = includePreview
+            ? await renderCanvasPreview(activeEditor, shapes)
+            : {};
           const currentDocument = captureDocument(activeEditor);
           if (
             documentVersion !== documentVersionRef.current ||
@@ -199,8 +204,15 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       }
       saveTimerRef.current = window.setTimeout(() => {
         saveTimerRef.current = null;
+        void persistSnapshot(activeEditor, true, false).catch(() => undefined);
+      }, CANVAS_DOCUMENT_SAVE_DELAY_MS);
+      if (previewTimerRef.current !== null) {
+        window.clearTimeout(previewTimerRef.current);
+      }
+      previewTimerRef.current = window.setTimeout(() => {
+        previewTimerRef.current = null;
         void persistSnapshot(activeEditor).catch(() => undefined);
-      }, 700);
+      }, CANVAS_PREVIEW_SAVE_DELAY_MS);
     },
     [persistSnapshot],
   );
@@ -216,6 +228,10 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
+      }
+      if (previewTimerRef.current !== null) {
+        window.clearTimeout(previewTimerRef.current);
+        previewTimerRef.current = null;
       }
       const wasReadonly = activeEditor.getIsReadonly();
       let rollback: (() => void) | undefined;
@@ -281,12 +297,16 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       },
       { scope: "document" },
     );
-    void persistSnapshot(editor).catch(() => undefined);
+    void persistSnapshot(editor, true, false).catch(() => undefined);
     return () => {
       unsubscribe();
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
+      }
+      if (previewTimerRef.current !== null) {
+        window.clearTimeout(previewTimerRef.current);
+        previewTimerRef.current = null;
       }
     };
   }, [editor, persistSnapshot, scheduleSnapshot]);

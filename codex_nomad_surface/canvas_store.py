@@ -367,6 +367,8 @@ def _initialize_canvas_manifest(
             "visual_preview": CANVAS_VISUAL_PREVIEW_PATH,
             "visual_preview_mime_type": CANVAS_PREVIEW_IMAGE_MIME_TYPE,
             "content_hash": "",
+            "preview_content_hash": "",
+            "visual_preview_content_hash": "",
             "created_at": created_at,
             "updated_at": created_at,
         }
@@ -475,6 +477,13 @@ def load_canvas_document(canvas_id: str) -> dict[str, Any] | None:
 
 
 def load_canvas_preview(canvas_id: str) -> str:
+    manifest = read_canvas_manifest(canvas_id) or {}
+    preview_content_hash = manifest.get("preview_content_hash")
+    if (
+        preview_content_hash is not None
+        and preview_content_hash != manifest.get("content_hash")
+    ):
+        return ""
     path = canvas_directory(canvas_id) / "current" / "preview.svg"
     try:
         return path.read_text(encoding="utf-8")
@@ -483,6 +492,13 @@ def load_canvas_preview(canvas_id: str) -> str:
 
 
 def load_canvas_visual_preview(canvas_id: str) -> bytes:
+    manifest = read_canvas_manifest(canvas_id) or {}
+    preview_content_hash = manifest.get("visual_preview_content_hash")
+    if (
+        preview_content_hash is not None
+        and preview_content_hash != manifest.get("content_hash")
+    ):
+        return b""
     path = canvas_directory(canvas_id) / CANVAS_VISUAL_PREVIEW_PATH
     try:
         return path.read_bytes()
@@ -520,26 +536,35 @@ def _materialize_current_snapshot(
     document_path: Path,
     document_bytes: bytes,
     preview_path: Path,
-    preview_bytes: bytes,
+    preview_bytes: bytes | None,
     visual_preview_path: Path,
-    visual_preview_bytes: bytes,
-) -> None:
+    visual_preview_bytes: bytes | None,
+) -> tuple[bool, bool]:
     """Best-effort compatibility cache written only after the manifest commit."""
-    for path, content in (
-        (document_path, document_bytes),
-        (preview_path, preview_bytes),
-        (visual_preview_path, visual_preview_bytes),
+    preview_saved = False
+    visual_preview_saved = False
+    for kind, path, content in (
+        ("document", document_path, document_bytes),
+        ("preview", preview_path, preview_bytes),
+        ("visual_preview", visual_preview_path, visual_preview_bytes),
     ):
+        if content is None:
+            continue
         try:
             _atomic_write(path, content)
         except OSError:
-            pass
+            continue
+        if kind == "preview":
+            preview_saved = True
+        elif kind == "visual_preview":
+            visual_preview_saved = True
+    return preview_saved, visual_preview_saved
 
 
 def save_canvas_snapshot(
     canvas_id: str,
     document: dict[str, Any],
-    preview_svg: str = "",
+    preview_svg: str | None = "",
     preview_image: bytes | None = b"",
     preview_image_mime_type: str = CANVAS_PREVIEW_IMAGE_MIME_TYPE,
     *,
@@ -559,11 +584,14 @@ def save_canvas_snapshot(
         if not manifest:
             raise FileNotFoundError("Canvas manifest was not found.")
         schema_version = _supported_manifest_version(manifest)
+        legacy_preview_content_hash = str(manifest.get("content_hash") or "")
         manifest_needs_update = (
             schema_version < CANVAS_SCHEMA_VERSION
             or manifest.get("visual_preview") != CANVAS_VISUAL_PREVIEW_PATH
             or manifest.get("visual_preview_mime_type")
             not in CANVAS_PREVIEW_IMAGE_MIME_TYPES
+            or not isinstance(manifest.get("preview_content_hash"), str)
+            or not isinstance(manifest.get("visual_preview_content_hash"), str)
         )
         if manifest_needs_update:
             manifest = {
@@ -571,6 +599,16 @@ def save_canvas_snapshot(
                 "schema_version": CANVAS_SCHEMA_VERSION,
                 "visual_preview": CANVAS_VISUAL_PREVIEW_PATH,
                 "visual_preview_mime_type": CANVAS_PREVIEW_IMAGE_MIME_TYPE,
+                "preview_content_hash": (
+                    manifest.get("preview_content_hash")
+                    if isinstance(manifest.get("preview_content_hash"), str)
+                    else legacy_preview_content_hash
+                ),
+                "visual_preview_content_hash": (
+                    manifest.get("visual_preview_content_hash")
+                    if isinstance(manifest.get("visual_preview_content_hash"), str)
+                    else legacy_preview_content_hash
+                ),
             }
         current_revision = int(manifest.get("current_revision") or 0)
         if expected_revision is not None and expected_revision != current_revision:
@@ -598,17 +636,27 @@ def save_canvas_snapshot(
             preview_image is not None
             and manifest.get("visual_preview_mime_type") != preview_image_mime_type
         )
-        if manifest.get("content_hash") == content_hash and receipt_base is None:
-            if preview_svg != load_canvas_preview(canvas_id):
-                _atomic_write(current_preview, preview_svg.encode("utf-8"))
-            if (
+        preview_hash_changed = (
+            (
+                preview_svg is not None
+                and manifest.get("preview_content_hash") != content_hash
+            )
+            or (
                 preview_image is not None
-                and preview_image != load_canvas_visual_preview(canvas_id)
-            ):
+                and manifest.get("visual_preview_content_hash") != content_hash
+            )
+        )
+        if manifest.get("content_hash") == content_hash and receipt_base is None:
+            if preview_svg is not None:
+                _atomic_write(current_preview, preview_svg.encode("utf-8"))
+            if preview_image is not None:
                 _atomic_write(current_visual_preview, preview_image)
             if preview_image is not None:
                 manifest["visual_preview_mime_type"] = preview_image_mime_type
-            if manifest_needs_update or preview_mime_changed:
+                manifest["visual_preview_content_hash"] = content_hash
+            if preview_svg is not None:
+                manifest["preview_content_hash"] = content_hash
+            if manifest_needs_update or preview_mime_changed or preview_hash_changed:
                 _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
             return manifest
 
@@ -638,17 +686,41 @@ def save_canvas_snapshot(
             "document": f"revisions/{revision:08d}/document.json",
             "content_hash": content_hash,
             "updated_at": _timestamp(),
-            "visual_preview_mime_type": preview_image_mime_type,
         }
         _atomic_write(_manifest_path(canvas_id), _json_bytes(manifest))
-        _materialize_current_snapshot(
+        preview_saved, visual_preview_saved = _materialize_current_snapshot(
             current_document,
             document_bytes,
             current_preview,
-            preview_svg.encode("utf-8"),
+            preview_svg.encode("utf-8") if preview_svg is not None else None,
             current_visual_preview,
-            preview_image or b"",
+            preview_image,
         )
+        preview_updates = {
+            **(
+                {"preview_content_hash": content_hash}
+                if preview_saved
+                else {}
+            ),
+            **(
+                {
+                    "visual_preview_content_hash": content_hash,
+                    "visual_preview_mime_type": preview_image_mime_type,
+                }
+                if visual_preview_saved
+                else {}
+            ),
+        }
+        if preview_updates:
+            preview_manifest = {**manifest, **preview_updates}
+            try:
+                _atomic_write(
+                    _manifest_path(canvas_id), _json_bytes(preview_manifest)
+                )
+            except OSError:
+                pass
+            else:
+                manifest = preview_manifest
         if receipt_base is not None:
             receipt = _validate_command_receipt(receipt_base)
             _materialize_command_receipt(

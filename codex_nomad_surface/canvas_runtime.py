@@ -161,13 +161,16 @@ def _decode_preview_image(data_url: object) -> tuple[bytes, str]:
 def _save_canvas_payload(
     canvas_id: str,
     document: dict[str, Any],
-    preview_svg: str,
+    preview_svg: str | None,
     preview_image_url: object,
     preview_image_error: object = "",
     command_receipt: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     preview_error = str(preview_image_error or "")
-    if not preview_image_url and preview_svg:
+    if preview_svg is None and preview_image_url is None:
+        preview_image = None
+        preview_image_mime_type = "image/webp"
+    elif not preview_image_url and preview_svg:
         preview_image = None
         preview_image_mime_type = "image/webp"
         preview_error = preview_error or "Canvas preview image is unavailable."
@@ -337,8 +340,16 @@ async def canvas_websocket(websocket: WebSocket) -> None:
                         _save_canvas_payload,
                         canvas_id,
                         document,
-                        str(message.get("preview_svg") or ""),
-                        message.get("preview_image_url"),
+                        (
+                            str(message.get("preview_svg") or "")
+                            if "preview_svg" in message
+                            else None
+                        ),
+                        (
+                            message.get("preview_image_url")
+                            if "preview_image_url" in message
+                            else None
+                        ),
                         message.get("preview_image_error"),
                     )
                 continue

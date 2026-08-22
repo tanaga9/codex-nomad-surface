@@ -167,6 +167,8 @@ SQLite service, or tldraw sync service.
 - Connects to the Canvas Runtime over a same-origin WebSocket after
   authentication.
 - Produces document snapshots and rendered previews.
+- Sends lightweight document-only checkpoints during editing and refreshes the
+  rendered preview after a longer idle period.
 - Applies validated Codex operations as one editor transaction and one undo
   unit.
 - Holds that transaction behind a short read-only commit barrier. The Runtime
@@ -401,19 +403,23 @@ An illustrative manifest is:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "canvas_id": "canvas-abcd",
   "draft_id": "local-draft-123",
   "thread_id": "thread-123",
   "current_revision": 42,
   "document": "revisions/00000042/document.json",
   "preview": "current/preview.svg",
+  "content_hash": "document-sha256",
+  "preview_content_hash": "document-sha256",
+  "visual_preview_content_hash": "document-sha256",
   "updated_at": "2026-08-15T12:34:56Z"
 }
 ```
 
 Paths in the manifest are relative to the canvas directory. User-provided path
-segments are never accepted.
+segments are never accepted. Offline reads expose a saved preview only when its
+content hash matches the current document.
 
 ### File Commit
 
@@ -426,16 +432,19 @@ A document commit follows this sequence:
    save left it uncommitted.
 4. Atomically replace the numbered revision document and metadata.
 5. Atomically update the manifest last, making that immutable document current.
-6. Best-effort materialize the `current/` compatibility cache.
-7. Prune old revisions beyond the retention limit.
+6. Best-effort materialize the `current/` compatibility cache while its old
+   preview hashes keep those files unavailable.
+7. Atomically publish hashes only for previews that were materialized.
+8. Prune old revisions beyond the retention limit.
 
 This intentionally uses individual atomic file replacements instead of a
 cross-file transaction. The manifest is the commit authority: if a save stops
 before step 5, readers continue using the preceding revision. A failure after
 step 5 cannot turn a durable command into a negative acknowledgement; readers
 resolve the document path from the manifest instead of depending on the cache.
-An interrupted pre-commit revision directory is safely overwritten and
-completed by the next save.
+An interrupted cache update leaves its preview unavailable rather than exposing
+it for the wrong document. An interrupted pre-commit revision directory is
+safely overwritten and completed by the next save.
 
 ### Save Triggers
 
