@@ -9,5 +9,6 @@ __pycache__/
 *.egg-info/
 node_modules/
 /build/
-components/nomad-canvas/build/
+components/*/*/frontend/build/
+codex_nomad_surface/ui_components/generated/
 dist/

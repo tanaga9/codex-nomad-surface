@@ -4,12 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run clean && npm run typecheck && npm run build:frontend:production && npm run sync:runtime",
+    "build": "npm run clean && npm run typecheck && npm run build:frontend:production",
     "build:frontend:production": "cross-env NODE_ENV=production vite build",
     "clean": "rimraf build",
     "dev": "cross-env NODE_ENV=development vite build --watch",
     "format": "prettier --write src/**/*.{ts,tsx} scripts/*.mjs vite.config.ts",
-    "sync:runtime": "node scripts/sync-runtime-build.mjs",
     "test:protocol": "node scripts/test-canvas-protocol.mjs",
     "typecheck": "tsc --noEmit"
   },

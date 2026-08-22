@@ -17,7 +17,7 @@ dependencies = [
 
 [[tool.streamlit.component.components]]
 name = "nomad_canvas"
-asset_dir = "ui_components/nomad_canvas"
+asset_dir = "ui_components/generated/nomad_canvas"
 
 [project.optional-dependencies]
 test = [
@@ -33,7 +33,7 @@ packages = [
 
 [tool.setuptools.package-data]
 "codex_nomad_surface.ui_components" = ["assets/*.js", "assets/*.css", "assets/*.svg"]
-"codex_nomad_surface" = ["ui_components/nomad_canvas/*.js", "ui_components/nomad_canvas/*.css"]
+"codex_nomad_surface" = ["ui_components/generated/*/*.js", "ui_components/generated/*/*.css"]
 
 [tool.ruff]
 target-version = "py312"

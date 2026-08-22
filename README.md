@@ -44,27 +44,31 @@ There is no CLI fallback. Prompt submission is disabled when Codex App Server is
 ## Setup
 
 Python 3.12 or newer is required.
+Node.js and npm are required to build the frontend components from source.
 
 macOS / Linux:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
+python3 scripts/dev.py setup
 ```
 
 Windows PowerShell:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .
+py -3.12 scripts/dev.py setup
 ```
 
-To run tests with pytest, install the test extra:
+The setup command creates `.venv`, restores each registered frontend
+component's locked npm dependencies, builds and verifies its assets, and
+installs the Python project with its test dependencies. Component definitions
+are kept in `components.toml`.
+
+After changing a frontend component, rebuild all components or one named
+component:
 
 ```bash
-pip install -e ".[test]"
+python scripts/dev.py build-components
+python scripts/dev.py build-component nomad-canvas
 ```
 
 ## Run
@@ -74,12 +78,15 @@ Start the Streamlit app.
 macOS / Linux:
 
 ```bash
-NOMAD_AUTH_SECRET='your-secret' streamlit run codex_nomad_surface/app.py
+. .venv/bin/activate
+export NOMAD_AUTH_SECRET='your-secret'
+streamlit run codex_nomad_surface/app.py
 ```
 
 Windows PowerShell:
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 $env:NOMAD_AUTH_SECRET = "your-secret"
 $env:CODEX_APP_SERVER_BIN = "$env:APPDATA\npm\codex.cmd"
 streamlit run codex_nomad_surface/app.py
@@ -131,6 +138,10 @@ minute.
 - `promptform-defs/*.json`: reusable Prompt Form definitions for this project or shared general forms.
 - `codex_nomad_surface/promptform_defs.py`: loader for Prompt Form definition files.
 - `codex_nomad_surface/skill_defs.py`: loader for Codex Skill definition files.
+- `components.toml`: registry of buildable frontend components and their
+  generated-asset destinations.
+- `scripts/dev.py`: project-wide setup, component build, and verification
+  commands.
 - `pyproject.toml`: Python project metadata and runtime dependencies.
 
 The embedded Prompt Form UI is assembled at runtime by the `ui_components`
