@@ -41,7 +41,13 @@ const NomadCanvasRoot: FrontendRenderer<
   }
 
   // Here we are accessing the data passed from Streamlit on the Python side.
-  const { canvasId, initialDocument, websocketUrl } = data;
+  const {
+    canvasId,
+    initialDocument,
+    websocketUrl,
+    obsidianUuid,
+    exportRequest,
+  } = data;
 
   // Render/re-render the React application into the root using the React DOM
   // API.
@@ -51,6 +57,8 @@ const NomadCanvasRoot: FrontendRenderer<
         canvasId={canvasId}
         initialDocument={initialDocument}
         websocketUrl={websocketUrl}
+        obsidianUuid={obsidianUuid}
+        exportRequest={exportRequest}
       />
     </StrictMode>,
   );

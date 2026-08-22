@@ -16,6 +16,7 @@ import {
 import { CanvasReadError, readCanvasScene } from "./canvas-read-protocol";
 import { renderCanvasPreview } from "./canvas-preview";
 import { lintCanvasPatch } from "./canvas-semantic";
+import { downloadObsidianTldrawMarkdown } from "./obsidian-tldraw";
 import {
   canBroadcastCanvasSnapshot,
   canCompleteCanvasRequest,
@@ -29,6 +30,8 @@ export type NomadCanvasDataShape = {
   canvasId: string;
   initialDocument: TLStoreSnapshot | null;
   websocketUrl: string;
+  obsidianUuid: string;
+  exportRequest: CanvasExportRequest | null;
 };
 
 export type NomadCanvasProps = NomadCanvasDataShape;
@@ -52,6 +55,11 @@ type PendingCanvasApply = {
 
 type ConnectionState =
   "connecting" | "connected" | "reconnecting" | "disconnected";
+
+type CanvasExportRequest = {
+  id: string;
+  format: "obsidian";
+};
 
 const CANVAS_SNAPSHOT_STABILITY_ATTEMPTS = 3;
 const CANVAS_DOCUMENT_SAVE_DELAY_MS = 700;
@@ -80,10 +88,13 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   canvasId,
   initialDocument,
   websocketUrl,
+  obsidianUuid,
+  exportRequest,
 }): ReactElement => {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("connecting");
+  const [exportError, setExportError] = useState<string | null>(null);
   const initialDocumentRef = useRef(initialDocument);
   const websocketRef = useRef<WebSocket | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -93,6 +104,44 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const publishQueueRef = useRef<Promise<void>>(Promise.resolve());
   const documentVersionRef = useRef(0);
   const lastPersistedDocumentFingerprintRef = useRef<string | null>(null);
+  const lastExportRequestRef = useRef<string | null>(null);
+  const pendingExportRequestRef = useRef<CanvasExportRequest | null>(null);
+
+  const exportObsidianDocument = useCallback(
+    (activeEditor: Editor, request: CanvasExportRequest) => {
+      lastExportRequestRef.current = request.id;
+      pendingExportRequestRef.current = null;
+      setExportError(null);
+      const filename = `${canvasId.replace(/[^a-zA-Z0-9._-]+/g, "-") || "canvas"}.md`;
+      void downloadObsidianTldrawMarkdown(
+        activeEditor,
+        obsidianUuid,
+        filename,
+      ).catch((error) => {
+        setExportError(
+          error instanceof Error ? error.message : "Canvas export failed.",
+        );
+      });
+    },
+    [canvasId, obsidianUuid],
+  );
+
+  useEffect(() => {
+    if (
+      !editor ||
+      !exportRequest ||
+      exportRequest.id === lastExportRequestRef.current
+    ) {
+      return;
+    }
+
+    if (applyingRemoteRef.current) {
+      pendingExportRequestRef.current = exportRequest;
+      return;
+    }
+
+    exportObsidianDocument(editor, exportRequest);
+  }, [editor, exportObsidianDocument, exportRequest]);
 
   const persistSnapshot = useCallback(
     (activeEditor: Editor, broadcast = true, includePreview = true) => {
@@ -246,6 +295,10 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       const finish = () => {
         activeEditor.updateInstanceState({ isReadonly: wasReadonly });
         applyingRemoteRef.current = false;
+        const pendingExportRequest = pendingExportRequestRef.current;
+        if (pendingExportRequest) {
+          exportObsidianDocument(activeEditor, pendingExportRequest);
+        }
       };
       try {
         const applied = applyCanvasPatch(activeEditor, plan);
@@ -296,7 +349,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         throw error;
       }
     },
-    [persistSnapshot],
+    [exportObsidianDocument, persistSnapshot],
   );
 
   useEffect(() => {
@@ -569,6 +622,11 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
               ? "Reconnecting…"
               : "Disconnected"}
       </div>
+      {exportError ? (
+        <div className="nomad-canvas-export-error" role="alert">
+          Export failed: {exportError}
+        </div>
+      ) : null}
       <Tldraw
         snapshot={initialDocumentRef.current || undefined}
         onMount={setEditor}

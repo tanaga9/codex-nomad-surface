@@ -36,6 +36,62 @@ import {
   SEMANTIC_ID_PATTERN,
   semanticReadSummary,
 } from "./canvas-semantic";
+import {
+  formatObsidianTldrawMarkdown,
+  OBSIDIAN_TLDRAW_END_MARKER,
+  OBSIDIAN_TLDRAW_START_MARKER,
+  ObsidianTldrawFormatError,
+  parseObsidianTldrawMarkdown,
+  parseObsidianTldrawStore,
+} from "./obsidian-tldraw";
+
+{
+  const sourceStore = createTLStore();
+  const raw = {
+    tldrawFileFormatVersion: 1,
+    schema: sourceStore.schema.serialize(),
+    records: sourceStore.allRecords(),
+  };
+  const markdown = formatObsidianTldrawMarkdown(raw, {
+    uuid: "ab0ce434-d54a-4446-9252-859ec1ab031b",
+    "plugin-version": "1.31.0",
+    "tldraw-version": "5.3.2",
+  });
+  assert(
+    markdown.startsWith("---\ntldraw-file: true\ntags:\n  - tldraw\n---"),
+    "Obsidian tldraw frontmatter did not match the plugin format.",
+  );
+  assert(
+    markdown.includes(`\`\`\`json ${OBSIDIAN_TLDRAW_START_MARKER}`) &&
+      markdown.includes(`${OBSIDIAN_TLDRAW_END_MARKER}\n\`\`\``) &&
+      markdown.includes('\n\t"meta": {'),
+    "Obsidian tldraw markers or tab-indented JSON were not emitted.",
+  );
+  const parsed = parseObsidianTldrawMarkdown(markdown);
+  assert(
+    parsed.meta.uuid === "ab0ce434-d54a-4446-9252-859ec1ab031b" &&
+      parsed.raw.tldrawFileFormatVersion === 1,
+    "Obsidian tldraw metadata and raw data did not round-trip.",
+  );
+  const importedStore = parseObsidianTldrawStore(markdown, sourceStore.schema);
+  const importedRecords = importedStore.allRecords();
+  assert(
+    importedRecords.some((record) => record.id === "document:document") &&
+      importedRecords.some((record) => record.id === "page:page"),
+    "The official parser did not load the embedded TldrawFile.",
+  );
+
+  let invalidError: unknown;
+  try {
+    parseObsidianTldrawMarkdown("---\ntldraw-file: true\n---");
+  } catch (error) {
+    invalidError = error;
+  }
+  assert(
+    invalidError instanceof ObsidianTldrawFormatError,
+    "An incomplete Obsidian tldraw document was accepted.",
+  );
+}
 
 {
   const editor = {

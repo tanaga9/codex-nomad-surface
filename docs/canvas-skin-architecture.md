@@ -36,7 +36,8 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
 - Canvas manifests created by the earlier prototype remain usable: if their
   empty thread has no rollout, the first message creates and binds a replacement
   thread without replacing the drawing files.
-- Document JSON and SVG are downloadable from the Canvas Skin.
+- Obsidian tldraw Markdown and SVG are downloadable from the Canvas Skin;
+  canonical Document JSON remains an internal persistence format.
 - On wider screens, the canvas remains fixed in the viewport while chat history
   scrolls independently in a right-side panel; the native `st.chat_input` sits
   at the bottom of that panel so the canvas can use the full remaining height.
@@ -378,8 +379,9 @@ illustrative layout is:
 - `preview.webp` is the bounded whole-canvas raster used for Codex visual
   recognition and as a compatibility image.
 - `assets/` contains validated image and media files referenced by the document.
-- A self-contained `.tldraw` file is generated on demand for interchange rather
-  than rewritten after every editor change.
+- An Obsidian tldraw Markdown file containing a standard `TldrawFile` is
+  generated on demand for interchange rather than rewritten after every editor
+  change.
 - Camera, zoom, selection, and active-tool state are not part of the canonical
   shared document.
 
@@ -453,10 +455,10 @@ safely overwritten and completed by the next save.
 
 - User document changes are saved with a short debounce.
 - A Codex transaction is saved immediately before its tool call completes.
-- Explicit save, export, task close, and archive actions flush pending changes.
-- A file-download request first asks the active editor to flush. If the editor
-  is disconnected, the endpoint serves the latest committed revision and marks
-  it accordingly.
+- Explicit save, task close, and archive actions flush pending changes.
+- Obsidian export is serialized directly from the active editor so it contains
+  its current records and portable assets. The canonical saved snapshot is not
+  exposed as the user-facing interchange file.
 
 ## Concurrency and Idempotency
 
@@ -539,7 +541,7 @@ appropriate runtime contracts.
 
 tldraw offline may later be used as:
 
-- an interoperability target for exported `.tldraw` files;
+- a design reference alongside the standard `.tldr` interchange format;
 - a manual behavior reference;
 - a development-only test oracle for diagram quality.
 

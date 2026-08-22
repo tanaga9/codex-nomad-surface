@@ -36,6 +36,20 @@
   opacity: 0.72;
 }
 
+.nomad-canvas-export-error {
+  position: absolute;
+  z-index: 1000;
+  top: 0.75rem;
+  right: 0.75rem;
+  max-width: min(24rem, calc(100% - 1.5rem));
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--st-red-60, #dc2626);
+  border-radius: var(--st-border-radius, 0.5rem);
+  background: var(--st-background-color, #fff);
+  color: var(--st-red-70, #b91c1c);
+  font: 500 0.75rem/1.35 var(--st-font, sans-serif);
+}
+
 .nomad-canvas-root > .tl-container {
   height: 100% !important;
   min-height: 0;

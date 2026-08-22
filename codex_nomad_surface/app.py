@@ -4614,6 +4614,7 @@ def canvas_workspace(
     initial_document = load_canvas_document(canvas_id)
     preview_svg = load_canvas_preview(canvas_id)
     references = canvas_file_references(canvas_id)
+    export_request = None
 
     st.html(
         """
@@ -4781,22 +4782,21 @@ def canvas_workspace(
                     st.button(
                         "Refresh exports",
                         key=f"refresh_canvas_exports_{canvas_id}",
-                        help="Reload the latest saved Document and SVG files.",
+                        help="Reload the latest saved Canvas and SVG data.",
                         icon=":material/refresh:",
                         width="content",
                     )
-                    if initial_document:
-                        st.download_button(
-                            "Document",
-                            data=json.dumps(
-                                initial_document, ensure_ascii=False, indent=2
-                            ),
-                            file_name=f"{canvas_id}.json",
-                            mime="application/json",
-                            help=references["document_path"],
-                            icon=":material/download:",
-                            width="content",
-                        )
+                    if st.button(
+                        "Obsidian (.md)",
+                        key=f"download_canvas_obsidian_{canvas_id}",
+                        help="Download an Obsidian tldraw Markdown file.",
+                        icon=":material/download:",
+                        width="content",
+                    ):
+                        export_request = {
+                            "id": str(uuid.uuid4()),
+                            "format": "obsidian",
+                        }
                     if preview_svg:
                         st.download_button(
                             "SVG",
@@ -4818,6 +4818,7 @@ def canvas_workspace(
                         canvas_id,
                         initial_document=initial_document,
                         websocket_url=f"/api/canvas/{canvas_id}/ws",
+                        export_request=export_request,
                         key=f"nomad_canvas_{canvas_id}",
                         height="stretch",
                     )
