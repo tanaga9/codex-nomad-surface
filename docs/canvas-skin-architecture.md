@@ -169,6 +169,9 @@ SQLite service, or tldraw sync service.
 - Produces document snapshots and rendered previews.
 - Sends lightweight document-only checkpoints during editing and refreshes the
   rendered preview after a longer idle period.
+- Skips a document-only checkpoint when it matches the last document sent for
+  persistence or acknowledged as a committed Codex operation; preview refreshes
+  and reconnect snapshots still run.
 - Applies validated Codex operations as one editor transaction and one undo
   unit.
 - Holds that transaction behind a short read-only commit barrier. The Runtime

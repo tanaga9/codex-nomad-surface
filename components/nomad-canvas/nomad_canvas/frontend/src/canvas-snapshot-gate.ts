@@ -7,6 +7,15 @@ export const canBroadcastCanvasSnapshot = (
 ) =>
   requested && !applyingRemotePatch && websocketReadyState === WEBSOCKET_OPEN;
 
+export const isRedundantCanvasCheckpoint = (
+  includePreview: boolean,
+  documentFingerprint: string,
+  lastPersistedDocumentFingerprint: string | null,
+) =>
+  !includePreview &&
+  lastPersistedDocumentFingerprint !== null &&
+  documentFingerprint === lastPersistedDocumentFingerprint;
+
 export const canProcessCanvasRequest = (applyingRemotePatch: boolean) =>
   !applyingRemotePatch;
 

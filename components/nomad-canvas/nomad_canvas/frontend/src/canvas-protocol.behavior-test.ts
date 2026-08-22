@@ -21,6 +21,7 @@ import {
   canBroadcastCanvasSnapshot,
   canCompleteCanvasRequest,
   canProcessCanvasRequest,
+  isRedundantCanvasCheckpoint,
 } from "./canvas-snapshot-gate";
 import {
   CANVAS_READ_MAX_SHAPES,
@@ -954,6 +955,22 @@ const historySchema = StoreSchema.create<HistoryShapeRecord, null>({
   assert(
     !canCompleteCanvasRequest(2, 3, false),
     "A read that crossed a commit epoch could return an uncommitted document.",
+  );
+  assert(
+    isRedundantCanvasCheckpoint(false, "document-a", "document-a"),
+    "An unchanged document checkpoint was not suppressed.",
+  );
+  assert(
+    !isRedundantCanvasCheckpoint(true, "document-a", "document-a"),
+    "A preview refresh was incorrectly suppressed.",
+  );
+  assert(
+    !isRedundantCanvasCheckpoint(false, "document-a", null),
+    "The initial document checkpoint was incorrectly suppressed.",
+  );
+  assert(
+    !isRedundantCanvasCheckpoint(false, "document-b", "document-a"),
+    "A changed document checkpoint was incorrectly suppressed.",
   );
 }
 

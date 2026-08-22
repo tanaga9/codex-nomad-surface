@@ -20,6 +20,7 @@ import {
   canBroadcastCanvasSnapshot,
   canCompleteCanvasRequest,
   canProcessCanvasRequest,
+  isRedundantCanvasCheckpoint,
 } from "./canvas-snapshot-gate";
 
 export type NomadCanvasStateShape = Record<string, never>;
@@ -91,6 +92,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const commitEpochRef = useRef(0);
   const publishQueueRef = useRef<Promise<void>>(Promise.resolve());
   const documentVersionRef = useRef(0);
+  const lastPersistedDocumentFingerprintRef = useRef<string | null>(null);
 
   const persistSnapshot = useCallback(
     (activeEditor: Editor, broadcast = true, includePreview = true) => {
@@ -130,6 +132,11 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
               broadcast,
               applyingRemoteRef.current,
               activeWebsocket.readyState,
+            ) &&
+            !isRedundantCanvasCheckpoint(
+              includePreview,
+              documentFingerprint,
+              lastPersistedDocumentFingerprintRef.current,
             )
           ) {
             activeWebsocket.send(
@@ -139,6 +146,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
                 ...payload,
               }),
             );
+            lastPersistedDocumentFingerprintRef.current = documentFingerprint;
           }
           return payload;
         }
@@ -251,6 +259,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           plan.requestedHeights,
         );
         const snapshot = await persistSnapshot(activeEditor, false);
+        const persistedDocumentFingerprint = JSON.stringify(snapshot.document);
         let settled = false;
         return {
           payload: {
@@ -264,6 +273,8 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           commit: () => {
             if (settled) return;
             settled = true;
+            lastPersistedDocumentFingerprintRef.current =
+              persistedDocumentFingerprint;
             finish();
           },
           rollback: () => {
