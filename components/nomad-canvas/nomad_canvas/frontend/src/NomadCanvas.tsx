@@ -16,7 +16,10 @@ import {
 import { CanvasReadError, readCanvasScene } from "./canvas-read-protocol";
 import { renderCanvasPreview } from "./canvas-preview";
 import { lintCanvasPatch } from "./canvas-semantic";
-import { downloadObsidianTldrawMarkdown } from "./obsidian-tldraw";
+import {
+  downloadObsidianTldrawMarkdown,
+  serializeObsidianTldrawMarkdown,
+} from "./obsidian-tldraw";
 import {
   canBroadcastCanvasSnapshot,
   canCompleteCanvasRequest,
@@ -38,7 +41,7 @@ export type NomadCanvasProps = NomadCanvasDataShape;
 
 type CanvasRequest = {
   id: string;
-  method: "read_scene" | "apply_patch";
+  method: "read_scene" | "apply_patch" | "export";
   arguments?: Record<string, unknown>;
 };
 
@@ -107,23 +110,40 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const lastExportRequestRef = useRef<string | null>(null);
   const pendingExportRequestRef = useRef<CanvasExportRequest | null>(null);
 
+  const serializeObsidianDocument = useCallback(
+    async (activeEditor: Editor) => {
+      for (
+        let attempt = 0;
+        attempt < CANVAS_SNAPSHOT_STABILITY_ATTEMPTS;
+        attempt += 1
+      ) {
+        const documentVersion = documentVersionRef.current;
+        const markdown = await serializeObsidianTldrawMarkdown(
+          activeEditor,
+          obsidianUuid,
+        );
+        if (documentVersion === documentVersionRef.current) return markdown;
+      }
+      throw new Error("Canvas changed while preparing the Obsidian export.");
+    },
+    [obsidianUuid],
+  );
+
   const exportObsidianDocument = useCallback(
     (activeEditor: Editor, request: CanvasExportRequest) => {
       lastExportRequestRef.current = request.id;
       pendingExportRequestRef.current = null;
       setExportError(null);
       const filename = `${canvasId.replace(/[^a-zA-Z0-9._-]+/g, "-") || "canvas"}.md`;
-      void downloadObsidianTldrawMarkdown(
-        activeEditor,
-        obsidianUuid,
-        filename,
-      ).catch((error) => {
-        setExportError(
-          error instanceof Error ? error.message : "Canvas export failed.",
-        );
-      });
+      void serializeObsidianDocument(activeEditor)
+        .then((markdown) => downloadObsidianTldrawMarkdown(markdown, filename))
+        .catch((error) => {
+          setExportError(
+            error instanceof Error ? error.message : "Canvas export failed.",
+          );
+        });
     },
-    [canvasId, obsidianUuid],
+    [canvasId, serializeObsidianDocument],
   );
 
   useEffect(() => {
@@ -251,6 +271,19 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       throw new Error("Canvas changed while preparing the scoped scene.");
     },
     [],
+  );
+
+  const buildExportPayload = useCallback(
+    async (activeEditor: Editor, args: Record<string, unknown>) => {
+      if (Object.keys(args).length !== 1 || args.format !== "obsidian") {
+        throw new Error("Canvas export arguments are invalid.");
+      }
+      return {
+        format: "obsidian",
+        markdown: await serializeObsidianDocument(activeEditor),
+      };
+    },
+    [serializeObsidianDocument],
   );
 
   const scheduleSnapshot = useCallback(
@@ -544,10 +577,10 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           }
           try {
             const startedAtCommitEpoch = commitEpochRef.current;
-            const payload = await buildReadPayload(
-              editor,
-              request.arguments || {},
-            );
+            const payload =
+              request.method === "export"
+                ? await buildExportPayload(editor, request.arguments || {})
+                : await buildReadPayload(editor, request.arguments || {});
             if (
               !canCompleteCanvasRequest(
                 startedAtCommitEpoch,
@@ -600,6 +633,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
     };
   }, [
     applyPatch,
+    buildExportPayload,
     buildReadPayload,
     canvasId,
     editor,

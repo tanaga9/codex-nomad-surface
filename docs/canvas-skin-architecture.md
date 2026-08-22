@@ -21,7 +21,8 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   existing instructions while telling Codex to use the embedded Canvas tools
   instead of backing files or unrelated offline integrations.
 - The Canvas Skin mounts tldraw through a packaged Streamlit CCv2 component.
-- A same-origin WebSocket brokers `read_scene` and bounded `apply_patch` calls.
+- A same-origin WebSocket brokers `read_scene`, bounded `apply_patch`, and
+  managed Obsidian `export` calls.
 - `apply_patch` exposes closed schemas for create, update, move, resize, delete,
   and connect. The browser validates and normalizes the complete batch before
   writing, then applies it as one undoable transaction with rollback on error.
@@ -234,7 +235,7 @@ collaboration mode or its built-in instructions.
 
 ## Codex Tool Contract
 
-The initial Canvas Skin exposes only two dynamic tools.
+The Canvas Skin exposes three dynamic tools.
 
 ### `canvas.read_scene`
 
@@ -302,6 +303,19 @@ the editor is disconnected, the tool returns `canvas_unavailable`; Nomad
 Surface does not introduce a separate headless tldraw process merely to apply
 the command.
 
+### `canvas.export`
+
+Serializes the current live editor as Obsidian tldraw Markdown and atomically
+saves it under the Canvas-managed `exports/` directory. Codex uses this tool
+after completing requested edits when the user asks to save or export the
+diagram in Obsidian format. It accepts only the closed `obsidian` format and
+does not accept an arbitrary output path.
+
+The browser-side serializer is shared with the mobile Download action, so both
+paths produce the same portable `TldrawFile` payload and embedded assets. The
+tool requires an active editor, returns the saved path, size, and content hash,
+and does not trigger a download on the user's device.
+
 ### Semantic identity, provenance, and lint
 
 Domain shapes and semantic connectors may carry metadata under `meta.nomad`.
@@ -348,7 +362,11 @@ back a valid edit.
     local editing resumes.
 11. The tool result returns the resulting revision, changed IDs, logical-ID
    mapping, warnings, and current file references.
-12. Codex continues the same turn and explains the completed change.
+12. If the user requested an Obsidian file, Codex calls `canvas.export`; the
+    live editor serializes the committed state and the Runtime atomically saves
+    it to the managed exports directory.
+13. Codex continues the same turn and explains the completed change and saved
+    path.
 
 ## File-Backed Storage
 
@@ -364,6 +382,8 @@ illustrative layout is:
 │   └── preview.webp
 ├── assets/
 │   └── <content-hash>.<extension>
+├── exports/
+│   └── <canvas-id>.md
 ├── revisions/
 │   └── <revision>/
 │       ├── document.json
@@ -380,7 +400,8 @@ illustrative layout is:
   recognition and as a compatibility image.
 - `assets/` contains validated image and media files referenced by the document.
 - An Obsidian tldraw Markdown file containing a standard `TldrawFile` is
-  generated on demand for interchange rather than rewritten after every editor
+  generated on demand for device download or atomically saved under `exports/`
+  when Codex calls `canvas.export`; it is not rewritten after every editor
   change.
 - Camera, zoom, selection, and active-tool state are not part of the canonical
   shared document.
@@ -459,6 +480,9 @@ safely overwritten and completed by the next save.
 - Obsidian export is serialized directly from the active editor so it contains
   its current records and portable assets. The canonical saved snapshot is not
   exposed as the user-facing interchange file.
+- The mobile Download action and `canvas.export` share that serializer. Download
+  writes to the user's device; `canvas.export` writes only to the bounded
+  Canvas-managed exports directory.
 
 ## Concurrency and Idempotency
 
@@ -564,9 +588,9 @@ infrastructure.
    apply one typed batch.
 2. Add the authenticated same-origin WebSocket and Canvas Runtime.
 3. Add file-backed snapshots, revisions, previews, and recovery.
-4. Add the App Server interaction router and the two Dynamic Tools.
+4. Add the App Server interaction router and the three Dynamic Tools.
 5. Add the mobile chat drawer; the wider-screen side panel is implemented.
-6. Add fork, archive, export, asset ingestion, and destructive-operation policy.
+6. Add fork, archive, asset ingestion, and destructive-operation policy.
 7. Reconsider sync infrastructure or a database only after a concrete new
    requirement or measured limitation appears.
 

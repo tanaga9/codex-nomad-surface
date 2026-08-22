@@ -39,6 +39,13 @@ CANVAS_PREVIEW_IMAGE_MIME_TYPES = frozenset(
     {"image/webp", "image/jpeg", "image/png"}
 )
 CANVAS_VISUAL_PREVIEW_PATH = "current/preview.webp"
+CANVAS_OBSIDIAN_EXPORT_MAX_BYTES = 32 * 1024 * 1024
+CANVAS_OBSIDIAN_START_MARKER = (
+    "!!!_START_OF_TLDRAW_DATA__DO_NOT_CHANGE_THIS_PHRASE_!!!"
+)
+CANVAS_OBSIDIAN_END_MARKER = (
+    "!!!_END_OF_TLDRAW_DATA__DO_NOT_CHANGE_THIS_PHRASE_!!!"
+)
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -747,6 +754,40 @@ def canvas_file_references(canvas_id: str) -> dict[str, str]:
         "document_path": str(directory / document_path),
         "preview_path": str(directory / "current" / "preview.svg"),
         "visual_preview_path": str(directory / CANVAS_VISUAL_PREVIEW_PATH),
+    }
+
+
+def save_canvas_obsidian_export(
+    canvas_id: str, markdown: str
+) -> dict[str, Any]:
+    if not isinstance(markdown, str):
+        raise ValueError("Canvas Obsidian export must be text.")
+    content = markdown.encode("utf-8")
+    if not content or len(content) > CANVAS_OBSIDIAN_EXPORT_MAX_BYTES:
+        raise ValueError("Canvas Obsidian export size is invalid.")
+    if (
+        not markdown.startswith("---\ntldraw-file: true\n")
+        or markdown.count(CANVAS_OBSIDIAN_START_MARKER) != 1
+        or markdown.count(CANVAS_OBSIDIAN_END_MARKER) != 1
+        or markdown.index(CANVAS_OBSIDIAN_START_MARKER)
+        >= markdown.index(CANVAS_OBSIDIAN_END_MARKER)
+    ):
+        raise ValueError("Canvas Obsidian export format is invalid.")
+
+    validated_canvas_id = _validate_canvas_id(canvas_id)
+    filename = f"{validated_canvas_id}.md"
+    path = canvas_directory(validated_canvas_id) / "exports" / filename
+    with _canvas_lock(validated_canvas_id):
+        if not read_canvas_manifest(validated_canvas_id):
+            raise FileNotFoundError("Canvas manifest was not found.")
+        _atomic_write(path, content)
+    return {
+        "format": "obsidian",
+        "filename": filename,
+        "export_path": str(path.resolve()),
+        "byte_size": len(content),
+        "content_hash": f"sha256:{hashlib.sha256(content).hexdigest()}",
+        "saved_at": _timestamp(),
     }
 
 

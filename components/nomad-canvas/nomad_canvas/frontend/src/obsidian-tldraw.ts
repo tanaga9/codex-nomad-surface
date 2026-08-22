@@ -158,12 +158,10 @@ export const serializeObsidianTldrawMarkdown = async (
   });
 };
 
-export const downloadObsidianTldrawMarkdown = async (
-  editor: Editor,
-  uuid: string,
+export const downloadObsidianTldrawMarkdown = (
+  markdown: string,
   filename: string,
-): Promise<void> => {
-  const markdown = await serializeObsidianTldrawMarkdown(editor, uuid);
+): void => {
   const url = URL.createObjectURL(
     new Blob([markdown], { type: "text/markdown;charset=utf-8" }),
   );

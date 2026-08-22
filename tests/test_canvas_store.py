@@ -23,6 +23,16 @@ def isolated_canvas_root(tmp_path, monkeypatch):
     return tmp_path / "canvases"
 
 
+def _obsidian_markdown(label: str = "drawing") -> str:
+    return (
+        "---\ntldraw-file: true\ntags:\n  - tldraw\n---\n\n"
+        "```json "
+        f"{canvas_store.CANVAS_OBSIDIAN_START_MARKER}\n"
+        f'{{"meta":{{"label":"{label}"}},"raw":{{}}}}\n'
+        f"{canvas_store.CANVAS_OBSIDIAN_END_MARKER}\n```\n"
+    )
+
+
 def test_canvas_snapshots_are_file_backed_and_revisioned(isolated_canvas_root):
     manifest = canvas_store.initialize_canvas("thread-file-store", "/path/to/project")
     canvas_id = manifest["canvas_id"]
@@ -59,6 +69,37 @@ def test_canvas_snapshots_are_file_backed_and_revisioned(isolated_canvas_root):
         / "document.json"
     ).is_file()
     assert canvas_store.list_canvas_manifests()[0]["thread_id"] == "thread-file-store"
+
+
+def test_canvas_obsidian_export_is_bounded_and_atomically_replaced(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-obsidian-export")
+    canvas_id = manifest["canvas_id"]
+    first = _obsidian_markdown("first")
+    second = _obsidian_markdown("second")
+
+    saved = canvas_store.save_canvas_obsidian_export(canvas_id, first)
+    export_path = Path(saved["export_path"])
+
+    assert export_path == (
+        isolated_canvas_root / canvas_id / "exports" / f"{canvas_id}.md"
+    ).resolve()
+    assert export_path.read_text(encoding="utf-8") == first
+    assert saved["format"] == "obsidian"
+    assert saved["filename"] == f"{canvas_id}.md"
+    assert saved["byte_size"] == len(first.encode("utf-8"))
+    assert saved["content_hash"].startswith("sha256:")
+
+    canvas_store.save_canvas_obsidian_export(canvas_id, second)
+    assert export_path.read_text(encoding="utf-8") == second
+    assert list(export_path.parent.iterdir()) == [export_path]
+
+    with pytest.raises(ValueError, match="format"):
+        canvas_store.save_canvas_obsidian_export(canvas_id, "not a drawing")
+    monkeypatch.setattr(canvas_store, "CANVAS_OBSIDIAN_EXPORT_MAX_BYTES", 8)
+    with pytest.raises(ValueError, match="size"):
+        canvas_store.save_canvas_obsidian_export(canvas_id, first)
 
 
 def test_canvas_save_updates_visual_preview_manifest_to_webp(isolated_canvas_root):
@@ -398,6 +439,77 @@ def test_live_read_scene_returns_visual_input_without_embedding_it_in_text(
     assert image_url not in result["contentItems"][0]["text"]
 
 
+def test_canvas_export_tool_requires_obsidian_format_and_live_editor(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-live-export")
+    calls = []
+
+    class RecordingBroker:
+        def call(self, canvas_id, tool, arguments, *, context=None):
+            calls.append((canvas_id, tool, arguments, context))
+            return {
+                "ok": True,
+                "payload": {
+                    "live": True,
+                    "format": "obsidian",
+                    "filename": f"{canvas_id}.md",
+                    "export_path": f"/managed/{canvas_id}.md",
+                    "byte_size": 123,
+                },
+            }
+
+    monkeypatch.setattr(canvas_runtime, "CANVAS_BROKER", RecordingBroker())
+    handler = canvas_dynamic_tool_handler_for_canvas(manifest["canvas_id"])
+
+    result = handler(
+        {
+            "namespace": "canvas",
+            "tool": "export",
+            "arguments": {"format": "obsidian"},
+        }
+    )
+    payload = json.loads(result["contentItems"][0]["text"])
+
+    assert result["success"] is True
+    assert payload["format"] == "obsidian"
+    assert payload["export_path"].endswith(f"{manifest['canvas_id']}.md")
+    assert calls == [
+        (
+            manifest["canvas_id"],
+            "export",
+            {"format": "obsidian"},
+            {"method": "export"},
+        )
+    ]
+
+    invalid = handler(
+        {
+            "namespace": "canvas",
+            "tool": "export",
+            "arguments": {"format": "json"},
+        }
+    )
+    assert invalid["success"] is False
+    assert json.loads(invalid["contentItems"][0]["text"])["error"] == (
+        "export_validation_failed"
+    )
+    assert len(calls) == 1
+
+    monkeypatch.setattr(canvas_runtime, "CANVAS_BROKER", CanvasBroker())
+    unavailable = handler(
+        {
+            "namespace": "canvas",
+            "tool": "export",
+            "arguments": {"format": "obsidian"},
+        }
+    )
+    assert unavailable["success"] is False
+    assert json.loads(unavailable["contentItems"][0]["text"])["error"] == (
+        "canvas_unavailable"
+    )
+
+
 def test_canvas_preview_accepts_png_data_urls():
     preview, mime_type = canvas_runtime._decode_preview_image(
         "data:image/png;base64,iVBORw0KGgo="
@@ -698,6 +810,7 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
     assert [tool["name"] for tool in namespace["tools"]] == [
         "read_scene",
         "apply_patch",
+        "export",
     ]
     assert "viewport" in namespace["tools"][0]["description"]
     read_schema = namespace["tools"][0]["inputSchema"]
@@ -757,6 +870,16 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
         "frame",
     ]
     assert all(item["additionalProperties"] is False for item in create_shapes)
+    export_schema = namespace["tools"][2]["inputSchema"]
+    Draft202012Validator.check_schema(export_schema)
+    assert export_schema["required"] == ["format"]
+    assert export_schema["properties"]["format"]["const"] == "obsidian"
+    export_validator = Draft202012Validator(export_schema)
+    assert list(export_validator.iter_errors({"format": "obsidian"})) == []
+    assert list(export_validator.iter_errors({}))
+    assert list(
+        export_validator.iter_errors({"format": "obsidian", "path": "drawing.md"})
+    )
 
 
 def test_canvas_read_scene_schema_rejects_open_or_oversized_scopes():
@@ -1531,6 +1654,65 @@ def test_apply_response_without_document_fails_closed_and_is_not_receipted(
     )
 
 
+def test_export_response_is_saved_without_returning_markdown(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-export-response")
+    canvas_id = manifest["canvas_id"]
+    markdown = _obsidian_markdown()
+    broker = CanvasBroker()
+    monkeypatch.setattr(canvas_runtime, "CANVAS_BROKER", broker)
+    monkeypatch.setattr(canvas_runtime, "auth_required", lambda: False)
+
+    async def exercise_websocket():
+        request_id = "export-response"
+        pending = canvas_runtime.PendingCanvasRequest(
+            context={"method": "export"}
+        )
+
+        class FakeWebSocket:
+            scope = {}
+            path_params = {"canvas_id": canvas_id}
+            receive_count = 0
+
+            async def accept(self):
+                return None
+
+            async def close(self, code=1000):
+                return None
+
+            async def receive_json(self):
+                if self.receive_count == 0:
+                    self.receive_count += 1
+                    with broker._lock:
+                        broker._pending[request_id] = pending
+                    return {
+                        "type": "response",
+                        "id": request_id,
+                        "ok": True,
+                        "payload": {
+                            "format": "obsidian",
+                            "markdown": markdown,
+                        },
+                    }
+                raise WebSocketDisconnect()
+
+            async def send_json(self, message):
+                return None
+
+        await canvas_runtime.canvas_websocket(FakeWebSocket())
+        return pending.result
+
+    result = asyncio.run(exercise_websocket())
+    payload = result["payload"]
+
+    assert result["ok"] is True
+    assert payload["live"] is True
+    assert payload["format"] == "obsidian"
+    assert "markdown" not in payload
+    assert Path(payload["export_path"]).read_text(encoding="utf-8") == markdown
+
+
 def test_successful_apply_result_excludes_document_scene_and_images(
     isolated_canvas_root, monkeypatch
 ):
@@ -1673,3 +1855,4 @@ def test_canvas_initial_context_is_a_developer_message():
         "text"
     ]
     assert "narrowest useful" in items[0]["content"][0]["text"]
+    assert "canvas.export with format obsidian" in items[0]["content"][0]["text"]

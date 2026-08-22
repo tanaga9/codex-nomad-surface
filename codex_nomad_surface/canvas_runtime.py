@@ -24,6 +24,7 @@ from codex_nomad_surface.canvas_store import (
     load_canvas_document,
     read_canvas_manifest,
     read_canvas_command_receipt,
+    save_canvas_obsidian_export,
     save_canvas_snapshot,
     scene_from_document,
 )
@@ -73,6 +74,10 @@ CANVAS_DEVELOPER_INSTRUCTIONS = (
     "ordinary absolute Canvas points; do not encode tldraw segments yourself. "
     "Use group, reparent, reorder, and layout operations for structural edits "
     "instead of simulating them with repeated raw coordinate changes. "
+    "When the user asks to save or export the current diagram as Obsidian "
+    "Markdown, call canvas.export with format obsidian after completing any "
+    "requested edits. This saves a managed server-side file and is separate "
+    "from the user's device-download button. "
     "Treat backing document and "
     "preview files as persistence artifacts, not as the canvas interface. Do not "
     "inspect or modify those files, and do not use external or offline canvas "
@@ -366,6 +371,43 @@ async def canvas_websocket(websocket: WebSocket) -> None:
                 "error": str(message.get("error") or ""),
             }
             is_apply_response = bool(request_context.get("command_id"))
+            is_export_response = request_context.get("method") == "export"
+            if is_export_response:
+                if result["ok"] and (
+                    not isinstance(payload, dict)
+                    or set(payload) != {"format", "markdown"}
+                    or payload.get("format") != "obsidian"
+                    or not isinstance(payload.get("markdown"), str)
+                ):
+                    result = {
+                        "ok": False,
+                        "error": "canvas_invalid_response: export result is invalid",
+                    }
+                    payload = {
+                        "error": "canvas_invalid_response",
+                        "message": "A successful export response must include Obsidian Markdown.",
+                    }
+                elif result["ok"]:
+                    try:
+                        saved_export = await asyncio.to_thread(
+                            save_canvas_obsidian_export,
+                            canvas_id,
+                            payload["markdown"],
+                        )
+                        payload = {"live": True, **saved_export}
+                    except Exception as exc:
+                        result = {
+                            "ok": False,
+                            "error": f"export_save_failed: {exc}",
+                        }
+                        payload = {
+                            "error": "export_save_failed",
+                            "message": str(exc),
+                        }
+                if isinstance(payload, dict):
+                    result["payload"] = payload
+                CANVAS_BROKER.resolve(request_id, result)
+                continue
             if result["ok"] and is_apply_response and (
                 not isinstance(payload, dict)
                 or not isinstance(payload.get("document"), dict)
@@ -457,6 +499,19 @@ def _closed_object(
     if required:
         schema["required"] = required
     return schema
+
+
+def _canvas_export_schema() -> dict[str, Any]:
+    return _closed_object(
+        {
+            "format": {
+                "type": "string",
+                "const": "obsidian",
+                "description": "Save as Obsidian tldraw Markdown.",
+            }
+        },
+        ["format"],
+    )
 
 
 def _canvas_apply_patch_schema() -> dict[str, Any]:
@@ -962,6 +1017,14 @@ def _normalize_canvas_read_arguments(arguments: object) -> dict[str, Any]:
     }
 
 
+def _normalize_canvas_export_arguments(arguments: object) -> dict[str, str]:
+    if not isinstance(arguments, dict) or set(arguments) != {"format"}:
+        raise ValueError("Canvas export arguments are invalid.")
+    if arguments.get("format") != "obsidian":
+        raise ValueError("Canvas export format is unsupported.")
+    return {"format": "obsidian"}
+
+
 def canvas_dynamic_tools() -> list[dict[str, Any]]:
     return [
         {
@@ -1003,6 +1066,18 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                         f"{CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS} unique shapes."
                     ),
                     "inputSchema": _canvas_apply_patch_schema(),
+                },
+                {
+                    "type": "function",
+                    "name": "export",
+                    "description": (
+                        "Save the current live canvas as an Obsidian tldraw "
+                        "Markdown file in the managed Canvas exports directory. "
+                        "Use this after completing edits when the user asks to "
+                        "save or export the diagram in Obsidian format. This does "
+                        "not trigger the separate device-download action."
+                    ),
+                    "inputSchema": _canvas_export_schema(),
                 },
             ],
         }
@@ -1433,7 +1508,11 @@ def canvas_dynamic_tool_handler_for_canvas(
         arguments = params.get("arguments")
         if not isinstance(arguments, dict):
             arguments = {}
-        if namespace != "canvas" or tool not in {"read_scene", "apply_patch"}:
+        if namespace != "canvas" or tool not in {
+            "read_scene",
+            "apply_patch",
+            "export",
+        }:
             return _content_result(False, {"error": "unsupported_canvas_tool"})
 
         manifest = read_canvas_manifest(canvas_id)
@@ -1511,7 +1590,7 @@ def canvas_dynamic_tool_handler_for_canvas(
                     return _content_result(False, {"error": str(exc)})
                 except TimeoutError as exc:
                     return _content_result(False, {"error": str(exc)})
-        else:
+        elif tool == "read_scene":
             try:
                 arguments = _normalize_canvas_read_arguments(arguments)
             except ValueError as exc:
@@ -1553,6 +1632,23 @@ def canvas_dynamic_tool_handler_for_canvas(
                     image_url=image_url,
                 )
             except TimeoutError as exc:
+                return _content_result(False, {"error": str(exc)})
+        else:
+            try:
+                arguments = _normalize_canvas_export_arguments(arguments)
+            except ValueError as exc:
+                return _content_result(
+                    False,
+                    {"error": "export_validation_failed", "message": str(exc)},
+                )
+            try:
+                broker_result = CANVAS_BROKER.call(
+                    canvas_id,
+                    tool,
+                    arguments,
+                    context={"method": "export"},
+                )
+            except (RuntimeError, TimeoutError) as exc:
                 return _content_result(False, {"error": str(exc)})
 
         success = bool(broker_result.get("ok"))
