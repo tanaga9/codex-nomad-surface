@@ -44,9 +44,23 @@ components, or `python3 scripts/dev.py build-component nomad-canvas` after a
 change limited to one component. Generated frontend assets are intentionally
 not committed.
 
-Before building a Python wheel or source distribution, run
-`python3 scripts/dev.py build-components`. The Python package includes the
-synchronized assets under `codex_nomad_surface/ui_components/generated/`.
+The macOS `run.command` and Windows `run.cmd` launchers run `build-components`
+before starting Streamlit. Pass `--skip-component-build` to bypass that build
+explicitly. Pass additional Streamlit arguments after `--`.
+
+Build a wheel and source distribution with
+`python3 scripts/dev.py build-package`. This command rebuilds all frontend
+components, removes stale Python build output, creates fresh distributions
+under `dist/`, and verifies the component entries inside both distributions.
+The Python package includes the synchronized assets under
+`codex_nomad_surface/ui_components/generated/`.
+
+The project PEP 517 backend applies the same component preparation to standard
+build entry points such as `python3 -m build` and `pip install .`. When building
+a wheel from an sdist, it validates the runtime assets already stored in the
+sdist instead of requiring Node.js or the frontend source tree. A standard
+build from a source checkout requires `python3 scripts/dev.py setup` to have
+installed the frontend dependencies first.
 
 ## Adding A Frontend Component
 

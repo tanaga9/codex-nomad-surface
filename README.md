@@ -71,6 +71,34 @@ python scripts/dev.py build-components
 python scripts/dev.py build-component nomad-canvas
 ```
 
+Build clean, verified Python distributions under `dist/` with:
+
+```bash
+python scripts/dev.py build-package
+```
+
+Standard PEP 517 builds, including `python -m build` and `pip install .`, also
+prepare or validate the registered frontend components automatically. Source
+distributions include the generated runtime assets, so installing from an
+sdist does not require Node.js. Standard builds from a source checkout require
+the development setup to have installed the frontend dependencies first.
+
+The macOS `run.command` and Windows `run.cmd` launchers rebuild all frontend
+components before starting the app. Skip that step only when explicitly
+requested:
+
+macOS:
+
+```bash
+./run.command --skip-component-build
+```
+
+Windows:
+
+```bat
+run.cmd --skip-component-build
+```
+
 ## Run
 
 Start the Streamlit app.
