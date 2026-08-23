@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 TEXT_ROOT = Path(".nomad_surface") / "texts"
 TEXT_ID_PATTERN = re.compile(r"^text-[0-9a-f]{24}$")
-TEXT_SCHEMA_VERSION = 1
+TEXT_SCHEMA_VERSION = 2
 TEXT_REVISION_LIMIT = 20
 TEXT_FORMATS = frozenset({"plain", "markdown"})
 TEXT_PRESENTATIONS = frozenset({"raw", "assisted"})
@@ -60,6 +60,28 @@ def _extension(text_format: str) -> str:
     return "md" if text_format == "markdown" else "txt"
 
 
+def _revision_path(text_id: str, revision: int, extension: str) -> Path:
+    return text_directory(text_id) / "revisions" / f"{revision:08d}.{extension}"
+
+
+def _content_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort durability for the rename on platforms that support it."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -71,6 +93,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
     except BaseException:
         try:
             os.unlink(temporary_name)
@@ -84,6 +107,15 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
         path,
         json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
     )
+
+
+def _update_current_projection(path: Path, content: bytes) -> None:
+    try:
+        _atomic_write(path, content)
+    except OSError:
+        # The manifest-selected immutable revision remains readable and the
+        # projection can be repaired by a later snapshot read.
+        pass
 
 
 def read_text_manifest(text_id: str) -> dict[str, Any] | None:
@@ -216,13 +248,15 @@ def _initialize_text(
             "presentation": presentation,
             "editor_kind": resolved_editor_kind,
             "current_revision": 0,
+            "content_sha256": _content_hash(b""),
             "created_at": now,
             "updated_at": now,
         }
         directory = text_directory(text_id)
         extension = _extension(text_format)
-        _atomic_write(directory / f"current.{extension}", b"")
+        _atomic_write(_revision_path(text_id, 0, extension), b"")
         _write_json(directory / "manifest.json", manifest)
+        _update_current_projection(directory / f"current.{extension}", b"")
         return manifest
 
 
@@ -256,21 +290,57 @@ def update_text_presentation(text_id: str, presentation: str) -> dict[str, Any]:
 
 
 def load_text(text_id: str) -> str:
-    manifest = read_text_manifest(text_id)
-    if not manifest:
-        raise FileNotFoundError("Text manifest was not found.")
-    path = text_directory(text_id) / f"current.{_extension(str(manifest['format']))}"
-    return path.read_text(encoding="utf-8")
+    return load_text_snapshot(text_id)[1]
+
+
+def _committed_content_locked(
+    text_id: str, manifest: dict[str, Any]
+) -> tuple[bytes, str]:
+    extension = _extension(str(manifest["format"]))
+    revision = int(manifest.get("current_revision") or 0)
+    revision_path = _revision_path(text_id, revision, extension)
+    current_path = text_directory(text_id) / f"current.{extension}"
+    expected_hash = str(manifest.get("content_sha256") or "")
+    try:
+        content_bytes = revision_path.read_bytes()
+    except FileNotFoundError:
+        content_bytes = None
+
+    if content_bytes is None or (
+        expected_hash and _content_hash(content_bytes) != expected_hash
+    ):
+        # Schema v1 stored revision zero only in current.*. For schema v2,
+        # current.* is accepted as recovery input only when its hash matches
+        # the manifest-selected commit.
+        try:
+            recovery_bytes = current_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise OSError("Committed text revision is missing or corrupt.") from exc
+        if expected_hash and _content_hash(recovery_bytes) != expected_hash:
+            raise OSError("Committed text revision is missing or corrupt.")
+        content_bytes = recovery_bytes
+        try:
+            _atomic_write(revision_path, content_bytes)
+        except OSError:
+            pass
+
+    try:
+        current_bytes = current_path.read_bytes()
+    except FileNotFoundError:
+        current_bytes = None
+    if current_bytes != content_bytes:
+        _update_current_projection(current_path, content_bytes)
+    return content_bytes, extension
 
 
 def load_text_snapshot(text_id: str) -> tuple[dict[str, Any], str]:
-    """Read a mutually consistent manifest and current document."""
+    """Read the manifest's committed revision and repair the current projection."""
     with _text_lock(text_id):
         manifest = read_text_manifest(text_id)
         if not manifest:
             raise FileNotFoundError("Text manifest was not found.")
-        path = text_directory(text_id) / f"current.{_extension(str(manifest['format']))}"
-        return manifest, path.read_text(encoding="utf-8")
+        content_bytes, _ = _committed_content_locked(text_id, manifest)
+        return manifest, content_bytes.decode("utf-8")
 
 
 def save_text(
@@ -292,14 +362,13 @@ def save_text(
         next_revision = current_revision + 1
         content_bytes = content.encode("utf-8")
         directory = text_directory(text_id)
-        _atomic_write(directory / f"current.{extension}", content_bytes)
-        _atomic_write(
-            directory / "revisions" / f"{next_revision:08d}.{extension}",
-            content_bytes,
-        )
+        _atomic_write(_revision_path(text_id, next_revision, extension), content_bytes)
+        manifest["schema_version"] = TEXT_SCHEMA_VERSION
         manifest["current_revision"] = next_revision
+        manifest["content_sha256"] = _content_hash(content_bytes)
         manifest["updated_at"] = _timestamp()
         _write_json(directory / "manifest.json", manifest)
+        _update_current_projection(directory / f"current.{extension}", content_bytes)
         revisions = sorted((directory / "revisions").glob(f"*.{extension}"))
         for stale in revisions[:-TEXT_REVISION_LIMIT]:
             stale.unlink(missing_ok=True)
@@ -320,10 +389,7 @@ def text_file_references(text_id: str) -> dict[str, Any]:
 
 
 def save_text_export(text_id: str) -> dict[str, Any]:
-    manifest = read_text_manifest(text_id)
-    if not manifest:
-        raise FileNotFoundError("Text manifest was not found.")
-    content = load_text(text_id)
+    manifest, content = load_text_snapshot(text_id)
     extension = _extension(str(manifest["format"]))
     path = text_directory(text_id) / "exports" / f"{text_id}.{extension}"
     _atomic_write(path, content.encode("utf-8"))

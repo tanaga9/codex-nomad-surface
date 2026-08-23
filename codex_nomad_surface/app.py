@@ -55,7 +55,7 @@ from codex_nomad_surface.text_store import (
     initialize_text,
     initialize_text_draft,
     list_text_manifests,
-    load_text,
+    load_text_snapshot,
     read_text_manifest,
     text_exists_for_thread,
     text_file_references,
@@ -4801,7 +4801,7 @@ def text_workspace(
 
     text_id = str(manifest["text_id"])
     chat.text_id = text_id
-    content = load_text(text_id)
+    manifest, content = load_text_snapshot(text_id)
     references = text_file_references(text_id)
     text_format = str(manifest.get("format") or "plain")
     presentation = str(manifest.get("presentation") or "raw")

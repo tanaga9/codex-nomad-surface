@@ -18,7 +18,6 @@ from codex_nomad_surface.http_gate import (
 from codex_nomad_surface.text_authoring import scope_text_snapshot
 from codex_nomad_surface.text_store import (
     TextRevisionConflict,
-    load_text,
     load_text_snapshot,
     read_text_manifest,
     save_text,
@@ -534,10 +533,7 @@ def sync_text_for_agent(text_id: str) -> dict[str, Any]:
 
 
 def _offline_read(text_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    manifest = read_text_manifest(text_id)
-    if not manifest:
-        raise FileNotFoundError("Text manifest was not found.")
-    content = load_text(text_id)
+    manifest, content = load_text_snapshot(text_id)
     editor_kind = text_editor_kind(manifest)
     result_scope, result_text = scope_text_snapshot(
         content=content,

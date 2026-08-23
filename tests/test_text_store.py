@@ -63,6 +63,124 @@ def test_text_save_rejects_stale_revision(isolated_text_root):
     assert text_store.load_text(text_id) == "human edit"
 
 
+def test_failed_revision_write_leaves_previous_commit_visible(
+    isolated_text_root, monkeypatch
+):
+    manifest = text_store.initialize_text_draft("revision-failure", "/path/to/project")
+    text_id = manifest["text_id"]
+    text_store.save_text(text_id, "committed", expected_revision=0)
+    original_atomic_write = text_store._atomic_write
+
+    def fail_revision(path, data):
+        if path.name == "00000002.md":
+            raise OSError("revision write failed")
+        original_atomic_write(path, data)
+
+    monkeypatch.setattr(text_store, "_atomic_write", fail_revision)
+    with pytest.raises(OSError, match="revision write failed"):
+        text_store.save_text(text_id, "not committed", expected_revision=1)
+    monkeypatch.setattr(text_store, "_atomic_write", original_atomic_write)
+
+    stored_manifest, content = text_store.load_text_snapshot(text_id)
+    assert stored_manifest["current_revision"] == 1
+    assert content == "committed"
+
+
+def test_failed_manifest_write_ignores_uncommitted_revision(
+    isolated_text_root, monkeypatch
+):
+    manifest = text_store.initialize_text_draft("manifest-failure", "/path/to/project")
+    text_id = manifest["text_id"]
+    text_store.save_text(text_id, "committed", expected_revision=0)
+    original_atomic_write = text_store._atomic_write
+
+    def fail_manifest(path, data):
+        if path.name == "manifest.json":
+            raise OSError("manifest write failed")
+        original_atomic_write(path, data)
+
+    monkeypatch.setattr(text_store, "_atomic_write", fail_manifest)
+    with pytest.raises(OSError, match="manifest write failed"):
+        text_store.save_text(text_id, "orphaned", expected_revision=1)
+    monkeypatch.setattr(text_store, "_atomic_write", original_atomic_write)
+
+    stored_manifest, content = text_store.load_text_snapshot(text_id)
+    assert stored_manifest["current_revision"] == 1
+    assert content == "committed"
+    assert (
+        isolated_text_root / text_id / "revisions" / "00000002.md"
+    ).read_text(encoding="utf-8") == "orphaned"
+
+    retried = text_store.save_text(text_id, "retried", expected_revision=1)
+    assert retried["current_revision"] == 2
+    assert text_store.load_text(text_id) == "retried"
+
+
+def test_current_projection_failure_does_not_undo_committed_revision(
+    isolated_text_root, monkeypatch
+):
+    manifest = text_store.initialize_text_draft(
+        "projection-failure", "/path/to/project"
+    )
+    text_id = manifest["text_id"]
+    text_store.save_text(text_id, "before", expected_revision=0)
+    original_atomic_write = text_store._atomic_write
+
+    def fail_current(path, data):
+        if path.name == "current.md":
+            raise OSError("projection write failed")
+        original_atomic_write(path, data)
+
+    monkeypatch.setattr(text_store, "_atomic_write", fail_current)
+    committed = text_store.save_text(text_id, "after", expected_revision=1)
+    stored_manifest, content = text_store.load_text_snapshot(text_id)
+    assert committed["current_revision"] == 2
+    assert stored_manifest["current_revision"] == 2
+    assert content == "after"
+
+    monkeypatch.setattr(text_store, "_atomic_write", original_atomic_write)
+    assert text_store.load_text(text_id) == "after"
+    assert (isolated_text_root / text_id / "current.md").read_text(
+        encoding="utf-8"
+    ) == "after"
+
+
+def test_legacy_revision_zero_is_promoted_to_immutable_revision(isolated_text_root):
+    manifest = text_store.initialize_text_draft("legacy-zero", "/path/to/project")
+    text_id = manifest["text_id"]
+    directory = isolated_text_root / text_id
+    (directory / "revisions" / "00000000.md").unlink()
+    (directory / "current.md").write_text("legacy content", encoding="utf-8")
+    manifest_path = directory / "manifest.json"
+    stored_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stored_manifest["schema_version"] = 1
+    stored_manifest.pop("content_sha256")
+    manifest_path.write_text(json.dumps(stored_manifest), encoding="utf-8")
+
+    loaded_manifest, content = text_store.load_text_snapshot(text_id)
+
+    assert loaded_manifest["current_revision"] == 0
+    assert content == "legacy content"
+    assert (directory / "revisions" / "00000000.md").read_text(
+        encoding="utf-8"
+    ) == "legacy content"
+
+
+def test_corrupt_revision_is_repaired_from_hash_verified_current(isolated_text_root):
+    manifest = text_store.initialize_text_draft("corrupt-revision", "/path/to/project")
+    text_id = manifest["text_id"]
+    text_store.save_text(text_id, "committed", expected_revision=0)
+    directory = isolated_text_root / text_id
+    revision_path = directory / "revisions" / "00000001.md"
+    revision_path.write_text("corrupt", encoding="utf-8")
+
+    stored_manifest, content = text_store.load_text_snapshot(text_id)
+
+    assert stored_manifest["current_revision"] == 1
+    assert content == "committed"
+    assert revision_path.read_text(encoding="utf-8") == "committed"
+
+
 def test_plain_text_forces_raw_presentation_and_exports_txt(isolated_text_root):
     manifest = text_store.initialize_text_draft(
         "plain-draft",

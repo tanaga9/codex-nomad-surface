@@ -35,8 +35,10 @@ brokered over an authenticated same-origin WebSocket. Before a user turn is
 sent, Nomad Surface persists the browser's current snapshot; if that sync
 cannot be confirmed, the turn is not delivered. Text content is Nomad Surface
 product state. App Server Dynamic Tools carry Codex calls but do not store the
-managed document. Keep the bridge fail-closed and do not add a legacy Codex
-transport fallback.
+managed document. The manifest's revision pointer is the local commit point;
+immutable revision files are canonical and `current.*` is a repairable
+projection. Keep the bridge fail-closed and do not add a legacy Codex transport
+fallback.
 
 | ID       | Area                                     | Mechanism                                                                                         | Why It Exists                                                                                         | Direction                                                                                                      |
 | -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
