@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -366,6 +367,339 @@ async def _wait_for_message(websocket: _FakeTextWebSocket, message_type: str) ->
             return message
         await asyncio.sleep(0.01)
     raise AssertionError(f"Timed out waiting for {message_type}.")
+
+
+def test_text_broker_disconnect_fails_pending_request_immediately():
+    async def scenario() -> None:
+        broker = text_runtime.TextBroker()
+        connection = broker.register("text-disconnect")
+        assert broker.activate("text-disconnect", connection)
+        broker_call = asyncio.create_task(
+            asyncio.to_thread(broker.call, "text-disconnect", "sync_snapshot")
+        )
+        request = await asyncio.to_thread(connection.outgoing.get)
+        assert request["request"]["method"] == "sync_snapshot"
+
+        broker.unregister("text-disconnect", connection)
+
+        with pytest.raises(RuntimeError, match="text_disconnected"):
+            await asyncio.wait_for(broker_call, timeout=1)
+        assert not broker.has_pending(request["request"]["id"])
+
+    asyncio.run(scenario())
+
+
+def test_text_broker_replacement_fails_only_previous_connection_requests():
+    async def scenario() -> None:
+        broker = text_runtime.TextBroker()
+        previous = broker.register("text-replaced")
+        assert broker.activate("text-replaced", previous)
+        previous_call = asyncio.create_task(
+            asyncio.to_thread(broker.call, "text-replaced", "read", {"scope": "all"})
+        )
+        previous_request = await asyncio.to_thread(previous.outgoing.get)
+
+        current = broker.register("text-replaced")
+
+        with pytest.raises(RuntimeError, match="text_replaced"):
+            await asyncio.wait_for(previous_call, timeout=1)
+        assert previous.retired.is_set()
+        assert not broker.has_pending(previous_request["request"]["id"])
+        assert broker.is_ready(current)
+        assert broker.activate("text-replaced", current)
+
+        current_call = asyncio.create_task(
+            asyncio.to_thread(broker.call, "text-replaced", "read", {"scope": "all"})
+        )
+        current_request = await asyncio.to_thread(current.outgoing.get)
+        broker.resolve(
+            current_request["request"]["id"],
+            {"ok": True, "payload": {"live": True}},
+        )
+        assert await asyncio.wait_for(current_call, timeout=1) == {
+            "ok": True,
+            "payload": {"live": True},
+        }
+
+    asyncio.run(scenario())
+
+
+def test_text_broker_replacement_allows_claimed_response_to_finish():
+    async def scenario() -> None:
+        broker = text_runtime.TextBroker()
+        previous = broker.register("text-processing")
+        assert broker.activate("text-processing", previous)
+        previous_call = asyncio.create_task(
+            asyncio.to_thread(broker.call, "text-processing", "apply_patch")
+        )
+        request = await asyncio.to_thread(previous.outgoing.get)
+        request_id = request["request"]["id"]
+
+        assert broker.claim_response(request_id, previous) == ("apply_patch", {})
+        current = broker.register("text-processing")
+
+        await asyncio.sleep(0)
+        assert not previous_call.done()
+        assert not broker.is_ready(current)
+        assert previous.retired.is_set()
+        assert broker.claim_response(request_id, current) is None
+
+        broker.resolve(request_id, {"ok": True, "payload": {"revision": 1}})
+        assert await asyncio.wait_for(previous_call, timeout=1) == {
+            "ok": True,
+            "payload": {"revision": 1},
+        }
+        assert broker.is_ready(current)
+        assert broker.activate("text-processing", current)
+        assert not broker.has_pending(request_id)
+
+    asyncio.run(scenario())
+
+
+def test_text_session_is_released_after_waiting_connection_disappears():
+    broker = text_runtime.TextBroker()
+    previous = broker.register("text-session-cleanup")
+    assert broker.activate("text-session-cleanup", previous)
+    operation = broker.begin_operation("text-session-cleanup", previous)
+    assert operation is not None
+
+    current = broker.register("text-session-cleanup")
+    broker.unregister("text-session-cleanup", current)
+    assert "text-session-cleanup" in broker._sessions
+
+    broker.finish_operation(operation)
+    assert "text-session-cleanup" not in broker._sessions
+
+
+def test_text_broker_timeout_does_not_abandon_claimed_response(monkeypatch):
+    async def scenario() -> None:
+        monkeypatch.setattr(text_runtime, "TEXT_TOOL_TIMEOUT_SECONDS", 0.01)
+        broker = text_runtime.TextBroker()
+        connection = broker.register("text-slow-processing")
+        assert broker.activate("text-slow-processing", connection)
+        broker_call = asyncio.create_task(
+            asyncio.to_thread(broker.call, "text-slow-processing", "apply_patch")
+        )
+        request = await asyncio.to_thread(connection.outgoing.get)
+        request_id = request["request"]["id"]
+        assert broker.claim_response(request_id, connection) == ("apply_patch", {})
+
+        await asyncio.sleep(0.03)
+        assert not broker_call.done()
+
+        broker.resolve(request_id, {"ok": True, "payload": {"revision": 1}})
+        assert await asyncio.wait_for(broker_call, timeout=1) == {
+            "ok": True,
+            "payload": {"revision": 1},
+        }
+
+    asyncio.run(scenario())
+
+
+def test_blocking_mutation_finishes_before_cancellation_propagates():
+    async def scenario() -> None:
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def mutation() -> None:
+            started.set()
+            release.wait(timeout=1)
+            finished.set()
+
+        mutation_task = asyncio.create_task(
+            text_runtime._run_blocking_mutation(mutation)
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        mutation_task.cancel()
+        await asyncio.sleep(0)
+        assert not mutation_task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(mutation_task, timeout=1)
+        assert finished.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_websocket_disconnect_releases_pending_broker_call(
+    isolated_text_root, monkeypatch
+):
+    async def scenario() -> None:
+        manifest = text_store.initialize_text("thread-disconnect-pending")
+        text_id = manifest["text_id"]
+        broker = text_runtime.TextBroker()
+        monkeypatch.setattr(text_runtime, "TEXT_BROKER", broker)
+        monkeypatch.setattr(text_runtime, "auth_required", lambda: False)
+        websocket = _FakeTextWebSocket(text_id)
+        websocket_task = asyncio.create_task(text_runtime.text_websocket(websocket))
+        await _wait_for_message(websocket, "sync")
+
+        broker_call = asyncio.create_task(
+            asyncio.to_thread(broker.call, text_id, "sync_snapshot")
+        )
+        await _wait_for_message(websocket, "request")
+        await websocket.incoming.put(WebSocketDisconnect())
+        await asyncio.wait_for(websocket_task, timeout=1)
+
+        with pytest.raises(RuntimeError, match="text_disconnected"):
+            await asyncio.wait_for(broker_call, timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_replacement_sync_waits_for_checkpoint_to_commit(
+    isolated_text_root, monkeypatch
+):
+    async def scenario() -> None:
+        manifest = text_store.initialize_text("thread-checkpoint-replacement")
+        text_id = manifest["text_id"]
+        broker = text_runtime.TextBroker()
+        monkeypatch.setattr(text_runtime, "TEXT_BROKER", broker)
+        monkeypatch.setattr(text_runtime, "auth_required", lambda: False)
+
+        save_started = threading.Event()
+        allow_save = threading.Event()
+        original_save = text_runtime.save_text
+
+        def delayed_save(*args, **kwargs):
+            save_started.set()
+            if not allow_save.wait(timeout=1):
+                raise TimeoutError("test checkpoint save was not released")
+            return original_save(*args, **kwargs)
+
+        monkeypatch.setattr(text_runtime, "save_text", delayed_save)
+        previous_websocket = _FakeTextWebSocket(text_id)
+        previous_task = asyncio.create_task(
+            text_runtime.text_websocket(previous_websocket)
+        )
+        await _wait_for_message(previous_websocket, "sync")
+        await previous_websocket.incoming.put(
+            {
+                "type": "checkpoint",
+                "content": "checkpoint committed before replacement sync",
+                "base_revision": 0,
+            }
+        )
+        assert await asyncio.to_thread(save_started.wait, 1)
+
+        current_websocket = _FakeTextWebSocket(text_id)
+        current_task = asyncio.create_task(
+            text_runtime.text_websocket(current_websocket)
+        )
+        for _ in range(100):
+            if previous_websocket.closed == text_runtime.TEXT_REPLACED_CLOSE_CODE:
+                break
+            await asyncio.sleep(0.01)
+        assert previous_websocket.closed == text_runtime.TEXT_REPLACED_CLOSE_CODE
+        assert not any(
+            message.get("type") == "sync" for message in current_websocket.sent
+        )
+
+        allow_save.set()
+        sync = await _wait_for_message(current_websocket, "sync")
+        assert sync["content"] == "checkpoint committed before replacement sync"
+        assert sync["revision"] == 1
+
+        await previous_websocket.incoming.put(WebSocketDisconnect())
+        await current_websocket.incoming.put(WebSocketDisconnect())
+        await asyncio.wait_for(previous_task, timeout=1)
+        await asyncio.wait_for(current_task, timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_replacement_sync_waits_for_claimed_response_to_commit(
+    isolated_text_root, monkeypatch
+):
+    async def scenario() -> None:
+        manifest = text_store.initialize_text("thread-replacement-sync")
+        text_id = manifest["text_id"]
+        broker = text_runtime.TextBroker()
+        monkeypatch.setattr(text_runtime, "TEXT_BROKER", broker)
+        monkeypatch.setattr(text_runtime, "auth_required", lambda: False)
+
+        save_started = threading.Event()
+        allow_save = threading.Event()
+        original_save = text_runtime.save_text
+
+        def delayed_save(*args, **kwargs):
+            save_started.set()
+            if not allow_save.wait(timeout=1):
+                raise TimeoutError("test save was not released")
+            return original_save(*args, **kwargs)
+
+        monkeypatch.setattr(text_runtime, "save_text", delayed_save)
+        previous_websocket = _FakeTextWebSocket(text_id)
+        previous_task = asyncio.create_task(
+            text_runtime.text_websocket(previous_websocket)
+        )
+        await _wait_for_message(previous_websocket, "sync")
+
+        broker_call = asyncio.create_task(
+            asyncio.to_thread(
+                broker.call,
+                text_id,
+                "apply_patch",
+                {"base_revision": 0, "operations": []},
+            )
+        )
+        request = await _wait_for_message(previous_websocket, "request")
+        await previous_websocket.incoming.put(
+            {
+                "type": "response",
+                "id": request["request"]["id"],
+                "ok": True,
+                "payload": {
+                    "content": "committed before replacement sync",
+                    "base_revision": 0,
+                    "changed_operations": 1,
+                },
+            }
+        )
+        assert await asyncio.to_thread(save_started.wait, 1)
+
+        current_websocket = _FakeTextWebSocket(text_id)
+        current_task = asyncio.create_task(
+            text_runtime.text_websocket(current_websocket)
+        )
+        for _ in range(100):
+            if previous_websocket.closed == text_runtime.TEXT_REPLACED_CLOSE_CODE:
+                break
+            await asyncio.sleep(0.01)
+        assert previous_websocket.closed == text_runtime.TEXT_REPLACED_CLOSE_CODE
+        assert not any(
+            message.get("type") == "sync" for message in current_websocket.sent
+        )
+
+        newest_websocket = _FakeTextWebSocket(text_id)
+        newest_task = asyncio.create_task(
+            text_runtime.text_websocket(newest_websocket)
+        )
+        for _ in range(100):
+            if current_websocket.closed == text_runtime.TEXT_REPLACED_CLOSE_CODE:
+                break
+            await asyncio.sleep(0.01)
+        assert current_websocket.closed == text_runtime.TEXT_REPLACED_CLOSE_CODE
+        await asyncio.wait_for(current_task, timeout=1)
+        assert not any(
+            message.get("type") == "sync" for message in newest_websocket.sent
+        )
+
+        allow_save.set()
+        result = await asyncio.wait_for(broker_call, timeout=1)
+        assert result["ok"] is True
+        sync = await _wait_for_message(newest_websocket, "sync")
+        assert sync["content"] == "committed before replacement sync"
+        assert sync["revision"] == 1
+
+        await previous_websocket.incoming.put(WebSocketDisconnect())
+        await newest_websocket.incoming.put(WebSocketDisconnect())
+        await asyncio.wait_for(previous_task, timeout=1)
+        await asyncio.wait_for(newest_task, timeout=1)
+
+    asyncio.run(scenario())
 
 
 def test_ai_patch_is_saved_before_commit_is_sent(isolated_text_root, monkeypatch):

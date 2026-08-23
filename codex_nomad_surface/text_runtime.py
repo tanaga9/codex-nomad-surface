@@ -43,55 +43,206 @@ TEXT_DEVELOPER_INSTRUCTIONS = (
 )
 
 
+async def _run_blocking_mutation(
+    operation: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            pass
+        raise
+
+
+def _set_async_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass
-class PendingTextRequest:
-    method: str
-    arguments: dict[str, Any]
-    event: threading.Event = field(default_factory=threading.Event)
-    result: dict[str, Any] | None = None
+class TextSession:
+    text_id: str
+    connection: TextConnection | None = None
+    inflight_operations: int = 0
+    drained: asyncio.Event = field(default_factory=_set_async_event)
 
 
 @dataclass
 class TextConnection:
+    session: TextSession
     outgoing: queue.Queue[dict[str, Any] | None] = field(default_factory=queue.Queue)
-    retired: threading.Event = field(default_factory=threading.Event)
+    retired: asyncio.Event = field(default_factory=asyncio.Event)
+    active: bool = False
+
+
+@dataclass
+class PendingTextRequest:
+    connection: TextConnection
+    method: str
+    arguments: dict[str, Any]
+    event: threading.Event = field(default_factory=threading.Event)
+    result: dict[str, Any] | None = None
+    error: str = ""
+    processing: bool = False
 
 
 class TextBroker:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._connections: dict[str, TextConnection] = {}
+        self._sessions: dict[str, TextSession] = {}
         self._pending: dict[str, PendingTextRequest] = {}
 
     def register(self, text_id: str) -> TextConnection:
-        connection = TextConnection()
         with self._lock:
-            previous = self._connections.pop(text_id, None)
+            session = self._sessions.get(text_id)
+            if session is None:
+                session = TextSession(text_id=text_id)
+                self._sessions[text_id] = session
+            connection = TextConnection(session=session)
+            previous = session.connection
             if previous:
+                self._fail_connection_requests_locked(previous, "text_replaced")
                 previous.retired.set()
                 previous.outgoing.put(None)
-            self._connections[text_id] = connection
+            session.connection = connection
         return connection
+
+    def is_ready(self, connection: TextConnection) -> bool:
+        return connection.session.drained.is_set()
+
+    async def wait_until_ready(
+        self, text_id: str, connection: TextConnection
+    ) -> bool:
+        session = connection.session
+        with self._lock:
+            if self._sessions.get(text_id) is not session:
+                return False
+            if session.connection is not connection:
+                return False
+            if session.drained.is_set():
+                return True
+        drained = asyncio.create_task(session.drained.wait())
+        retired = asyncio.create_task(connection.retired.wait())
+        waiters = {drained, retired}
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in waiters:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+        with self._lock:
+            return (
+                self._sessions.get(text_id) is session
+                and session.connection is connection
+                and session.drained.is_set()
+            )
+
+    def activate(self, text_id: str, connection: TextConnection) -> bool:
+        with self._lock:
+            session = self._sessions.get(text_id)
+            if (
+                session is not connection.session
+                or session.connection is not connection
+                or not session.drained.is_set()
+            ):
+                return False
+            connection.active = True
+            return True
 
     def is_current(self, text_id: str, connection: TextConnection) -> bool:
         with self._lock:
-            return self._connections.get(text_id) is connection
+            session = self._sessions.get(text_id)
+            return session is connection.session and session.connection is connection
 
     def unregister(self, text_id: str, connection: TextConnection) -> None:
         with self._lock:
-            if self._connections.get(text_id) is connection:
-                self._connections.pop(text_id, None)
+            session = self._sessions.get(text_id)
+            if session is connection.session and session.connection is connection:
+                session.connection = None
+            self._fail_connection_requests_locked(
+                connection, "text_disconnected", include_processing=True
+            )
+            if (
+                session is connection.session
+                and session.connection is None
+                and session.inflight_operations == 0
+            ):
+                self._sessions.pop(text_id, None)
         connection.outgoing.put(None)
+
+    def begin_operation(
+        self, text_id: str, connection: TextConnection
+    ) -> TextSession | None:
+        with self._lock:
+            session = self._sessions.get(text_id)
+            if (
+                session is not connection.session
+                or session.connection is not connection
+                or not connection.active
+            ):
+                return None
+            self._begin_operation_locked(session)
+            return session
+
+    def finish_operation(self, session: TextSession) -> None:
+        with self._lock:
+            self._finish_operation_locked(session)
+
+    def _begin_operation_locked(self, session: TextSession) -> None:
+        session.inflight_operations += 1
+        session.drained.clear()
+
+    def _finish_operation_locked(self, session: TextSession) -> None:
+        if session.inflight_operations <= 0:
+            raise RuntimeError("text_operation_underflow")
+        session.inflight_operations -= 1
+        if session.inflight_operations == 0:
+            session.drained.set()
+            if (
+                session.connection is None
+                and self._sessions.get(session.text_id) is session
+            ):
+                self._sessions.pop(session.text_id, None)
+
+    def _fail_connection_requests_locked(
+        self,
+        connection: TextConnection,
+        error: str,
+        *,
+        include_processing: bool = False,
+    ) -> None:
+        request_ids = [
+            request_id
+            for request_id, pending in self._pending.items()
+            if pending.connection is connection
+            and (include_processing or not pending.processing)
+        ]
+        for request_id in request_ids:
+            pending = self._pending.pop(request_id)
+            if pending.processing:
+                self._finish_operation_locked(pending.connection.session)
+            pending.error = error
+            pending.event.set()
 
     def call(
         self, text_id: str, method: str, arguments: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
-        pending = PendingTextRequest(method=method, arguments=arguments or {})
         with self._lock:
-            connection = self._connections.get(text_id)
-            if not connection:
+            session = self._sessions.get(text_id)
+            connection = session.connection if session else None
+            if connection is None or not connection.active:
                 raise RuntimeError("text_unavailable")
+            pending = PendingTextRequest(
+                connection=connection,
+                method=method,
+                arguments=dict(arguments or {}),
+            )
             self._pending[request_id] = pending
             connection.outgoing.put(
                 {
@@ -99,31 +250,55 @@ class TextBroker:
                     "request": {
                         "id": request_id,
                         "method": method,
-                        "arguments": arguments or {},
+                        "arguments": pending.arguments,
                     },
                 }
             )
         if not pending.event.wait(TEXT_TOOL_TIMEOUT_SECONDS):
+            wait_for_processing = False
             with self._lock:
-                self._pending.pop(request_id, None)
-            raise TimeoutError("text_timeout")
+                current = self._pending.get(request_id)
+                if current is pending and pending.processing:
+                    wait_for_processing = True
+                elif current is pending:
+                    self._pending.pop(request_id)
+                else:
+                    wait_for_processing = True
+            if wait_for_processing:
+                pending.event.wait()
+            else:
+                raise TimeoutError("text_timeout")
+        if pending.error:
+            raise RuntimeError(pending.error)
         return pending.result or {"ok": False, "error": "text_no_result"}
 
     def resolve(self, request_id: str, result: dict[str, Any]) -> None:
         with self._lock:
             pending = self._pending.pop(request_id, None)
-        if pending:
-            pending.result = result
-            pending.event.set()
+            if pending:
+                pending.result = result
+                if pending.processing:
+                    self._finish_operation_locked(pending.connection.session)
+                pending.event.set()
 
     def has_pending(self, request_id: str) -> bool:
         with self._lock:
             return request_id in self._pending
 
-    def request_context(self, request_id: str) -> tuple[str, dict[str, Any]] | None:
+    def claim_response(
+        self, request_id: str, connection: TextConnection
+    ) -> tuple[str, dict[str, Any]] | None:
         with self._lock:
             pending = self._pending.get(request_id)
-            return (pending.method, pending.arguments) if pending else None
+            if (
+                pending is None
+                or pending.connection is not connection
+                or pending.processing
+            ):
+                return None
+            pending.processing = True
+            self._begin_operation_locked(connection.session)
+            return pending.method, dict(pending.arguments)
 
 
 TEXT_BROKER = TextBroker()
@@ -155,21 +330,26 @@ async def text_websocket(websocket: WebSocket) -> None:
 
     await websocket.accept()
     connection = TEXT_BROKER.register(text_id)
+    sender: asyncio.Task[None] | None = None
     try:
-        manifest, content = await asyncio.to_thread(load_text_snapshot, text_id)
-    except FileNotFoundError:
-        TEXT_BROKER.unregister(text_id, connection)
-        await websocket.close(code=4404)
-        return
-    connection.outgoing.put(
-        {
-            "type": "sync",
-            "revision": int(manifest.get("current_revision") or 0),
-            "content": content,
-        }
-    )
-    sender = asyncio.create_task(_text_sender(websocket, connection))
-    try:
+        if not await TEXT_BROKER.wait_until_ready(text_id, connection):
+            await websocket.close(code=TEXT_REPLACED_CLOSE_CODE)
+            return
+        try:
+            manifest, content = await asyncio.to_thread(load_text_snapshot, text_id)
+        except FileNotFoundError:
+            await websocket.close(code=4404)
+            return
+        connection.outgoing.put(
+            {
+                "type": "sync",
+                "revision": int(manifest.get("current_revision") or 0),
+                "content": content,
+            }
+        )
+        sender = asyncio.create_task(_text_sender(websocket, connection))
+        if not TEXT_BROKER.activate(text_id, connection):
+            return
         while True:
             message = await websocket.receive_json()
             if not TEXT_BROKER.is_current(text_id, connection):
@@ -179,12 +359,18 @@ async def text_websocket(websocket: WebSocket) -> None:
             message_type = str(message.get("type") or "")
             if message_type == "presentation":
                 presentation = str(message.get("presentation") or "")
+                operation = TEXT_BROKER.begin_operation(text_id, connection)
+                if operation is None:
+                    return
                 try:
-                    await asyncio.to_thread(
-                        update_text_presentation, text_id, presentation
-                    )
-                except (FileNotFoundError, ValueError):
-                    pass
+                    try:
+                        await _run_blocking_mutation(
+                            update_text_presentation, text_id, presentation
+                        )
+                    except (FileNotFoundError, ValueError):
+                        pass
+                finally:
+                    TEXT_BROKER.finish_operation(operation)
                 continue
             if message_type == "checkpoint":
                 content = message.get("content")
@@ -194,46 +380,61 @@ async def text_websocket(websocket: WebSocket) -> None:
                         {"type": "checkpoint_ack", "ok": False, "error": "invalid_checkpoint"}
                     )
                     continue
+                operation = TEXT_BROKER.begin_operation(text_id, connection)
+                if operation is None:
+                    return
                 try:
-                    manifest = await asyncio.to_thread(
-                        save_text,
-                        text_id,
-                        content,
-                        expected_revision=revision,
-                    )
-                    await websocket.send_json(
-                        {
-                            "type": "checkpoint_ack",
-                            "ok": True,
-                            "revision": int(manifest["current_revision"]),
-                        }
-                    )
-                except TextRevisionConflict as exc:
-                    current_manifest, canonical = await asyncio.to_thread(
-                        load_text_snapshot, text_id
-                    )
-                    await websocket.send_json(
-                        {
-                            "type": "checkpoint_ack",
-                            "ok": False,
-                            "error": "revision_conflict",
-                            "revision": int(
-                                current_manifest.get("current_revision")
-                                or exc.current_revision
-                            ),
-                            "content": canonical,
-                        }
-                    )
-                except Exception as exc:
-                    await websocket.send_json(
-                        {"type": "checkpoint_ack", "ok": False, "error": f"save_failed: {exc}"}
-                    )
+                    try:
+                        manifest = await _run_blocking_mutation(
+                            save_text,
+                            text_id,
+                            content,
+                            expected_revision=revision,
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "checkpoint_ack",
+                                "ok": True,
+                                "revision": int(manifest["current_revision"]),
+                            }
+                        )
+                    except TextRevisionConflict as exc:
+                        current_manifest, canonical = await asyncio.to_thread(
+                            load_text_snapshot, text_id
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "checkpoint_ack",
+                                "ok": False,
+                                "error": "revision_conflict",
+                                "revision": int(
+                                    current_manifest.get("current_revision")
+                                    or exc.current_revision
+                                ),
+                                "content": canonical,
+                            }
+                        )
+                    except Exception as exc:
+                        await websocket.send_json(
+                            {
+                                "type": "checkpoint_ack",
+                                "ok": False,
+                                "error": f"save_failed: {exc}",
+                            }
+                        )
+                finally:
+                    TEXT_BROKER.finish_operation(operation)
                 continue
             if message_type != "response":
                 continue
 
             request_id = str(message.get("id") or "")
-            if not request_id or not TEXT_BROKER.has_pending(request_id):
+            request_context = (
+                TEXT_BROKER.claim_response(request_id, connection)
+                if request_id
+                else None
+            )
+            if request_context is None:
                 connection.outgoing.put(
                     {
                         "type": "reject",
@@ -241,9 +442,6 @@ async def text_websocket(websocket: WebSocket) -> None:
                         "error": "request_expired",
                     }
                 )
-                continue
-            request_context = TEXT_BROKER.request_context(request_id)
-            if request_context is None:
                 continue
             request_method, request_arguments = request_context
             result = {
@@ -300,7 +498,7 @@ async def text_websocket(websocket: WebSocket) -> None:
                     result = {"ok": False, "error": "text_invalid_response"}
                 else:
                     try:
-                        manifest = await asyncio.to_thread(
+                        manifest = await _run_blocking_mutation(
                             save_text,
                             text_id,
                             payload["content"],
@@ -344,7 +542,7 @@ async def text_websocket(websocket: WebSocket) -> None:
                             load_text_snapshot, text_id
                         )
                         if payload["text"] != current_content:
-                            manifest = await asyncio.to_thread(
+                            manifest = await _run_blocking_mutation(
                                 save_text,
                                 text_id,
                                 payload["text"],
@@ -411,7 +609,8 @@ async def text_websocket(websocket: WebSocket) -> None:
         pass
     finally:
         TEXT_BROKER.unregister(text_id, connection)
-        sender.cancel()
+        if sender:
+            sender.cancel()
 
 
 def _closed_object(

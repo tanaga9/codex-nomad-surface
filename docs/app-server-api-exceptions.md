@@ -37,8 +37,14 @@ cannot be confirmed, the turn is not delivered. Text content is Nomad Surface
 product state. App Server Dynamic Tools carry Codex calls but do not store the
 managed document. The manifest's revision pointer is the local commit point;
 immutable revision files are canonical and `current.*` is a repairable
-projection. Keep the bridge fail-closed and do not add a legacy Codex transport
-fallback.
+projection. Live requests belong to one WebSocket connection. Requests still
+awaiting a response fail immediately when that connection disconnects or is
+replaced. Agent responses, human checkpoints, and other server-side mutations
+share one per-text session lease; replacement connections wait for all claimed
+operations before loading their initial snapshot. The bounded timeout applies
+while awaiting a browser response; once claimed, the request waits for server
+processing to finish. Keep the bridge fail-closed and do not add a legacy Codex
+transport fallback.
 
 | ID       | Area                                     | Mechanism                                                                                         | Why It Exists                                                                                         | Direction                                                                                                      |
 | -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
