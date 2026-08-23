@@ -371,7 +371,13 @@ def save_text(
         _update_current_projection(directory / f"current.{extension}", content_bytes)
         revisions = sorted((directory / "revisions").glob(f"*.{extension}"))
         for stale in revisions[:-TEXT_REVISION_LIMIT]:
-            stale.unlink(missing_ok=True)
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                # Retention runs after the manifest commit. Leaving an old
+                # immutable revision behind must not turn a successful save
+                # into a reported failure.
+                pass
         return manifest
 
 

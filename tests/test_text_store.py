@@ -146,6 +146,34 @@ def test_current_projection_failure_does_not_undo_committed_revision(
     ) == "after"
 
 
+def test_revision_cleanup_failure_does_not_undo_committed_revision(
+    isolated_text_root, monkeypatch
+):
+    monkeypatch.setattr(text_store, "TEXT_REVISION_LIMIT", 2)
+    manifest = text_store.initialize_text_draft(
+        "cleanup-failure", "/path/to/project"
+    )
+    text_id = manifest["text_id"]
+    text_store.save_text(text_id, "before", expected_revision=0)
+    original_unlink = Path.unlink
+
+    def fail_stale_revision(path, *, missing_ok=False):
+        if path.name == "00000000.md":
+            raise OSError("revision cleanup failed")
+        return original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_stale_revision)
+    committed = text_store.save_text(text_id, "after", expected_revision=1)
+
+    stored_manifest, content = text_store.load_text_snapshot(text_id)
+    assert committed["current_revision"] == 2
+    assert stored_manifest["current_revision"] == 2
+    assert content == "after"
+    assert (
+        isolated_text_root / text_id / "revisions" / "00000000.md"
+    ).exists()
+
+
 def test_legacy_revision_zero_is_promoted_to_immutable_revision(isolated_text_root):
     manifest = text_store.initialize_text_draft("legacy-zero", "/path/to/project")
     text_id = manifest["text_id"]
