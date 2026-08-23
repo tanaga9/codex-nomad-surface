@@ -1,0 +1,76 @@
+:host {
+  display: block;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+:host > div,
+:host > div > div,
+.react-root,
+.nomad-canvas-root {
+  height: 100%;
+  min-height: 0;
+}
+
+.nomad-canvas-root {
+  position: relative;
+}
+
+.nomad-canvas-connection {
+  position: absolute;
+  z-index: 1000;
+  top: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--st-border-color, #d1d5db);
+  border-radius: 999px;
+  background: var(--st-background-color, #fff);
+  color: var(--st-text-color, #1f2937);
+  font: 500 0.75rem/1.25 var(--st-font, sans-serif);
+  pointer-events: none;
+}
+
+.nomad-canvas-connection[data-state="connected"] {
+  opacity: 0.72;
+}
+
+.nomad-canvas-export-error {
+  position: absolute;
+  z-index: 1000;
+  top: 0.75rem;
+  right: 0.75rem;
+  max-width: min(24rem, calc(100% - 1.5rem));
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--st-red-60, #dc2626);
+  border-radius: var(--st-border-radius, 0.5rem);
+  background: var(--st-background-color, #fff);
+  color: var(--st-red-70, #b91c1c);
+  font: 500 0.75rem/1.35 var(--st-font, sans-serif);
+}
+
+.nomad-canvas-root > .tl-container {
+  height: 100% !important;
+  min-height: 0;
+}
+
+/*
+ * tldraw normally uses strict paint containment for both the drawing surface
+ * and its UI. Chromium can skip those contained layers when they are nested
+ * inside Streamlit CCv2's Shadow DOM, leaving only the license watermark
+ * visible. Keep component style isolation, but relax paint containment inside
+ * this editor so the canvas and tool panels are composited normally.
+ */
+.nomad-canvas-root .tl-canvas {
+  contain: layout style;
+  content-visibility: visible;
+}
+
+.nomad-canvas-root .tlui-layout {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  max-height: none;
+  contain: layout style;
+}

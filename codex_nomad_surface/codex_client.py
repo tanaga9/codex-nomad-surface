@@ -218,6 +218,7 @@ class CodexTurnOutput:
 OutputState = CodexTurnOutput
 OutputSnapshot = dict[str, Any]
 OutputCallback = Callable[[OutputSnapshot], None]
+DynamicToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,9 @@ class CodexClient:
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
+        replace_missing_rollout: bool = False,
+        initial_context_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.base_url.startswith(("ws://", "wss://")):
             return {
@@ -350,6 +354,9 @@ class CodexClient:
                     approval_policy,
                     output_callback,
                     runtime_callback,
+                    dynamic_tool_handler,
+                    replace_missing_rollout,
+                    initial_context_items,
                 )
             )
             runtime = result.get("runtime")
@@ -368,6 +375,7 @@ class CodexClient:
         thread_id: str,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
     ) -> dict[str, Any]:
         """Rejoin an existing turn without starting a new one."""
         if (
@@ -388,6 +396,7 @@ class CodexClient:
                     thread_id,
                     output_callback,
                     runtime_callback,
+                    dynamic_tool_handler,
                 )
             )
             runtime = result.get("runtime")
@@ -496,10 +505,12 @@ class CodexClient:
             return []
         return asyncio.run(self._list_threads_ws())
 
-    def start_thread(self, cwd: str) -> CodexThread:
+    def start_thread(
+        self, cwd: str, thread_overrides: dict[str, Any] | None = None
+    ) -> CodexThread:
         if not cwd or not self.base_url.startswith(("ws://", "wss://")):
             raise ValueError("Codex App Server URL must use ws:// or wss://.")
-        return asyncio.run(self._start_thread_ws(cwd))
+        return asyncio.run(self._start_thread_ws(cwd, thread_overrides))
 
     def read_thread_messages(
         self, thread_id: str, limit: int = 40, cursor: str | None = None
@@ -647,7 +658,9 @@ class CodexClient:
         except Exception:
             return []
 
-    async def _start_thread_ws(self, cwd: str) -> CodexThread:
+    async def _start_thread_ws(
+        self, cwd: str, thread_overrides: dict[str, Any] | None = None
+    ) -> CodexThread:
         try:
             import websockets
         except ModuleNotFoundError as exc:
@@ -657,16 +670,18 @@ class CodexClient:
             output: list[str] = []
             approvals: list[dict[str, Any]] = []
             await self._initialize_ws(websocket, output, approvals)
+            params: dict[str, Any] = {
+                "cwd": cwd,
+                "ephemeral": False,
+                "sessionStartSource": "startup",
+                "experimentalRawEvents": False,
+                "persistExtendedHistory": True,
+            }
+            params.update(thread_overrides or {})
             raw = await self._rpc_call(
                 websocket,
                 "thread/start",
-                {
-                    "cwd": cwd,
-                    "ephemeral": False,
-                    "sessionStartSource": "startup",
-                    "experimentalRawEvents": False,
-                    "persistExtendedHistory": True,
-                },
+                params,
                 output,
                 approvals,
             )
@@ -1069,6 +1084,9 @@ class CodexClient:
         approval_policy: str | None = None,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
+        replace_missing_rollout: bool = False,
+        initial_context_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1087,6 +1105,7 @@ class CodexClient:
             "thread_id": thread_id,
             "output_callback": output_callback,
             "control_request_ids": set(),
+            "dynamic_tool_handler": dynamic_tool_handler,
         }
         runtime["loop"] = asyncio.get_running_loop()
         thread_overrides = thread_overrides or {}
@@ -1110,6 +1129,7 @@ class CodexClient:
                     handle_approval_message,
                     stream_items=runtime["stream_items"],
                 )
+                started_new_thread = not thread_id
                 if thread_id:
                     resume_params: dict[str, Any] = {
                         "threadId": thread_id,
@@ -1119,17 +1139,27 @@ class CodexClient:
                     if approval_policy:
                         resume_params["approvalPolicy"] = approval_policy
                     resume_params.update(thread_overrides)
-                    thread_result = await self._rpc_call(
-                        websocket,
-                        "thread/resume",
-                        resume_params,
-                        output_parts,
-                        approvals,
-                        output_callback,
-                        handle_approval_message,
-                        runtime["stream_items"],
-                    )
-                else:
+                    try:
+                        thread_result = await self._rpc_call(
+                            websocket,
+                            "thread/resume",
+                            resume_params,
+                            output_parts,
+                            approvals,
+                            output_callback,
+                            handle_approval_message,
+                            runtime["stream_items"],
+                        )
+                    except RuntimeError as exc:
+                        if not (
+                            replace_missing_rollout
+                            and "no rollout found for thread id" in str(exc).lower()
+                        ):
+                            raise
+                        runtime["replaced_thread_id"] = thread_id
+                        thread_id = None
+                        started_new_thread = True
+                if not thread_id:
                     start_params: dict[str, Any] = {
                         "cwd": project_path,
                         "ephemeral": False,
@@ -1152,6 +1182,23 @@ class CodexClient:
                     )
                 thread_id = thread_result["thread"]["id"]
                 runtime["thread_id"] = thread_id
+                if started_new_thread and initial_context_items:
+                    runtime["initial_context_injection_pending"] = True
+                    await self._rpc_call(
+                        websocket,
+                        "thread/inject_items",
+                        {
+                            "threadId": thread_id,
+                            "items": initial_context_items,
+                        },
+                        output_parts,
+                        approvals,
+                        output_callback,
+                        handle_approval_message,
+                        runtime["stream_items"],
+                    )
+                    runtime.pop("initial_context_injection_pending", None)
+                    runtime["initial_context_injected"] = True
                 turn_params: dict[str, Any] = {
                     "threadId": thread_id,
                     "cwd": project_path,
@@ -1189,6 +1236,11 @@ class CodexClient:
             return self._approval_result(runtime)
         except Exception as exc:
             await self._close_chat_turn_ws(runtime)
+            result_thread_id = (
+                None
+                if runtime.get("initial_context_injection_pending")
+                else thread_id
+            )
             text_output = self._fallback_output_text(output_parts)
             if text_output:
                 text_output = f"{text_output}\n\n[send/receive error] {exc}"
@@ -1197,7 +1249,7 @@ class CodexClient:
             output_parts.append_block("error", text_output)
             return {
                 "ok": False,
-                "thread_id": thread_id,
+                "thread_id": result_thread_id,
                 "turn_id": runtime.get("turn_id"),
                 "output": self._output_parts_snapshot(output_parts)["output"]
                 or text_output,
@@ -1211,6 +1263,7 @@ class CodexClient:
         thread_id: str,
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
+        dynamic_tool_handler: DynamicToolHandler | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1226,6 +1279,7 @@ class CodexClient:
             "thread_id": thread_id,
             "output_callback": output_callback,
             "control_request_ids": set(),
+            "dynamic_tool_handler": dynamic_tool_handler,
         }
         runtime["loop"] = asyncio.get_running_loop()
         try:
@@ -1498,6 +1552,28 @@ class CodexClient:
                 continue
             method = message.get("method")
             params = message.get("params") or {}
+            if (
+                method == "item/tool/call"
+                and message.get("id") is not None
+                and runtime.get("dynamic_tool_handler")
+            ):
+                handler = runtime["dynamic_tool_handler"]
+                try:
+                    tool_result = await asyncio.to_thread(handler, params)
+                except Exception as exc:
+                    tool_result = {
+                        "success": False,
+                        "contentItems": [
+                            {"type": "inputText", "text": f"canvas_tool_error: {exc}"}
+                        ],
+                    }
+                await websocket.send(
+                    json.dumps(
+                        {"id": message.get("id"), "result": tool_result},
+                        ensure_ascii=False,
+                    )
+                )
+                continue
             if self._is_user_response_request_message(message):
                 approval = self._approval_from_message(message)
                 approvals.append(approval)

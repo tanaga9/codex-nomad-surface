@@ -44,27 +44,60 @@ There is no CLI fallback. Prompt submission is disabled when Codex App Server is
 ## Setup
 
 Python 3.12 or newer is required.
+Node.js 22.12.0 or newer and npm are required to build the frontend
+components from source. Installing a wheel or sdist does not require Node.js.
 
 macOS / Linux:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
+python3 scripts/dev.py setup
 ```
 
 Windows PowerShell:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .
+py -3.12 scripts/dev.py setup
 ```
 
-To run tests with pytest, install the test extra:
+The setup command creates `.venv`, restores each registered frontend
+component's locked npm dependencies, builds and verifies its assets, and
+installs the Python project with its test dependencies. Component definitions
+are kept in `components.toml`.
+
+After changing a frontend component, rebuild all components or one named
+component:
 
 ```bash
-pip install -e ".[test]"
+python scripts/dev.py build-components
+python scripts/dev.py build-component nomad-canvas
+```
+
+Build clean, verified Python distributions under `dist/` with:
+
+```bash
+python scripts/dev.py build-package
+```
+
+Standard PEP 517 builds, including `python -m build` and `pip install .`, also
+prepare or validate the registered frontend components automatically. Source
+distributions include the generated runtime assets, so installing from an
+sdist does not require Node.js. Standard builds from a source checkout require
+the development setup to have installed the frontend dependencies first.
+
+The macOS `run.command` and Windows `run.cmd` launchers rebuild all frontend
+components before starting the app. Skip that step only when explicitly
+requested:
+
+macOS:
+
+```bash
+./run.command --skip-component-build
+```
+
+Windows:
+
+```bat
+run.cmd --skip-component-build
 ```
 
 ## Run
@@ -74,12 +107,15 @@ Start the Streamlit app.
 macOS / Linux:
 
 ```bash
-NOMAD_AUTH_SECRET='your-secret' streamlit run codex_nomad_surface/app.py
+. .venv/bin/activate
+export NOMAD_AUTH_SECRET='your-secret'
+streamlit run codex_nomad_surface/app.py
 ```
 
 Windows PowerShell:
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 $env:NOMAD_AUTH_SECRET = "your-secret"
 $env:CODEX_APP_SERVER_BIN = "$env:APPDATA\npm\codex.cmd"
 streamlit run codex_nomad_surface/app.py
@@ -131,6 +167,10 @@ minute.
 - `promptform-defs/*.json`: reusable Prompt Form definitions for this project or shared general forms.
 - `codex_nomad_surface/promptform_defs.py`: loader for Prompt Form definition files.
 - `codex_nomad_surface/skill_defs.py`: loader for Codex Skill definition files.
+- `components.toml`: registry of buildable frontend components and their
+  generated-asset destinations.
+- `scripts/dev.py`: project-wide setup, component build, and verification
+  commands.
 - `pyproject.toml`: Python project metadata and runtime dependencies.
 
 The embedded Prompt Form UI is assembled at runtime by the `ui_components`

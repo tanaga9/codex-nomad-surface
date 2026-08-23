@@ -1,0 +1,4 @@
+include components.toml
+include nomad_build_backend.py
+include codex_nomad_surface/pyproject.toml
+prune components

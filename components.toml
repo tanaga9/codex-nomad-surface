@@ -1,0 +1,9 @@
+version = 1
+
+[[components]]
+name = "nomad-canvas"
+frontend = "components/nomad-canvas/nomad_canvas/frontend"
+build_dir = "components/nomad-canvas/nomad_canvas/frontend/build"
+runtime_dir = "codex_nomad_surface/ui_components/generated/nomad_canvas"
+entry_js = "index-*.js"
+entry_css = "index-*.css"

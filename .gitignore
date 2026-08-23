@@ -1,7 +1,15 @@
 .DS_Store
 .venv/
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 *.py[cod]
 .streamlit/secrets.toml
 .nomad_surface/
-codex_nomad_surface.egg-info/
+*.egg-info/
+node_modules/
+/build/
+components/*/*/frontend/build/
+codex_nomad_surface/ui_components/generated/
+codex_nomad_surface/pyproject.toml
+dist/

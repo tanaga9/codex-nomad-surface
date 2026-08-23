@@ -1123,6 +1123,77 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(result["output_parts"]["errors"], "turn is no longer active")
         self.assertTrue(websocket.closed)
 
+    def test_dynamic_tool_call_is_handled_and_returned_to_app_server(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.messages = [
+                    json.dumps(
+                        {
+                            "id": "tool-request-1",
+                            "method": "item/tool/call",
+                            "params": {
+                                "threadId": "thread-1",
+                                "turnId": "turn-1",
+                                "callId": "call-1",
+                                "namespace": "canvas",
+                                "tool": "read_scene",
+                                "arguments": {},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "method": "turn/completed",
+                            "params": {"threadId": "thread-1"},
+                        }
+                    ),
+                ]
+                self.sent: list[str] = []
+                self.closed = False
+
+            async def recv(self) -> str:
+                return self.messages.pop(0)
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+
+            async def close(self) -> None:
+                self.closed = True
+
+        handled: list[dict] = []
+
+        def dynamic_tool_handler(params):
+            handled.append(params)
+            return {
+                "success": True,
+                "contentItems": [{"type": "inputText", "text": "scene"}],
+            }
+
+        websocket = FakeWebSocket()
+        runtime = {
+            "websocket": websocket,
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "output_parts": CodexTurnOutput(),
+            "stream_items": {},
+            "approvals": [],
+            "control_request_ids": set(),
+            "dynamic_tool_handler": dynamic_tool_handler,
+        }
+
+        result = asyncio.run(self.client._collect_chat_turn_ws(runtime))
+
+        assert result["ok"] is True
+        assert handled[0]["tool"] == "read_scene"
+        assert json.loads(websocket.sent[0]) == {
+            "id": "tool-request-1",
+            "result": {
+                "success": True,
+                "contentItems": [{"type": "inputText", "text": "scene"}],
+            },
+        }
+        assert websocket.closed is True
+
     def test_recover_chat_turn_rejoins_without_starting_a_turn(self) -> None:
         class FakeWebSocket:
             def __init__(self) -> None:
@@ -1187,6 +1258,13 @@ class CodexClientApprovalTests(unittest.TestCase):
 
         websocket = FakeWebSocket()
         rpc_methods: list[str] = []
+        recovered_runtime: dict = {}
+
+        def dynamic_tool_handler(_params):
+            return {"success": True, "contentItems": []}
+
+        def capture_runtime(runtime):
+            recovered_runtime.update(runtime)
 
         async def connect(_websockets):
             return websocket
@@ -1208,12 +1286,223 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.client._rpc_call = rpc_call
 
         result = asyncio.run(
-            self.client._recover_chat_turn_ws("/path/to/project", "thread-1")
+            self.client._recover_chat_turn_ws(
+                "/path/to/project",
+                "thread-1",
+                runtime_callback=capture_runtime,
+                dynamic_tool_handler=dynamic_tool_handler,
+            )
         )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "no_pending_action")
         self.assertEqual(rpc_methods, ["thread/resume"])
+        self.assertIs(
+            recovered_runtime["dynamic_tool_handler"], dynamic_tool_handler
+        )
+        self.assertTrue(websocket.closed)
+
+    def test_canvas_turn_replaces_thread_when_rollout_is_missing(self) -> None:
+        class FakeWebSocket:
+            pass
+
+        websocket = FakeWebSocket()
+        calls: list[tuple[str, dict]] = []
+        captured_runtime: dict = {}
+
+        async def connect(_websockets):
+            return websocket
+
+        async def initialize(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def rpc_call(_websocket, method, params, *_args, **_kwargs):
+            calls.append((method, params))
+            if method == "thread/resume":
+                raise RuntimeError("no rollout found for thread id missing-thread")
+            if method == "thread/start":
+                return {"thread": {"id": "replacement-thread"}}
+            if method == "thread/inject_items":
+                return {}
+            if method == "turn/start":
+                return {"turn": {"id": "turn-1"}}
+            raise AssertionError(f"unexpected RPC method: {method}")
+
+        async def collect(runtime):
+            captured_runtime.update(runtime)
+            return {
+                "ok": True,
+                "thread_id": runtime["thread_id"],
+                "turn_id": runtime["turn_id"],
+                "output": "Done",
+            }
+
+        self.client._connect_ws = connect
+        self.client._initialize_ws = initialize
+        self.client._rpc_call = rpc_call
+        self.client._collect_chat_turn_ws = collect
+
+        result = asyncio.run(
+            self.client._start_chat_turn_ws(
+                "/path/to/project",
+                "Draw a box",
+                "missing-thread",
+                None,
+                thread_overrides={"dynamicTools": [{"name": "canvas"}]},
+                replace_missing_rollout=True,
+                initial_context_items=[
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": "Use the canvas tools."}
+                        ],
+                    }
+                ],
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["thread_id"], "replacement-thread")
+        self.assertEqual(
+            [method for method, _params in calls],
+            [
+                "thread/resume",
+                "thread/start",
+                "thread/inject_items",
+                "turn/start",
+            ],
+        )
+        self.assertEqual(calls[1][1]["dynamicTools"], [{"name": "canvas"}])
+        self.assertEqual(
+            calls[2][1],
+            {
+                "threadId": "replacement-thread",
+                "items": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": "Use the canvas tools."}
+                        ],
+                    }
+                ],
+            },
+        )
+        self.assertTrue(captured_runtime["initial_context_injected"])
+        self.assertEqual(captured_runtime["replaced_thread_id"], "missing-thread")
+
+    def test_initial_context_is_not_reinjected_when_thread_resumes(self) -> None:
+        class FakeWebSocket:
+            pass
+
+        websocket = FakeWebSocket()
+        rpc_methods: list[str] = []
+        captured_runtime: dict = {}
+
+        async def connect(_websockets):
+            return websocket
+
+        async def initialize(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def rpc_call(_websocket, method, _params, *_args, **_kwargs):
+            rpc_methods.append(method)
+            if method == "thread/resume":
+                return {"thread": {"id": "existing-thread"}}
+            if method == "turn/start":
+                return {"turn": {"id": "turn-1"}}
+            raise AssertionError(f"unexpected RPC method: {method}")
+
+        async def collect(runtime):
+            captured_runtime.update(runtime)
+            return {
+                "ok": True,
+                "thread_id": runtime["thread_id"],
+                "turn_id": runtime["turn_id"],
+                "output": "Done",
+            }
+
+        self.client._connect_ws = connect
+        self.client._initialize_ws = initialize
+        self.client._rpc_call = rpc_call
+        self.client._collect_chat_turn_ws = collect
+
+        result = asyncio.run(
+            self.client._start_chat_turn_ws(
+                "/path/to/project",
+                "Continue drawing",
+                "existing-thread",
+                None,
+                initial_context_items=[
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": "Use the canvas tools."}
+                        ],
+                    }
+                ],
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(rpc_methods, ["thread/resume", "turn/start"])
+        self.assertNotIn("initial_context_injected", captured_runtime)
+
+    def test_failed_initial_context_does_not_expose_new_thread_id(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        websocket = FakeWebSocket()
+        rpc_methods: list[str] = []
+
+        async def connect(_websockets):
+            return websocket
+
+        async def initialize(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def rpc_call(_websocket, method, _params, *_args, **_kwargs):
+            rpc_methods.append(method)
+            if method == "thread/start":
+                return {"thread": {"id": "uninitialized-thread"}}
+            if method == "thread/inject_items":
+                raise RuntimeError("context injection failed")
+            raise AssertionError(f"unexpected RPC method: {method}")
+
+        self.client._connect_ws = connect
+        self.client._initialize_ws = initialize
+        self.client._rpc_call = rpc_call
+
+        result = asyncio.run(
+            self.client._start_chat_turn_ws(
+                "/path/to/project",
+                "Start drawing",
+                None,
+                None,
+                initial_context_items=[
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": "Use the canvas tools."}
+                        ],
+                    }
+                ],
+            )
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["thread_id"])
+        self.assertEqual(
+            rpc_methods,
+            ["thread/start", "thread/inject_items"],
+        )
         self.assertTrue(websocket.closed)
 
     def test_recover_chat_turn_can_stop_before_resuming_thread(self) -> None:

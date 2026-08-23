@@ -19,6 +19,13 @@ This directory is organized by document role rather than by feature chronology.
   - Local development notes, including repo-local `.env` usage, Streamlit
     launch tips, test commands, and UI Test mode.
 
+- [component-build-system.md](component-build-system.md)
+  - Design rules and build flow for internal Streamlit Custom Components v2.
+
+- [canvas-skin-architecture.md](canvas-skin-architecture.md)
+  - Architecture and implemented prototype status for the embedded tldraw
+    Canvas Skin, Codex App Server tool bridge, and file-backed persistence.
+
 ## Protocols
 
 - [protocols/promptform.md](protocols/promptform.md)

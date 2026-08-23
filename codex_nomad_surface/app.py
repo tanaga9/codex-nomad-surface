@@ -22,7 +22,27 @@ from urllib.request import Request, urlopen
 
 import streamlit as st
 from starlette.middleware import Middleware
+from starlette.routing import WebSocketRoute
 from streamlit.starlette import App
+
+from codex_nomad_surface.canvas_runtime import (
+    canvas_initial_context_items,
+    canvas_dynamic_tool_handler_for_canvas,
+    canvas_dynamic_tools,
+    canvas_websocket,
+)
+from codex_nomad_surface.canvas_store import (
+    bind_canvas_to_thread,
+    canvas_exists_for_thread,
+    canvas_file_references,
+    canvas_manifest_for_thread,
+    initialize_canvas,
+    initialize_canvas_draft,
+    list_canvas_manifests,
+    load_canvas_document,
+    load_canvas_preview,
+    read_canvas_manifest,
+)
 
 from codex_nomad_surface.chat_store import (
     ChatMessage,
@@ -100,6 +120,7 @@ DISCONNECTED_STATUS_POLL_INTERVAL_SECONDS = 2
 CHAT_HISTORY_POLL_INTERVAL_SECONDS = 0.5
 CHAT_HISTORY_RECENT_MESSAGE_LIMIT = 50
 CHAT_HISTORY_LOAD_EARLIER_LIMIT = 40
+CANVAS_CHAT_HISTORY_MESSAGE_LIMIT = 2
 CHAT_INPUT_IMAGE_FILE_TYPES = ("png", "jpg", "jpeg", "webp", "gif")
 CHAT_INPUT_IMAGE_MIME_TYPES = {
     "image/png",
@@ -210,6 +231,18 @@ def chat_by_id(chat_id: str) -> ChatSession | None:
     return None
 
 
+def chat_canvas_id(chat: ChatSession) -> str:
+    canvas_id = str(getattr(chat, "canvas_id", None) or "")
+    if canvas_id:
+        return canvas_id
+    thread_id = str(chat.thread_id or "")
+    manifest = canvas_manifest_for_thread(thread_id) if thread_id else None
+    canvas_id = str((manifest or {}).get("canvas_id") or "")
+    if canvas_id:
+        chat.canvas_id = canvas_id
+    return canvas_id
+
+
 def render_surface_logo() -> None:
     st.logo(str(LOGO_PATH), size="large")
 
@@ -317,6 +350,13 @@ def available_project_paths(server_threads: list[CodexThread]) -> list[str]:
             continue
         paths.append(thread.cwd)
         seen.add(thread.cwd)
+
+    for manifest in list_canvas_manifests():
+        path = str(manifest.get("project_path") or "")
+        if not path or path in seen:
+            continue
+        paths.append(path)
+        seen.add(path)
 
     for path in st.session_state.get("manual_project_paths", []):
         if not path or path in seen:
@@ -748,7 +788,7 @@ def query_chat_id() -> str:
 
 
 def public_query_chat_id(chat_id: str) -> str:
-    return chat_id if chat_id.startswith("thread:") else ""
+    return chat_id if chat_id.startswith(("thread:", "canvas:")) else ""
 
 
 def set_query_chat_id(chat_id: str) -> None:
@@ -760,13 +800,12 @@ def set_query_chat_id(chat_id: str) -> None:
     st.session_state.last_query_chat_id = chat_id
 
 
-def promote_chat_to_thread_selection(chat: ChatSession, thread_id: str) -> None:
+def replace_chat_id(chat: ChatSession, new_chat_id: str) -> str:
     old_chat_id = chat.id
-    thread_chat_id = f"thread:{thread_id}"
-    if old_chat_id != thread_chat_id:
+    if old_chat_id != new_chat_id:
         controls = run_controls_state()
-        if old_chat_id in controls and thread_chat_id not in controls:
-            controls[thread_chat_id] = controls.pop(old_chat_id)
+        if old_chat_id in controls and new_chat_id not in controls:
+            controls[new_chat_id] = controls.pop(old_chat_id)
         elif old_chat_id in controls:
             controls.pop(old_chat_id, None)
         for state_key in (
@@ -776,10 +815,16 @@ def promote_chat_to_thread_selection(chat: ChatSession, thread_id: str) -> None:
         ):
             value = st.session_state.get(state_key)
             if isinstance(value, dict) and value.get("chat_id") == old_chat_id:
-                value["chat_id"] = thread_chat_id
+                value["chat_id"] = new_chat_id
         if st.session_state.get("last_rendered_chat_id") == old_chat_id:
-            st.session_state.last_rendered_chat_id = thread_chat_id
-        chat.id = thread_chat_id
+            st.session_state.last_rendered_chat_id = new_chat_id
+        chat.id = new_chat_id
+    return old_chat_id
+
+
+def promote_chat_to_thread_selection(chat: ChatSession, thread_id: str) -> None:
+    thread_chat_id = f"thread:{thread_id}"
+    old_chat_id = replace_chat_id(chat, thread_chat_id)
 
     selected_chat_id = st.session_state.get("selected_chat_id", "")
     if selected_chat_id not in {"", old_chat_id, thread_chat_id}:
@@ -829,13 +874,35 @@ def select_project_for_chat_id(server_threads: list[CodexThread], chat_id: str) 
             st.session_state[PENDING_PROJECT_SELECT_KEY] = project_key(project)
             return
 
-    if not chat_id.startswith("thread:"):
+    project_path = ""
+    if chat_id.startswith("canvas:"):
+        canvas_id = chat_id.removeprefix("canvas:")
+        manifest = next(
+            (
+                item
+                for item in list_canvas_manifests()
+                if str(item.get("canvas_id") or "") == canvas_id
+            ),
+            None,
+        )
+        project_path = str((manifest or {}).get("project_path") or "")
+    elif chat_id.startswith("thread:"):
+        thread_id = chat_id.removeprefix("thread:")
+        thread = next((item for item in server_threads if item.id == thread_id), None)
+        project_path = thread.cwd if thread else ""
+        if not project_path:
+            manifest = next(
+                (
+                    item
+                    for item in list_canvas_manifests()
+                    if str(item.get("thread_id") or "") == thread_id
+                ),
+                None,
+            )
+            project_path = str((manifest or {}).get("project_path") or "")
+    else:
         return
-    thread_id = chat_id.removeprefix("thread:")
-    thread = next((item for item in server_threads if item.id == thread_id), None)
-    if not thread:
-        return
-    project = next((item for item in projects if item.path == thread.cwd), None)
+    project = next((item for item in projects if item.path == project_path), None)
     if project:
         set_selected_project_key(project_key(project))
         st.session_state[PENDING_PROJECT_SELECT_KEY] = project_key(project)
@@ -845,6 +912,7 @@ def server_thread_chat(project: Project, thread: CodexThread) -> ChatSession:
     created_at = format_thread_time(thread.created_at)
     updated_at = format_thread_time(thread.updated_at)
     title = chat_title_from_text(thread.preview)
+    canvas_manifest = canvas_manifest_for_thread(thread.id)
     return ChatSession(
         id=f"thread:{thread.id}",
         project_path=project.path,
@@ -852,6 +920,40 @@ def server_thread_chat(project: Project, thread: CodexThread) -> ChatSession:
         thread_id=thread.id,
         created_at=created_at,
         updated_at=updated_at or created_at,
+        surface="canvas" if canvas_manifest else "chat",
+        canvas_id=(
+            str(canvas_manifest.get("canvas_id") or "") or None
+            if canvas_manifest
+            else None
+        ),
+    )
+
+
+def canvas_manifest_chat(project: Project, manifest: dict[str, Any]) -> ChatSession:
+    thread_id = str(manifest.get("thread_id") or "")
+    canvas_id = str(manifest.get("canvas_id") or "")
+    raw_created_at = str(
+        manifest.get("created_at") or manifest.get("updated_at") or ""
+    )
+    raw_updated_at = str(manifest.get("updated_at") or raw_created_at)
+
+    def display_time(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return value
+
+    created_at = display_time(raw_created_at)
+    updated_at = display_time(raw_updated_at)
+    return ChatSession(
+        id=f"thread:{thread_id}" if thread_id else f"canvas:{canvas_id}",
+        project_path=project.path,
+        title="Canvas",
+        thread_id=thread_id or None,
+        created_at=created_at,
+        updated_at=updated_at,
+        surface="canvas",
+        canvas_id=canvas_id or None,
     )
 
 
@@ -878,7 +980,22 @@ def recent_thread_chats(
         seen_thread_ids.add(thread.id)
         if len(recent) >= limit:
             break
-    return recent
+    for manifest in list_canvas_manifests():
+        thread_id = str(manifest.get("thread_id") or "")
+        canvas_id = str(manifest.get("canvas_id") or "")
+        if not canvas_id or (thread_id and thread_id in seen_thread_ids):
+            continue
+        project = project_by_path.get(str(manifest.get("project_path") or ""))
+        if not project:
+            continue
+        recent.append((project, canvas_manifest_chat(project, manifest)))
+        if thread_id:
+            seen_thread_ids.add(thread_id)
+    return sorted(
+        recent,
+        key=lambda item: item[1].updated_at or item[1].created_at,
+        reverse=True,
+    )[:limit]
 
 
 def project_chats(
@@ -891,6 +1008,9 @@ def project_chats(
     ]
     known_thread_ids = {chat.thread_id for chat in local_chats if chat.thread_id}
     known_chat_ids = {chat.id for chat in local_chats}
+    known_canvas_ids = {
+        canvas_id for chat in local_chats if (canvas_id := chat_canvas_id(chat))
+    }
     server_chats = [
         server_thread_chat(project, thread)
         for thread in server_threads
@@ -898,7 +1018,16 @@ def project_chats(
         and thread.id not in known_thread_ids
         and f"thread:{thread.id}" not in known_chat_ids
     ]
-    return local_chats + server_chats
+    known_thread_ids.update(chat.thread_id for chat in server_chats if chat.thread_id)
+    manifest_chats = [
+        canvas_manifest_chat(project, manifest)
+        for manifest in list_canvas_manifests()
+        if str(manifest.get("project_path") or "") == project.path
+        and bool(str(manifest.get("canvas_id") or ""))
+        and str(manifest.get("canvas_id") or "") not in known_canvas_ids
+        and str(manifest.get("thread_id") or "") not in known_thread_ids
+    ]
+    return local_chats + server_chats + manifest_chats
 
 
 def create_chat(project: Project) -> ChatSession:
@@ -1494,6 +1623,8 @@ def render_chat(
     project: Project | None,
     chat: ChatSession | None,
     skip_latest_user: bool = False,
+    message_items: list[tuple[int, ChatMessage]] | None = None,
+    show_empty_state: bool = True,
 ) -> None:
     if not chat:
         return
@@ -1501,7 +1632,7 @@ def render_chat(
     skill_defs = load_available_skill_defs(
         client.base_url, project.path if project else ""
     )
-    if not chat.messages:
+    if not chat.messages and show_empty_state:
         if chat.thread_id:
             st.caption(
                 "An App Server thread is selected. Previous messages have not been loaded yet. The next submission will continue this thread."
@@ -1525,8 +1656,11 @@ def render_chat(
         and active_interrupt_draft.get("chat_id") == chat.id
         else ""
     )
-    message_items = []
-    for index, message in enumerate(chat.messages):
+    source_message_items = (
+        list(enumerate(chat.messages)) if message_items is None else message_items
+    )
+    visible_message_items = []
+    for index, message in source_message_items:
         metadata = message.metadata or {}
         if (
             pending
@@ -1549,9 +1683,11 @@ def render_chat(
             and metadata.get("kind") != "interrupt_draft"
         ):
             continue
-        message_items.append((index, message))
-    latest_progress_only_index = latest_progress_only_message_index(message_items)
-    for index, message in message_items:
+        visible_message_items.append((index, message))
+    latest_progress_only_index = latest_progress_only_message_index(
+        visible_message_items
+    )
+    for index, message in visible_message_items:
         if message.role == "promptform_picker":
             picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
             with st.chat_message("promptform-picker", avatar="🧩"):
@@ -1942,6 +2078,77 @@ def chat_history_panel(
     render_chat_history_panel_contents(client, project, chat)
 
 
+def canvas_confirmed_message_items(
+    chat: ChatSession,
+    pending: dict[str, Any] | None,
+    limit: int,
+) -> list[tuple[int, ChatMessage]]:
+    """Return bounded confirmed history without mutating the full chat."""
+    if limit <= 0:
+        return []
+    active_run_id = ""
+    if isinstance(pending, dict) and pending.get("chat_id") == chat.id:
+        active_run_id = str(pending.get("run_id") or "")
+    items = [
+        (index, message)
+        for index, message in enumerate(chat.messages)
+        if not active_run_id
+        or str(message.metadata.get("run_id") or "") != active_run_id
+    ]
+    return items[-limit:]
+
+
+@st.fragment(run_every=CHAT_HISTORY_POLL_INTERVAL_SECONDS)
+def polling_canvas_live_turn(
+    client: CodexClient, project: Project, chat: ChatSession
+) -> None:
+    render_pending_turn(client, project, chat)
+
+
+def render_canvas_live_turn(
+    client: CodexClient, project: Project, chat: ChatSession
+) -> None:
+    pending = st.session_state.get("pending_turn")
+    polling_statuses = {
+        TURN_RUN_STARTING,
+        TURN_RUN_RUNNING,
+        TURN_RUN_RESPONDING_APPROVAL,
+    }
+    if (
+        isinstance(pending, dict)
+        and pending.get("chat_id") == chat.id
+        and pending.get("status") in polling_statuses
+    ):
+        drain_pending_turn_events(pending)
+        if not pending.get("result") and not pending.get("approval"):
+            polling_canvas_live_turn(client, project, chat)
+            return
+    render_pending_turn(client, project, chat)
+
+
+def canvas_chat_history_panel(
+    client: CodexClient, project: Project, chat: ChatSession
+) -> None:
+    pending = st.session_state.get("pending_turn")
+    confirmed_items = canvas_confirmed_message_items(
+        chat, pending, CANVAS_CHAT_HISTORY_MESSAGE_LIMIT
+    )
+    with st.container(
+        height="stretch",
+        autoscroll=True,
+        key="chat-history-panel",
+    ):
+        if confirmed_items:
+            render_chat(
+                client,
+                project,
+                chat,
+                message_items=confirmed_items,
+                show_empty_state=False,
+            )
+        render_canvas_live_turn(client, project, chat)
+
+
 def render_pending_turn(
     client: CodexClient, project: Project, chat: ChatSession
 ) -> None:
@@ -2086,6 +2293,7 @@ def start_turn_run_worker(
         event_queue.put({"type": "runtime", "runtime": runtime})
 
     def run_turn() -> None:
+        canvas_id = chat_canvas_id(chat)
         try:
             result = client.start_chat_turn(
                 project.path,
@@ -2097,6 +2305,17 @@ def start_turn_run_worker(
                 approval_policy=pending.get("approval_policy"),
                 output_callback=output_callback,
                 runtime_callback=runtime_callback,
+                dynamic_tool_handler=(
+                    canvas_dynamic_tool_handler_for_canvas(canvas_id)
+                    if chat.surface == "canvas" and canvas_id
+                    else None
+                ),
+                replace_missing_rollout=chat.surface == "canvas",
+                initial_context_items=(
+                    canvas_initial_context_items()
+                    if chat.surface == "canvas"
+                    else None
+                ),
             )
         except Exception as exc:
             result = {"ok": False, "output": f"[send/receive error] {exc}"}
@@ -2132,12 +2351,18 @@ def start_pending_action_recovery_worker(
         event_queue.put({"type": "runtime", "runtime": runtime})
 
     def recover_turn() -> None:
+        canvas_id = chat_canvas_id(chat)
         try:
             result = client.recover_chat_turn(
                 project.path,
                 str(chat.thread_id or ""),
                 output_callback=output_callback,
                 runtime_callback=runtime_callback,
+                dynamic_tool_handler=(
+                    canvas_dynamic_tool_handler_for_canvas(canvas_id)
+                    if chat.surface == "canvas" and canvas_id
+                    else None
+                ),
             )
         except Exception as exc:
             result = {"ok": False, "output": f"[recovery error] {exc}"}
@@ -2848,11 +3073,22 @@ def handle_turn_result(
         clear_chat_input_outbox(
             pending.get("input_text"), pending.get("outbox_scope")
         )
-    if result.get("thread_id"):
-        chat.thread_id = result["thread_id"]
-        pending["thread_id"] = result["thread_id"]
+    result_thread_id = str(result.get("thread_id") or "")
+    if result_thread_id:
+        canvas_id = chat_canvas_id(chat)
+        if (
+            chat.surface == "canvas"
+            and canvas_id
+            and chat.thread_id != result_thread_id
+        ):
+            try:
+                bind_canvas_to_thread(canvas_id, result_thread_id)
+            except (OSError, TypeError, ValueError) as exc:
+                st.error(f"Could not bind the canvas to the Codex thread: {exc}")
+        chat.thread_id = result_thread_id
+        pending["thread_id"] = result_thread_id
         if pending_state_key == "pending_turn":
-            promote_chat_to_thread_selection(chat, result["thread_id"])
+            promote_chat_to_thread_selection(chat, result_thread_id)
     turn_id = str(result.get("turn_id") or pending.get("turn_id") or "")
     if turn_id:
         for message in chat.messages:
@@ -2958,6 +3194,8 @@ def queue_user_turn(
         if starting_new_thread
         else build_continuation_thread_overrides(controls)
     )
+    if chat.surface == "canvas":
+        thread_overrides["dynamicTools"] = canvas_dynamic_tools()
     if starting_new_thread:
         remember_new_chat_run_control_defaults(controls)
         ensure_start_run_overrides_message(chat, controls)
@@ -4281,13 +4519,322 @@ def chat_workspace(
     chat: ChatSession | None,
 ) -> None:
     active_chat = chat or (draft_chat(project) if project else None)
+    if (
+        active_chat
+        and (
+            active_chat.surface == "canvas"
+            or (
+                active_chat.thread_id
+                and canvas_exists_for_thread(active_chat.thread_id)
+            )
+        )
+    ):
+        active_chat.surface = "canvas"
+        canvas_workspace(client, project, active_chat)
+        return
     # Keep the native st.chat_input UI, while separating the append bridge
     # from the IME-specific Enter guard.
     inject_chat_input_bridge()
     inject_chat_input_ime_guard()
     inject_chat_input_outbox(active_chat.id if active_chat else "")
     chat_history_panel(client, project, active_chat)
+    render_canvas_start_action(project, active_chat)
     chat_composer(client, project, active_chat)
+
+
+def render_canvas_start_action(
+    project: Project | None,
+    chat: ChatSession | None,
+) -> None:
+    if not project or not chat or chat.thread_id or chat.messages:
+        return
+    with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        with st.container():
+            st.markdown("**Canvas**")
+            st.caption("Start this task with a shared tldraw canvas.")
+        if st.button(
+            "Start canvas",
+            key=f"start_canvas_{chat.id}",
+            type="secondary",
+            icon=":material/draw:",
+            width="content",
+        ):
+            try:
+                with st.spinner("Starting canvas..."):
+                    canvas_chat = materialize_chat(project, chat)
+                    canvas_chat.surface = "canvas"
+                    manifest = initialize_canvas_draft(
+                        canvas_chat.id,
+                        project.path,
+                    )
+                    canvas_chat.canvas_id = str(manifest["canvas_id"])
+                    replace_chat_id(
+                        canvas_chat,
+                        f"canvas:{canvas_chat.canvas_id}",
+                    )
+            except Exception as exc:
+                st.error(f"Could not start canvas: {exc}")
+                return
+
+            st.session_state.selected_chat_id = canvas_chat.id
+            st.session_state[PENDING_CHAT_SELECT_KEY] = canvas_chat.id
+            set_query_chat_id(canvas_chat.id)
+            st.rerun()
+
+
+def canvas_workspace(
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession,
+) -> None:
+    # Import after Streamlit has initialized and discovered installed CCv2
+    # manifests. Importing a file-backed component during pytest collection
+    # happens too early for the component registry.
+    from codex_nomad_surface.canvas_component import nomad_canvas
+
+    if not project:
+        st.error("Canvas requires a project.")
+        return
+
+    manifest = None
+    canvas_id = chat_canvas_id(chat)
+    if canvas_id:
+        manifest = read_canvas_manifest(canvas_id)
+    elif chat.thread_id:
+        manifest = canvas_manifest_for_thread(chat.thread_id)
+        if not manifest:
+            manifest = initialize_canvas(chat.thread_id, project.path)
+    else:
+        manifest = initialize_canvas_draft(chat.id, project.path)
+    if not manifest:
+        st.error("Canvas manifest was not found.")
+        return
+    canvas_id = str(manifest["canvas_id"])
+    chat.canvas_id = canvas_id
+    initial_document = load_canvas_document(canvas_id)
+    preview_svg = load_canvas_preview(canvas_id)
+    references = canvas_file_references(canvas_id)
+    export_request = None
+
+    st.html(
+        """
+        <style>
+        [data-testid="stMainBlockContainer"] {
+          max-width: 100% !important;
+          padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
+          padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
+        }
+
+        .st-key-canvas-stage,
+        .st-key-canvas-chat-sidebar {
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
+
+        .st-key-canvas-stage > [data-testid="stVerticalBlock"],
+        .st-key-canvas-chat-sidebar > [data-testid="stVerticalBlock"] {
+          height: 100%;
+          min-height: 0;
+        }
+
+        .st-key-canvas-stage [data-testid="stElementContainer"] {
+          height: 100% !important;
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
+
+        .st-key-canvas-chat-sidebar
+          [data-testid="stElementContainer"]:has(#chat-input-bridge),
+        .st-key-canvas-chat-sidebar
+          [data-testid="stElementContainer"]:has(#chat-input-ime-guard),
+        .st-key-canvas-chat-sidebar
+          [data-testid="stElementContainer"]:has(#chat-input-outbox) {
+          display: none;
+        }
+
+        .st-key-canvas-chat-sidebar
+          [data-testid="stLayoutWrapper"]:has(> .st-key-chat-history-panel) {
+          flex: 1 1 0 !important;
+          height: auto !important;
+          min-height: 0;
+          overflow: hidden !important;
+        }
+
+        .st-key-canvas-chat-sidebar .st-key-chat-history-panel {
+          height: 100% !important;
+          min-height: 0;
+          overflow-y: auto !important;
+          overscroll-behavior: contain;
+        }
+
+        @media (min-width: 641px) {
+          [data-testid="stAppScrollToBottomContainer"]:has(
+              .st-key-canvas-viewport
+            ) {
+            overflow: hidden;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport) {
+            height: 100dvh;
+            overflow: hidden;
+            padding-top: 4rem !important;
+            padding-bottom: 0.5rem !important;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport)
+            > [data-testid="stVerticalBlock"],
+          .st-key-canvas-viewport,
+          .st-key-canvas-viewport > [data-testid="stVerticalBlock"] {
+            height: 100%;
+            min-height: 0;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport)
+            > [data-testid="stVerticalBlock"] {
+            overflow: hidden;
+          }
+
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport)
+            > [data-testid="stVerticalBlock"]
+            > [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-viewport) {
+            flex: 1 1 0 !important;
+            height: auto !important;
+            min-height: 0;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-viewport
+            [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-workspace) {
+            flex: 1 1 0 !important;
+            height: auto !important;
+            min-height: 0;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-workspace
+            [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-stage),
+          .st-key-canvas-workspace
+            [data-testid="stLayoutWrapper"]:has(> .st-key-canvas-chat-sidebar) {
+            flex: 1 1 0 !important;
+            height: 100% !important;
+            min-height: 0;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-workspace,
+          .st-key-canvas-workspace > [data-testid="stVerticalBlock"],
+          .st-key-canvas-workspace
+            > [data-testid="stLayoutWrapper"],
+          .st-key-canvas-workspace [data-testid="stHorizontalBlock"],
+          .st-key-canvas-workspace [data-testid="stColumn"],
+          .st-key-canvas-workspace
+            [data-testid="stColumn"]
+            > [data-testid="stVerticalBlock"] {
+            height: 100% !important;
+            min-height: 0;
+          }
+
+          .st-key-canvas-workspace
+            > [data-testid="stLayoutWrapper"] {
+            flex: 1 1 0 !important;
+            overflow: hidden !important;
+          }
+
+          .st-key-canvas-workspace [data-testid="stHorizontalBlock"] {
+            align-items: stretch;
+          }
+        }
+
+        @media (max-width: 640px) {
+          [data-testid="stMainBlockContainer"]:has(.st-key-canvas-viewport) {
+            padding-bottom: max(
+              0.75rem,
+              env(safe-area-inset-bottom)
+            ) !important;
+          }
+
+          .st-key-canvas-stage {
+            height: min(64dvh, 640px) !important;
+            min-height: 24rem !important;
+          }
+
+          .st-key-canvas-chat-sidebar {
+            height: 24rem !important;
+            min-height: 24rem !important;
+          }
+        }
+        </style>
+        """
+    )
+
+    with st.container(key="canvas-viewport", gap="xsmall"):
+        with st.expander("Canvas", expanded=False):
+            with st.container(
+                horizontal=True,
+                horizontal_alignment="distribute",
+                vertical_alignment="center",
+            ):
+                st.caption(
+                    f"Revision {int(manifest.get('current_revision') or 0)} · "
+                    f"{canvas_id[-8:]}"
+                )
+                with st.container(horizontal=True, width="content"):
+                    st.button(
+                        "Refresh exports",
+                        key=f"refresh_canvas_exports_{canvas_id}",
+                        help="Reload the latest saved Canvas and SVG data.",
+                        icon=":material/refresh:",
+                        width="content",
+                    )
+                    if st.button(
+                        "Obsidian (.md)",
+                        key=f"download_canvas_obsidian_{canvas_id}",
+                        help="Download an Obsidian tldraw Markdown file.",
+                        icon=":material/download:",
+                        width="content",
+                    ):
+                        export_request = {
+                            "id": str(uuid.uuid4()),
+                            "format": "obsidian",
+                        }
+                    if preview_svg:
+                        st.download_button(
+                            "SVG",
+                            data=preview_svg,
+                            file_name=f"{canvas_id}.svg",
+                            mime="image/svg+xml",
+                            help=references["preview_path"],
+                            icon=":material/image:",
+                            width="content",
+                        )
+
+        with st.container(key="canvas-workspace", height="stretch", gap=None):
+            canvas_column, chat_column = st.columns([7, 3], gap="small")
+            with canvas_column:
+                with st.container(
+                    key="canvas-stage", height="stretch", gap=None
+                ):
+                    nomad_canvas(
+                        canvas_id,
+                        initial_document=initial_document,
+                        websocket_url=f"/api/canvas/{canvas_id}/ws",
+                        export_request=export_request,
+                        key=f"nomad_canvas_{canvas_id}",
+                        height="stretch",
+                    )
+            with chat_column:
+                with st.container(
+                    key="canvas-chat-sidebar",
+                    height="stretch",
+                    border=True,
+                    gap="xsmall",
+                ):
+                    st.markdown("**Chat**")
+                    inject_chat_input_bridge()
+                    inject_chat_input_ime_guard()
+                    inject_chat_input_outbox(chat.id)
+                    canvas_chat_history_panel(client, project, chat)
+                    chat_composer(client, project, chat)
 
 
 def render_recent_threads(server_threads: list[CodexThread]) -> None:
@@ -4841,7 +5388,11 @@ def main() -> None:
     main_screen()
 
 
-app = App(__file__, middleware=[Middleware(FileContentMiddleware)])
+app = App(
+    __file__,
+    routes=[WebSocketRoute("/api/canvas/{canvas_id}/ws", canvas_websocket)],
+    middleware=[Middleware(FileContentMiddleware)],
+)
 
 
 if __name__ == "__main__":

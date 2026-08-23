@@ -34,6 +34,8 @@ class ChatSession:
     created_at: str = ""
     updated_at: str = ""
     messages: list[ChatMessage] = field(default_factory=list)
+    surface: str = "chat"
+    canvas_id: str | None = None
 
     @classmethod
     def new(cls, project_path: str) -> "ChatSession":

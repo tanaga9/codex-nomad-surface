@@ -1,0 +1,3 @@
+# Vite bundles contain template literals where trailing spaces are data.
+codex_nomad_surface/ui_components/nomad_canvas/*.js whitespace=-blank-at-eol,-blank-at-eof
+components/nomad-canvas/nomad_canvas/frontend/build/*.js whitespace=-blank-at-eol,-blank-at-eof

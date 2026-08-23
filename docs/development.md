@@ -22,19 +22,54 @@ whether the same `.env` has been loaded in that shell.
 
 ## Running The App
 
-After installing the package into the virtual environment, this is usually
-enough:
+Prepare the complete Python and frontend development environment from the
+repository root:
 
 ```bash
-.venv/bin/streamlit run codex_nomad_surface/app.py
+python3 scripts/dev.py setup
 ```
 
-When running directly from a checkout that has not been installed into the
-active environment, include the repository root on `PYTHONPATH`:
+The command creates `.venv`, runs `npm ci` and the production build for every
+component in `components.toml`, synchronizes and verifies the generated assets,
+and installs the Python package with test dependencies. Activate the prepared
+environment, then run Streamlit directly:
 
 ```bash
-PYTHONPATH=. .venv/bin/streamlit run codex_nomad_surface/app.py
+. .venv/bin/activate
+streamlit run codex_nomad_surface/app.py
 ```
+
+Use `python3 scripts/dev.py build-components` after changing multiple frontend
+components, or `python3 scripts/dev.py build-component nomad-canvas` after a
+change limited to one component. Generated frontend assets are intentionally
+not committed.
+
+The macOS `run.command` and Windows `run.cmd` launchers run `build-components`
+before starting Streamlit. Pass `--skip-component-build` to bypass that build
+explicitly. Pass additional Streamlit arguments after `--`.
+
+Build a wheel and source distribution with
+`python3 scripts/dev.py build-package`. This command rebuilds all frontend
+components, removes stale Python build output, creates fresh distributions
+under `dist/`, and verifies the component entries inside both distributions.
+The Python package includes the synchronized assets under
+`codex_nomad_surface/ui_components/generated/`.
+
+The project PEP 517 backend applies the same component preparation to standard
+build entry points such as `python3 -m build` and `pip install .`. When building
+a wheel from an sdist, it validates the runtime assets already stored in the
+sdist instead of requiring Node.js or the frontend source tree. A standard
+build from a source checkout requires `python3 scripts/dev.py setup` to have
+installed the frontend dependencies first.
+
+## Adding A Frontend Component
+
+Start packaged Streamlit components from the official Custom Components v2
+template. Keep each component's production build behind `npm run build`, then
+add one `[[components]]` entry to `components.toml` with its frontend, build,
+runtime, and entry-glob paths. Register the corresponding component and
+`asset_dir` in `pyproject.toml`. The project-wide commands will then install,
+build, synchronize, and verify it alongside the existing components.
 
 Restart Streamlit when dependencies, environment variables, or launch options
 change. A browser reload is usually enough for ordinary Python source edits.
