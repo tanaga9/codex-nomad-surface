@@ -44,7 +44,8 @@ There is no CLI fallback. Prompt submission is disabled when Codex App Server is
 ## Setup
 
 Python 3.12 or newer is required.
-Node.js and npm are required to build the frontend components from source.
+Node.js 22.12.0 or newer and npm are required to build the frontend
+components from source. Installing a wheel or sdist does not require Node.js.
 
 macOS / Linux:
 

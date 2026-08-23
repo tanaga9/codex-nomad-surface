@@ -4,6 +4,8 @@ The packaged Streamlit Custom Component v2 source for the Nomad Surface
 tldraw editor. It was generated from Streamlit's official v2 component
 template and is kept as a normal React and TypeScript component project.
 
+Building from source requires Node.js 22.12.0 or newer and npm.
+
 From `nomad_canvas/frontend`:
 
 ```sh

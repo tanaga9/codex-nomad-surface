@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "build": "npm run clean && npm run typecheck && npm run build:frontend:production",
     "build:frontend:production": "cross-env NODE_ENV=production vite build",

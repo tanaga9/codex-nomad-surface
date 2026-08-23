@@ -25,8 +25,8 @@ Do not edit or commit the generated
 
 ## Build Flow
 
-- A source-checkout build requires frontend dependencies, rebuilds every
-  registered component, and packages the synchronized runtime assets.
+- A source-checkout build requires Node.js 22.12.0 or newer and npm, rebuilds
+  every registered component, and packages the synchronized runtime assets.
 - An sdist contains verified runtime assets but not frontend sources. Building
   its wheel therefore does not require Node.js.
 - `run.command` and `run.cmd` rebuild components before starting Streamlit
