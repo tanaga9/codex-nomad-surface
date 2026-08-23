@@ -16,10 +16,13 @@ sys.modules[SPEC.name] = dev
 SPEC.loader.exec_module(dev)
 
 
-def test_registry_contains_canvas() -> None:
+def test_registry_contains_surface_components() -> None:
     components = dev.load_components()
 
-    assert [component.name for component in components] == ["nomad-canvas"]
+    assert [component.name for component in components] == [
+        "nomad-canvas",
+        "nomad-text",
+    ]
     assert components[0].runtime_dir.is_relative_to(dev.RUNTIME_ROOT)
 
 

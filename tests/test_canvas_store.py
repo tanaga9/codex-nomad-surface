@@ -790,15 +790,18 @@ def test_canvas_save_reuses_an_incomplete_next_revision(isolated_canvas_root):
 
 
 def test_canvas_broker_retires_the_previous_connection():
-    broker = CanvasBroker()
-    first = broker.register("canvas-one")
+    async def scenario() -> None:
+        broker = CanvasBroker()
+        first = broker.register("canvas-one")
 
-    second = broker.register("canvas-one")
+        second = broker.register("canvas-one")
 
-    assert first.retired.is_set()
-    assert first.outgoing.get_nowait() is None
-    assert broker.is_current("canvas-one", first) is False
-    assert broker.is_current("canvas-one", second) is True
+        assert first.retired.is_set()
+        assert await first.outgoing.get() is None
+        assert broker.is_current("canvas-one", first) is False
+        assert broker.is_current("canvas-one", second) is True
+
+    asyncio.run(scenario())
 
 
 def test_canvas_dynamic_tool_manifest_uses_namespace_shape():

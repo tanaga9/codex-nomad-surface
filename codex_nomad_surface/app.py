@@ -43,6 +43,25 @@ from codex_nomad_surface.canvas_store import (
     load_canvas_preview,
     read_canvas_manifest,
 )
+from codex_nomad_surface.text_runtime import (
+    sync_text_for_agent,
+    text_dynamic_tool_handler_for_text,
+    text_dynamic_tools,
+    text_initial_context_items,
+    text_websocket,
+)
+from codex_nomad_surface.text_store import (
+    bind_text_to_thread,
+    initialize_text,
+    initialize_text_draft,
+    list_text_manifests,
+    load_text_snapshot,
+    read_text_manifest,
+    text_exists_for_thread,
+    text_file_references,
+    text_editor_kind,
+    text_manifest_for_thread,
+)
 
 from codex_nomad_surface.chat_store import (
     ChatMessage,
@@ -243,6 +262,29 @@ def chat_canvas_id(chat: ChatSession) -> str:
     return canvas_id
 
 
+def chat_text_id(chat: ChatSession) -> str:
+    text_id = str(getattr(chat, "text_id", None) or "")
+    if text_id:
+        return text_id
+    thread_id = str(chat.thread_id or "")
+    manifest = text_manifest_for_thread(thread_id) if thread_id else None
+    text_id = str((manifest or {}).get("text_id") or "")
+    if text_id:
+        chat.text_id = text_id
+    return text_id
+
+
+def chat_surface_label(chat: ChatSession) -> str:
+    if chat.surface == "canvas":
+        return "Canvas"
+    if chat.surface == "text":
+        text_id = chat_text_id(chat)
+        manifest = read_text_manifest(text_id) if text_id else None
+        kind = text_editor_kind(manifest or {})
+        return f"Editor / {'Document' if kind == 'document' else 'Text'}"
+    return "Chat"
+
+
 def render_surface_logo() -> None:
     st.logo(str(LOGO_PATH), size="large")
 
@@ -352,6 +394,13 @@ def available_project_paths(server_threads: list[CodexThread]) -> list[str]:
         seen.add(thread.cwd)
 
     for manifest in list_canvas_manifests():
+        path = str(manifest.get("project_path") or "")
+        if not path or path in seen:
+            continue
+        paths.append(path)
+        seen.add(path)
+
+    for manifest in list_text_manifests():
         path = str(manifest.get("project_path") or "")
         if not path or path in seen:
             continue
@@ -788,7 +837,7 @@ def query_chat_id() -> str:
 
 
 def public_query_chat_id(chat_id: str) -> str:
-    return chat_id if chat_id.startswith(("thread:", "canvas:")) else ""
+    return chat_id if chat_id.startswith(("thread:", "canvas:", "text:")) else ""
 
 
 def set_query_chat_id(chat_id: str) -> None:
@@ -875,7 +924,18 @@ def select_project_for_chat_id(server_threads: list[CodexThread], chat_id: str) 
             return
 
     project_path = ""
-    if chat_id.startswith("canvas:"):
+    if chat_id.startswith("text:"):
+        text_id = chat_id.removeprefix("text:")
+        manifest = next(
+            (
+                item
+                for item in list_text_manifests()
+                if str(item.get("text_id") or "") == text_id
+            ),
+            None,
+        )
+        project_path = str((manifest or {}).get("project_path") or "")
+    elif chat_id.startswith("canvas:"):
         canvas_id = chat_id.removeprefix("canvas:")
         manifest = next(
             (
@@ -891,7 +951,7 @@ def select_project_for_chat_id(server_threads: list[CodexThread], chat_id: str) 
         thread = next((item for item in server_threads if item.id == thread_id), None)
         project_path = thread.cwd if thread else ""
         if not project_path:
-            manifest = next(
+            manifest = text_manifest_for_thread(thread_id) or next(
                 (
                     item
                     for item in list_canvas_manifests()
@@ -912,6 +972,7 @@ def server_thread_chat(project: Project, thread: CodexThread) -> ChatSession:
     created_at = format_thread_time(thread.created_at)
     updated_at = format_thread_time(thread.updated_at)
     title = chat_title_from_text(thread.preview)
+    text_manifest = text_manifest_for_thread(thread.id)
     canvas_manifest = canvas_manifest_for_thread(thread.id)
     return ChatSession(
         id=f"thread:{thread.id}",
@@ -920,12 +981,34 @@ def server_thread_chat(project: Project, thread: CodexThread) -> ChatSession:
         thread_id=thread.id,
         created_at=created_at,
         updated_at=updated_at or created_at,
-        surface="canvas" if canvas_manifest else "chat",
+        surface="text" if text_manifest else ("canvas" if canvas_manifest else "chat"),
         canvas_id=(
             str(canvas_manifest.get("canvas_id") or "") or None
             if canvas_manifest
             else None
         ),
+        text_id=(
+            str(text_manifest.get("text_id") or "") or None
+            if text_manifest
+            else None
+        ),
+    )
+
+
+def text_manifest_chat(project: Project, manifest: dict[str, Any]) -> ChatSession:
+    thread_id = str(manifest.get("thread_id") or "")
+    text_id = str(manifest.get("text_id") or "")
+    created_at = str(manifest.get("created_at") or manifest.get("updated_at") or "")
+    updated_at = str(manifest.get("updated_at") or created_at)
+    return ChatSession(
+        id=f"thread:{thread_id}" if thread_id else f"text:{text_id}",
+        project_path=project.path,
+        title="Document" if text_editor_kind(manifest) == "document" else "Text",
+        thread_id=thread_id or None,
+        created_at=created_at,
+        updated_at=updated_at,
+        surface="text",
+        text_id=text_id or None,
     )
 
 
@@ -991,6 +1074,17 @@ def recent_thread_chats(
         recent.append((project, canvas_manifest_chat(project, manifest)))
         if thread_id:
             seen_thread_ids.add(thread_id)
+    for manifest in list_text_manifests():
+        thread_id = str(manifest.get("thread_id") or "")
+        text_id = str(manifest.get("text_id") or "")
+        if not text_id or (thread_id and thread_id in seen_thread_ids):
+            continue
+        project = project_by_path.get(str(manifest.get("project_path") or ""))
+        if not project:
+            continue
+        recent.append((project, text_manifest_chat(project, manifest)))
+        if thread_id:
+            seen_thread_ids.add(thread_id)
     return sorted(
         recent,
         key=lambda item: item[1].updated_at or item[1].created_at,
@@ -1011,6 +1105,9 @@ def project_chats(
     known_canvas_ids = {
         canvas_id for chat in local_chats if (canvas_id := chat_canvas_id(chat))
     }
+    known_text_ids = {
+        text_id for chat in local_chats if (text_id := chat_text_id(chat))
+    }
     server_chats = [
         server_thread_chat(project, thread)
         for thread in server_threads
@@ -1019,7 +1116,7 @@ def project_chats(
         and f"thread:{thread.id}" not in known_chat_ids
     ]
     known_thread_ids.update(chat.thread_id for chat in server_chats if chat.thread_id)
-    manifest_chats = [
+    canvas_manifest_chats = [
         canvas_manifest_chat(project, manifest)
         for manifest in list_canvas_manifests()
         if str(manifest.get("project_path") or "") == project.path
@@ -1027,7 +1124,15 @@ def project_chats(
         and str(manifest.get("canvas_id") or "") not in known_canvas_ids
         and str(manifest.get("thread_id") or "") not in known_thread_ids
     ]
-    return local_chats + server_chats + manifest_chats
+    text_manifest_chats = [
+        text_manifest_chat(project, manifest)
+        for manifest in list_text_manifests()
+        if str(manifest.get("project_path") or "") == project.path
+        and bool(str(manifest.get("text_id") or ""))
+        and str(manifest.get("text_id") or "") not in known_text_ids
+        and str(manifest.get("thread_id") or "") not in known_thread_ids
+    ]
+    return local_chats + server_chats + canvas_manifest_chats + text_manifest_chats
 
 
 def create_chat(project: Project) -> ChatSession:
@@ -1107,7 +1212,10 @@ def select_chat(
     label_by_id = {
         "": "",
         **{
-            chat.id: f"{chat.title} · {chat.updated_at or chat.created_at} · {chat.id[:6]}"
+            chat.id: (
+                f"{chat.title} · {chat_surface_label(chat)} · "
+                f"{chat.updated_at or chat.created_at} · {chat.id[:6]}"
+            )
             for chat in chats
         },
     }
@@ -2185,6 +2293,9 @@ def render_pending_turn(
 def pending_turn_wait_message(pending: dict) -> str:
     if pending.get("interrupt_requested"):
         return "Cancellation requested..."
+    editor_sync = pending.get("editor_sync")
+    if isinstance(editor_sync, dict) and editor_sync.get("status") == "started":
+        return "Syncing editor..."
     status = str(pending.get("status") or TURN_RUN_RUNNING)
     if status == TURN_RUN_STARTING:
         return "Starting turn..."
@@ -2294,6 +2405,42 @@ def start_turn_run_worker(
 
     def run_turn() -> None:
         canvas_id = chat_canvas_id(chat)
+        text_id = chat_text_id(chat)
+        if chat.surface == "text":
+            event_queue.put(
+                {"type": "editor_sync", "status": "started", "text_id": text_id}
+            )
+            try:
+                if not text_id:
+                    raise RuntimeError("text_not_found")
+                sync_result = sync_text_for_agent(text_id)
+            except Exception as exc:
+                event_queue.put(
+                    {
+                        "type": "editor_sync",
+                        "status": "failed",
+                        "text_id": text_id,
+                        "error": str(exc),
+                    }
+                )
+                event_queue.put(
+                    {
+                        "type": "result",
+                        "result": {
+                            "ok": False,
+                            "output": f"[editor sync error] {exc}",
+                        },
+                    }
+                )
+                return
+            event_queue.put(
+                {
+                    "type": "editor_sync",
+                    "status": "complete",
+                    "text_id": text_id,
+                    "revision": sync_result["revision"],
+                }
+            )
         try:
             result = client.start_chat_turn(
                 project.path,
@@ -2308,12 +2455,16 @@ def start_turn_run_worker(
                 dynamic_tool_handler=(
                     canvas_dynamic_tool_handler_for_canvas(canvas_id)
                     if chat.surface == "canvas" and canvas_id
+                    else text_dynamic_tool_handler_for_text(text_id)
+                    if chat.surface == "text" and text_id
                     else None
                 ),
-                replace_missing_rollout=chat.surface == "canvas",
+                replace_missing_rollout=chat.surface in {"canvas", "text"},
                 initial_context_items=(
                     canvas_initial_context_items()
                     if chat.surface == "canvas"
+                    else text_initial_context_items()
+                    if chat.surface == "text"
                     else None
                 ),
             )
@@ -2352,6 +2503,7 @@ def start_pending_action_recovery_worker(
 
     def recover_turn() -> None:
         canvas_id = chat_canvas_id(chat)
+        text_id = chat_text_id(chat)
         try:
             result = client.recover_chat_turn(
                 project.path,
@@ -2361,6 +2513,8 @@ def start_pending_action_recovery_worker(
                 dynamic_tool_handler=(
                     canvas_dynamic_tool_handler_for_canvas(canvas_id)
                     if chat.surface == "canvas" and canvas_id
+                    else text_dynamic_tool_handler_for_text(text_id)
+                    if chat.surface == "text" and text_id
                     else None
                 ),
             )
@@ -2417,6 +2571,10 @@ def drain_pending_turn_events(pending: dict) -> None:
                     pending["delivery_confirmed"] = True
             if pending.get("status") == TURN_RUN_STARTING:
                 pending["status"] = TURN_RUN_RUNNING
+        elif event_type == "editor_sync":
+            pending["editor_sync"] = {
+                key: value for key, value in event.items() if key != "type"
+            }
         elif event_type == "result":
             pending["result"] = event.get("result")
 
@@ -3076,6 +3234,7 @@ def handle_turn_result(
     result_thread_id = str(result.get("thread_id") or "")
     if result_thread_id:
         canvas_id = chat_canvas_id(chat)
+        text_id = chat_text_id(chat)
         if (
             chat.surface == "canvas"
             and canvas_id
@@ -3085,6 +3244,15 @@ def handle_turn_result(
                 bind_canvas_to_thread(canvas_id, result_thread_id)
             except (OSError, TypeError, ValueError) as exc:
                 st.error(f"Could not bind the canvas to the Codex thread: {exc}")
+        if (
+            chat.surface == "text"
+            and text_id
+            and chat.thread_id != result_thread_id
+        ):
+            try:
+                bind_text_to_thread(text_id, result_thread_id)
+            except (OSError, TypeError, ValueError) as exc:
+                st.error(f"Could not bind the text to the Codex thread: {exc}")
         chat.thread_id = result_thread_id
         pending["thread_id"] = result_thread_id
         if pending_state_key == "pending_turn":
@@ -3196,6 +3364,8 @@ def queue_user_turn(
     )
     if chat.surface == "canvas":
         thread_overrides["dynamicTools"] = canvas_dynamic_tools()
+    elif chat.surface == "text":
+        thread_overrides["dynamicTools"] = text_dynamic_tools()
     if starting_new_thread:
         remember_new_chat_run_control_defaults(controls)
         ensure_start_run_overrides_message(chat, controls)
@@ -4522,6 +4692,19 @@ def chat_workspace(
     if (
         active_chat
         and (
+            active_chat.surface == "text"
+            or (
+                active_chat.thread_id
+                and text_exists_for_thread(active_chat.thread_id)
+            )
+        )
+    ):
+        active_chat.surface = "text"
+        text_workspace(client, project, active_chat)
+        return
+    if (
+        active_chat
+        and (
             active_chat.surface == "canvas"
             or (
                 active_chat.thread_id
@@ -4538,8 +4721,194 @@ def chat_workspace(
     inject_chat_input_ime_guard()
     inject_chat_input_outbox(active_chat.id if active_chat else "")
     chat_history_panel(client, project, active_chat)
+    render_text_start_action(project, active_chat)
     render_canvas_start_action(project, active_chat)
     chat_composer(client, project, active_chat)
+
+
+def render_text_start_action(
+    project: Project | None,
+    chat: ChatSession | None,
+) -> None:
+    if not project or not chat or chat.thread_id or chat.messages:
+        return
+    with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        with st.container():
+            st.markdown("**Editor**")
+            st.caption("Choose a lightweight text editor or a Markdown document editor.")
+        with st.container(horizontal=True, width="content"):
+            start_text = st.button(
+                "Text",
+                key=f"start_text_editor_{chat.id}",
+                type="secondary",
+                icon=":material/notes:",
+                width="content",
+            )
+            start_document = st.button(
+                "Document",
+                key=f"start_document_editor_{chat.id}",
+                type="secondary",
+                icon=":material/markdown:",
+                width="content",
+            )
+    if not (start_text or start_document):
+        return
+    try:
+        with st.spinner("Starting editor..."):
+            text_chat = materialize_chat(project, chat)
+            text_chat.surface = "text"
+            manifest = initialize_text_draft(
+                text_chat.id,
+                project.path,
+                editor_kind="text" if start_text else "document",
+            )
+            text_chat.text_id = str(manifest["text_id"])
+            replace_chat_id(text_chat, f"text:{text_chat.text_id}")
+    except Exception as exc:
+        st.error(f"Could not start editor: {exc}")
+        return
+    st.session_state.selected_chat_id = text_chat.id
+    st.session_state[PENDING_CHAT_SELECT_KEY] = text_chat.id
+    set_query_chat_id(text_chat.id)
+    st.rerun()
+
+
+def text_workspace(
+    client: CodexClient,
+    project: Project | None,
+    chat: ChatSession,
+) -> None:
+    # Delay component registration until Streamlit has loaded package manifests.
+    from codex_nomad_surface.text_component import nomad_text
+
+    if not project:
+        st.error("Editor requires a project.")
+        return
+
+    manifest = None
+    text_id = chat_text_id(chat)
+    if text_id:
+        manifest = read_text_manifest(text_id)
+    elif chat.thread_id:
+        manifest = text_manifest_for_thread(chat.thread_id)
+        if not manifest:
+            manifest = initialize_text(chat.thread_id, project.path)
+    else:
+        manifest = initialize_text_draft(chat.id, project.path)
+    if not manifest:
+        st.error("Editor manifest was not found.")
+        return
+
+    text_id = str(manifest["text_id"])
+    chat.text_id = text_id
+    manifest, content = load_text_snapshot(text_id)
+    references = text_file_references(text_id)
+    text_format = str(manifest.get("format") or "plain")
+    presentation = str(manifest.get("presentation") or "raw")
+    editor_kind = text_editor_kind(manifest)
+    editor_label = "Document" if editor_kind == "document" else "Text"
+
+    st.html(
+        """
+        <style>
+        [data-testid="stMainBlockContainer"] {
+          max-width: 100% !important;
+          padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
+          padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
+        }
+        .st-key-text-stage, .st-key-text-chat-sidebar {
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
+        .st-key-text-stage > [data-testid="stVerticalBlock"],
+        .st-key-text-chat-sidebar > [data-testid="stVerticalBlock"] {
+          height: 100%; min-height: 0;
+        }
+        .st-key-text-stage [data-testid="stElementContainer"] {
+          height: 100% !important; min-height: 0 !important; overflow: hidden !important;
+        }
+        .st-key-text-chat-sidebar [data-testid="stElementContainer"]:has(#chat-input-bridge),
+        .st-key-text-chat-sidebar [data-testid="stElementContainer"]:has(#chat-input-ime-guard),
+        .st-key-text-chat-sidebar [data-testid="stElementContainer"]:has(#chat-input-outbox) {
+          display: none;
+        }
+        .st-key-text-chat-sidebar [data-testid="stLayoutWrapper"]:has(> .st-key-chat-history-panel) {
+          flex: 1 1 0 !important; height: auto !important; min-height: 0; overflow: hidden !important;
+        }
+        .st-key-text-chat-sidebar .st-key-chat-history-panel {
+          height: 100% !important; min-height: 0; overflow-y: auto !important;
+        }
+        @media (min-width: 641px) {
+          [data-testid="stAppScrollToBottomContainer"]:has(.st-key-text-viewport) { overflow: hidden; }
+          [data-testid="stMainBlockContainer"]:has(.st-key-text-viewport) {
+            height: 100dvh; overflow: hidden; padding-top: 4rem !important; padding-bottom: 0.5rem !important;
+          }
+          [data-testid="stMainBlockContainer"]:has(.st-key-text-viewport) > [data-testid="stVerticalBlock"],
+          .st-key-text-viewport, .st-key-text-viewport > [data-testid="stVerticalBlock"],
+          .st-key-text-workspace, .st-key-text-workspace > [data-testid="stVerticalBlock"],
+          .st-key-text-workspace > [data-testid="stLayoutWrapper"],
+          .st-key-text-workspace [data-testid="stHorizontalBlock"],
+          .st-key-text-workspace [data-testid="stColumn"],
+          .st-key-text-workspace [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
+            height: 100% !important; min-height: 0;
+          }
+          [data-testid="stMainBlockContainer"]:has(.st-key-text-viewport) > [data-testid="stVerticalBlock"] {
+            overflow: hidden;
+          }
+          [data-testid="stMainBlockContainer"]:has(.st-key-text-viewport) > [data-testid="stVerticalBlock"] > [data-testid="stLayoutWrapper"]:has(> .st-key-text-viewport),
+          .st-key-text-viewport [data-testid="stLayoutWrapper"]:has(> .st-key-text-workspace) {
+            flex: 1 1 0 !important; height: auto !important; min-height: 0; overflow: hidden !important;
+          }
+          .st-key-text-workspace [data-testid="stLayoutWrapper"]:has(> .st-key-text-stage),
+          .st-key-text-workspace [data-testid="stLayoutWrapper"]:has(> .st-key-text-chat-sidebar) {
+            flex: 1 1 0 !important; height: 100% !important; min-height: 0; overflow: hidden !important;
+          }
+        }
+        @media (max-width: 640px) {
+          .st-key-text-stage { height: min(68dvh, 680px) !important; min-height: 28rem !important; }
+          .st-key-text-chat-sidebar { height: 24rem !important; min-height: 24rem !important; }
+        }
+        </style>
+        """
+    )
+
+    with st.container(key="text-viewport", gap="xsmall"):
+        with st.expander(f"Editor · {editor_label}", expanded=False):
+            with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+                st.caption(
+                    f"{text_format.title()} · Revision {int(manifest.get('current_revision') or 0)} · {text_id[-8:]}"
+                )
+                st.download_button(
+                    "Download",
+                    data=content,
+                    file_name=str(references["filename"]),
+                    mime=str(references["mime_type"]),
+                    icon=":material/download:",
+                    width="content",
+                )
+        with st.container(key="text-workspace", height="stretch", gap=None):
+            text_column, chat_column = st.columns([7, 3], gap="small")
+            with text_column:
+                with st.container(key="text-stage", height="stretch", gap=None):
+                    nomad_text(
+                        text_id,
+                        initial_text=content,
+                        text_format=text_format,
+                        editor_kind=editor_kind,
+                        presentation=presentation,
+                        revision=int(manifest.get("current_revision") or 0),
+                        websocket_url=f"/api/text/{text_id}/ws",
+                        key=f"nomad_text_{text_id}",
+                        height="stretch",
+                    )
+            with chat_column:
+                with st.container(key="text-chat-sidebar", height="stretch", border=True, gap="xsmall"):
+                    st.markdown("**Chat**")
+                    inject_chat_input_bridge()
+                    inject_chat_input_ime_guard()
+                    inject_chat_input_outbox(chat.id)
+                    canvas_chat_history_panel(client, project, chat)
+                    chat_composer(client, project, chat)
 
 
 def render_canvas_start_action(
@@ -4846,6 +5215,7 @@ def render_recent_threads(server_threads: list[CodexThread]) -> None:
     rows = []
     for project, chat in recent:
         project_name = html.escape(project.name)
+        surface_name = html.escape(chat_surface_label(chat))
         updated_at = html.escape(chat.updated_at or chat.created_at)
         title = html.escape(chat.title)
         href = f"?chat={quote(chat.id, safe='')}"
@@ -4855,6 +5225,7 @@ def render_recent_threads(server_threads: list[CodexThread]) -> None:
               <span class="recent-thread-title">{title}</span>
               <span class="recent-thread-meta">
                 <span class="recent-thread-project">{project_name}</span>
+                <span>{surface_name}</span>
                 <span class="recent-thread-time">{updated_at}</span>
               </span>
               <span class="recent-thread-chevron" aria-hidden="true">&rsaquo;</span>
@@ -5390,7 +5761,10 @@ def main() -> None:
 
 app = App(
     __file__,
-    routes=[WebSocketRoute("/api/canvas/{canvas_id}/ws", canvas_websocket)],
+    routes=[
+        WebSocketRoute("/api/canvas/{canvas_id}/ws", canvas_websocket),
+        WebSocketRoute("/api/text/{text_id}/ws", text_websocket),
+    ],
     middleware=[Middleware(FileContentMiddleware)],
 )
 

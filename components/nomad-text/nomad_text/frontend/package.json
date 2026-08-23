@@ -1,0 +1,31 @@
+{
+  "name": "nomad_text",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "build": "npm run clean && npm run typecheck && npm run build:frontend:production",
+    "build:frontend:production": "cross-env NODE_ENV=production vite build",
+    "clean": "rimraf build",
+    "dev": "cross-env NODE_ENV=development vite build --watch",
+    "test:protocol": "node scripts/test-text-protocol.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/lang-markdown": "^6.3.3",
+    "@codemirror/language": "^6.11.3",
+    "@codemirror/search": "^6.5.11",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.1",
+    "@lezer/highlight": "^1.2.1",
+    "@streamlit/component-v2-lib": "^0.2.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "rimraf": "^6.1.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10"
+  }
+}
