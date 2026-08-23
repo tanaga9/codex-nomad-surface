@@ -7,6 +7,7 @@ import {
   EditorView,
   highlightActiveLine,
   keymap,
+  lineNumbers,
   placeholder,
 } from "@codemirror/view";
 
@@ -41,7 +42,9 @@ const assistance = new Compartment();
 const editability = new Compartment();
 
 const languageExtensions = (format: TextFormat): Extension[] =>
-  format === "markdown" ? [markdown(), syntaxHighlighting(defaultHighlightStyle)] : [];
+  format === "markdown"
+    ? [markdown(), syntaxHighlighting(defaultHighlightStyle)]
+    : [lineNumbers()];
 
 const assistanceExtensions = (
   format: TextFormat,
