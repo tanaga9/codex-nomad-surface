@@ -377,7 +377,7 @@ def test_text_broker_disconnect_fails_pending_request_immediately():
         broker_call = asyncio.create_task(
             asyncio.to_thread(broker.call, "text-disconnect", "sync_snapshot")
         )
-        request = await asyncio.to_thread(connection.outgoing.get)
+        request = await connection.outgoing.get()
         assert request["request"]["method"] == "sync_snapshot"
 
         broker.unregister("text-disconnect", connection)
@@ -397,7 +397,7 @@ def test_text_broker_replacement_fails_only_previous_connection_requests():
         previous_call = asyncio.create_task(
             asyncio.to_thread(broker.call, "text-replaced", "read", {"scope": "all"})
         )
-        previous_request = await asyncio.to_thread(previous.outgoing.get)
+        previous_request = await previous.outgoing.get()
 
         current = broker.register("text-replaced")
 
@@ -411,7 +411,7 @@ def test_text_broker_replacement_fails_only_previous_connection_requests():
         current_call = asyncio.create_task(
             asyncio.to_thread(broker.call, "text-replaced", "read", {"scope": "all"})
         )
-        current_request = await asyncio.to_thread(current.outgoing.get)
+        current_request = await current.outgoing.get()
         broker.resolve(
             current_request["request"]["id"],
             {"ok": True, "payload": {"live": True}},
@@ -432,7 +432,7 @@ def test_text_broker_replacement_allows_claimed_response_to_finish():
         previous_call = asyncio.create_task(
             asyncio.to_thread(broker.call, "text-processing", "apply_patch")
         )
-        request = await asyncio.to_thread(previous.outgoing.get)
+        request = await previous.outgoing.get()
         request_id = request["request"]["id"]
 
         assert broker.claim_response(request_id, previous) == ("apply_patch", {})
@@ -457,18 +457,21 @@ def test_text_broker_replacement_allows_claimed_response_to_finish():
 
 
 def test_text_session_is_released_after_waiting_connection_disappears():
-    broker = text_runtime.TextBroker()
-    previous = broker.register("text-session-cleanup")
-    assert broker.activate("text-session-cleanup", previous)
-    operation = broker.begin_operation("text-session-cleanup", previous)
-    assert operation is not None
+    async def scenario() -> None:
+        broker = text_runtime.TextBroker()
+        previous = broker.register("text-session-cleanup")
+        assert broker.activate("text-session-cleanup", previous)
+        operation = broker.begin_operation("text-session-cleanup", previous)
+        assert operation is not None
 
-    current = broker.register("text-session-cleanup")
-    broker.unregister("text-session-cleanup", current)
-    assert "text-session-cleanup" in broker._sessions
+        current = broker.register("text-session-cleanup")
+        broker.unregister("text-session-cleanup", current)
+        assert "text-session-cleanup" in broker._sessions
 
-    broker.finish_operation(operation)
-    assert "text-session-cleanup" not in broker._sessions
+        broker.finish_operation(operation)
+        assert "text-session-cleanup" not in broker._sessions
+
+    asyncio.run(scenario())
 
 
 def test_text_broker_timeout_does_not_abandon_claimed_response(monkeypatch):
@@ -480,7 +483,7 @@ def test_text_broker_timeout_does_not_abandon_claimed_response(monkeypatch):
         broker_call = asyncio.create_task(
             asyncio.to_thread(broker.call, "text-slow-processing", "apply_patch")
         )
-        request = await asyncio.to_thread(connection.outgoing.get)
+        request = await connection.outgoing.get()
         request_id = request["request"]["id"]
         assert broker.claim_response(request_id, connection) == ("apply_patch", {})
 

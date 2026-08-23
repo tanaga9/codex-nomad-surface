@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import queue
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -10,6 +9,7 @@ from typing import Any, Callable
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from codex_nomad_surface.async_outbound import AsyncOutboundQueue
 from codex_nomad_surface.http_gate import (
     auth_cookie_from_scope,
     auth_required,
@@ -74,7 +74,9 @@ class TextSession:
 @dataclass
 class TextConnection:
     session: TextSession
-    outgoing: queue.Queue[dict[str, Any] | None] = field(default_factory=queue.Queue)
+    outgoing: AsyncOutboundQueue[dict[str, Any] | None] = field(
+        default_factory=AsyncOutboundQueue
+    )
     retired: asyncio.Event = field(default_factory=asyncio.Event)
     active: bool = False
 
@@ -244,7 +246,7 @@ class TextBroker:
                 arguments=dict(arguments or {}),
             )
             self._pending[request_id] = pending
-            connection.outgoing.put(
+            queued = connection.outgoing.put(
                 {
                     "type": "request",
                     "request": {
@@ -254,6 +256,9 @@ class TextBroker:
                     },
                 }
             )
+            if not queued:
+                self._pending.pop(request_id, None)
+                raise RuntimeError("text_unavailable")
         if not pending.event.wait(TEXT_TOOL_TIMEOUT_SECONDS):
             wait_for_processing = False
             with self._lock:
@@ -306,7 +311,7 @@ TEXT_BROKER = TextBroker()
 
 async def _text_sender(websocket: WebSocket, connection: TextConnection) -> None:
     while True:
-        message = await asyncio.to_thread(connection.outgoing.get)
+        message = await connection.outgoing.get()
         if message is None:
             if connection.retired.is_set():
                 try:

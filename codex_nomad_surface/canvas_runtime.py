@@ -5,7 +5,6 @@ import base64
 import binascii
 import hashlib
 import json
-import queue
 import re
 import threading
 import uuid
@@ -14,6 +13,7 @@ from typing import Any, Callable
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from codex_nomad_surface.async_outbound import AsyncOutboundQueue
 from codex_nomad_surface.canvas_store import (
     CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS,
     CanvasCommandReceiptError,
@@ -213,7 +213,9 @@ class PendingCanvasRequest:
 
 @dataclass
 class CanvasConnection:
-    outgoing: queue.Queue[dict[str, Any] | None] = field(default_factory=queue.Queue)
+    outgoing: AsyncOutboundQueue[dict[str, Any] | None] = field(
+        default_factory=AsyncOutboundQueue
+    )
     retired: threading.Event = field(default_factory=threading.Event)
 
 
@@ -258,7 +260,7 @@ class CanvasBroker:
             if not connection:
                 raise RuntimeError("canvas_unavailable")
             self._pending[request_id] = pending
-            connection.outgoing.put(
+            queued = connection.outgoing.put(
                 {
                     "type": "request",
                     "request": {
@@ -268,6 +270,9 @@ class CanvasBroker:
                     },
                 }
             )
+            if not queued:
+                self._pending.pop(request_id, None)
+                raise RuntimeError("canvas_unavailable")
         if not pending.event.wait(CANVAS_TOOL_TIMEOUT_SECONDS):
             with self._lock:
                 self._pending.pop(request_id, None)
@@ -292,7 +297,7 @@ CANVAS_BROKER = CanvasBroker()
 
 async def _canvas_sender(websocket: WebSocket, connection: CanvasConnection) -> None:
     while True:
-        message = await asyncio.to_thread(connection.outgoing.get)
+        message = await connection.outgoing.get()
         if message is None:
             if connection.retired.is_set():
                 try:
