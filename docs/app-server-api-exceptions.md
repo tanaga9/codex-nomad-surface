@@ -29,6 +29,15 @@ carry Codex calls but do not store or edit tldraw documents. Keep this layer
 small, continue using the current Dynamic Tools API directly, and do not add a
 legacy Codex transport fallback.
 
+`EX-011` — Text and Document persistence and live editor bridge: CodeMirror
+content and revisions are stored as local files, and the live editor is
+brokered over an authenticated same-origin WebSocket. Before a user turn is
+sent, Nomad Surface persists the browser's current snapshot; if that sync
+cannot be confirmed, the turn is not delivered. Text content is Nomad Surface
+product state. App Server Dynamic Tools carry Codex calls but do not store the
+managed document. Keep the bridge fail-closed and do not add a legacy Codex
+transport fallback.
+
 | ID       | Area                                     | Mechanism                                                                                         | Why It Exists                                                                                         | Direction                                                                                                      |
 | -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `EX-001` | Project discovery from archived sessions | Scans `~/.codex/sessions/**/*.jsonl` and merges discovered `cwd` values into the project list.    | Supplements `thread/list` project discovery with local session archives.                              | Prefer App Server thread/project data only. Remove this if App Server coverage is sufficient.                  |

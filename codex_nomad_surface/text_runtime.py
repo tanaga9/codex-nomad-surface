@@ -15,6 +15,7 @@ from codex_nomad_surface.http_gate import (
     auth_required,
     valid_auth_session_token,
 )
+from codex_nomad_surface.text_authoring import scope_text_snapshot
 from codex_nomad_surface.text_store import (
     TextRevisionConflict,
     load_text,
@@ -46,6 +47,7 @@ TEXT_DEVELOPER_INSTRUCTIONS = (
 @dataclass
 class PendingTextRequest:
     method: str
+    arguments: dict[str, Any]
     event: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
 
@@ -86,7 +88,7 @@ class TextBroker:
         self, text_id: str, method: str, arguments: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
-        pending = PendingTextRequest(method=method)
+        pending = PendingTextRequest(method=method, arguments=arguments or {})
         with self._lock:
             connection = self._connections.get(text_id)
             if not connection:
@@ -119,10 +121,10 @@ class TextBroker:
         with self._lock:
             return request_id in self._pending
 
-    def request_method(self, request_id: str) -> str | None:
+    def request_context(self, request_id: str) -> tuple[str, dict[str, Any]] | None:
         with self._lock:
             pending = self._pending.get(request_id)
-            return pending.method if pending else None
+            return (pending.method, pending.arguments) if pending else None
 
 
 TEXT_BROKER = TextBroker()
@@ -241,12 +243,52 @@ async def text_websocket(websocket: WebSocket) -> None:
                     }
                 )
                 continue
-            request_method = TEXT_BROKER.request_method(request_id)
+            request_context = TEXT_BROKER.request_context(request_id)
+            if request_context is None:
+                continue
+            request_method, request_arguments = request_context
             result = {
                 "ok": bool(message.get("ok")),
                 "error": str(message.get("error") or ""),
             }
             payload = message.get("payload")
+            if request_method == "read" and result["ok"]:
+                if not (
+                    isinstance(payload, dict)
+                    and isinstance(payload.get("content"), str)
+                    and type(payload.get("revision")) is int
+                ):
+                    result = {"ok": False, "error": "text_invalid_response"}
+                    payload = None
+                else:
+                    try:
+                        manifest = read_text_manifest(text_id)
+                        if not manifest:
+                            raise FileNotFoundError("text_not_found")
+                        editor_kind = text_editor_kind(manifest)
+                        scope, scoped_text = scope_text_snapshot(
+                            content=payload["content"],
+                            arguments=request_arguments,
+                            editor_kind=editor_kind,
+                            selection=(
+                                payload.get("selection")
+                                if isinstance(payload.get("selection"), dict)
+                                else None
+                            ),
+                            max_chars=TEXT_READ_MAX_CHARS,
+                        )
+                        payload = {
+                            "text_id": text_id,
+                            "editor_kind": editor_kind,
+                            "format": manifest["format"],
+                            "revision": payload["revision"],
+                            "scope": scope,
+                            "text": scoped_text,
+                            "live": True,
+                        }
+                    except Exception as exc:
+                        result = {"ok": False, "error": str(exc)}
+                        payload = None
             if request_method == "apply_patch" and result["ok"] and not (
                 isinstance(payload, dict) and isinstance(payload.get("content"), str)
             ):
@@ -289,7 +331,7 @@ async def text_websocket(websocket: WebSocket) -> None:
                     except Exception as exc:
                         result = {"ok": False, "error": f"save_failed: {exc}"}
                         payload = None
-            if request_method == "export_snapshot" and result["ok"]:
+            if request_method in {"export_snapshot", "sync_snapshot"} and result["ok"]:
                 if not (
                     isinstance(payload, dict)
                     and isinstance(payload.get("text"), str)
@@ -337,7 +379,11 @@ async def text_websocket(websocket: WebSocket) -> None:
                     except Exception as exc:
                         result = {"ok": False, "error": f"save_failed: {exc}"}
                         payload = None
-            if request_method in {"apply_patch", "export_snapshot"} and not result["ok"]:
+            if request_method in {
+                "apply_patch",
+                "export_snapshot",
+                "sync_snapshot",
+            } and not result["ok"]:
                 connection.outgoing.put(
                     {
                         "type": "reject",
@@ -358,7 +404,7 @@ async def text_websocket(websocket: WebSocket) -> None:
             if isinstance(payload, dict):
                 payload.pop("content", None)
                 payload.pop("base_revision", None)
-                if request_method == "export_snapshot":
+                if request_method in {"export_snapshot", "sync_snapshot"}:
                     payload.pop("text", None)
                 result["payload"] = payload
             TEXT_BROKER.resolve(request_id, result)
@@ -476,52 +522,32 @@ def _content_result(success: bool, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def sync_text_for_agent(text_id: str) -> dict[str, Any]:
+    """Persist the browser's current text before delivering a user turn."""
+    result = TEXT_BROKER.call(text_id, "sync_snapshot")
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or "text_sync_failed")
+    payload = result.get("payload")
+    if not isinstance(payload, dict) or type(payload.get("revision")) is not int:
+        raise RuntimeError("text_invalid_response")
+    return payload
+
+
 def _offline_read(text_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     manifest = read_text_manifest(text_id)
     if not manifest:
         raise FileNotFoundError("Text manifest was not found.")
     content = load_text(text_id)
-    scope = str(arguments.get("scope") or "all")
-    lines = content.splitlines(keepends=True)
-    result_text = content
-    result_scope: dict[str, Any] = {"type": scope}
-    if scope == "selection":
-        raise RuntimeError("selection_unavailable")
-    if scope == "lines":
-        start = max(1, int(arguments.get("from_line") or 1))
-        end = max(start, int(arguments.get("to_line") or start))
-        result_text = "".join(lines[start - 1 : end])
-        result_scope.update({"from_line": start, "to_line": min(end, len(lines))})
-    elif scope == "outline":
-        result_text = "".join(
-            line for line in lines if line.lstrip().startswith("#")
-        )
-    elif scope == "section":
-        heading = str(arguments.get("heading") or "").strip().lstrip("#").strip()
-        start = next(
-            (index for index, line in enumerate(lines) if line.lstrip("# ").strip() == heading),
-            -1,
-        )
-        if start < 0:
-            raise ValueError("section_not_found")
-        level = len(lines[start]) - len(lines[start].lstrip("#"))
-        end = next(
-            (
-                index
-                for index in range(start + 1, len(lines))
-                if lines[index].startswith("#")
-                and len(lines[index]) - len(lines[index].lstrip("#")) <= level
-            ),
-            len(lines),
-        )
-        result_text = "".join(lines[start:end])
-        result_scope.update({"heading": heading, "from_line": start + 1, "to_line": end})
-    if len(result_text) > TEXT_READ_MAX_CHARS:
-        result_text = result_text[:TEXT_READ_MAX_CHARS]
-        result_scope["truncated"] = True
+    editor_kind = text_editor_kind(manifest)
+    result_scope, result_text = scope_text_snapshot(
+        content=content,
+        arguments=arguments,
+        editor_kind=editor_kind,
+        max_chars=TEXT_READ_MAX_CHARS,
+    )
     return {
         "text_id": text_id,
-        "editor_kind": text_editor_kind(manifest),
+        "editor_kind": editor_kind,
         "format": manifest["format"],
         "revision": int(manifest.get("current_revision") or 0),
         "scope": result_scope,

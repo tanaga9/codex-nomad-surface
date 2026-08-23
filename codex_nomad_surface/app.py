@@ -44,6 +44,7 @@ from codex_nomad_surface.canvas_store import (
     read_canvas_manifest,
 )
 from codex_nomad_surface.text_runtime import (
+    sync_text_for_agent,
     text_dynamic_tool_handler_for_text,
     text_dynamic_tools,
     text_initial_context_items,
@@ -2292,6 +2293,9 @@ def render_pending_turn(
 def pending_turn_wait_message(pending: dict) -> str:
     if pending.get("interrupt_requested"):
         return "Cancellation requested..."
+    editor_sync = pending.get("editor_sync")
+    if isinstance(editor_sync, dict) and editor_sync.get("status") == "started":
+        return "Syncing editor..."
     status = str(pending.get("status") or TURN_RUN_RUNNING)
     if status == TURN_RUN_STARTING:
         return "Starting turn..."
@@ -2402,6 +2406,41 @@ def start_turn_run_worker(
     def run_turn() -> None:
         canvas_id = chat_canvas_id(chat)
         text_id = chat_text_id(chat)
+        if chat.surface == "text":
+            event_queue.put(
+                {"type": "editor_sync", "status": "started", "text_id": text_id}
+            )
+            try:
+                if not text_id:
+                    raise RuntimeError("text_not_found")
+                sync_result = sync_text_for_agent(text_id)
+            except Exception as exc:
+                event_queue.put(
+                    {
+                        "type": "editor_sync",
+                        "status": "failed",
+                        "text_id": text_id,
+                        "error": str(exc),
+                    }
+                )
+                event_queue.put(
+                    {
+                        "type": "result",
+                        "result": {
+                            "ok": False,
+                            "output": f"[editor sync error] {exc}",
+                        },
+                    }
+                )
+                return
+            event_queue.put(
+                {
+                    "type": "editor_sync",
+                    "status": "complete",
+                    "text_id": text_id,
+                    "revision": sync_result["revision"],
+                }
+            )
         try:
             result = client.start_chat_turn(
                 project.path,
@@ -2532,6 +2571,10 @@ def drain_pending_turn_events(pending: dict) -> None:
                     pending["delivery_confirmed"] = True
             if pending.get("status") == TURN_RUN_STARTING:
                 pending["status"] = TURN_RUN_RUNNING
+        elif event_type == "editor_sync":
+            pending["editor_sync"] = {
+                key: value for key, value in event.items() if key != "type"
+            }
         elif event_type == "result":
             pending["result"] = event.get("result")
 

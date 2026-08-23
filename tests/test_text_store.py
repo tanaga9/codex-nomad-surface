@@ -187,7 +187,16 @@ def test_text_dynamic_tool_schemas_are_valid_and_offline_read_works(isolated_tex
     payload = json.loads(result["contentItems"][0]["text"])
 
     assert result["success"] is True
-    assert payload["text"] == "# Heading\n"
+    assert payload["text"] == "# Heading"
+    assert payload["scope"]["headings"] == [
+        {
+            "text": "Heading",
+            "level": 1,
+            "line": 1,
+            "marker_line": 1,
+            "style": "atx",
+        }
+    ]
     assert payload["revision"] == 1
     assert TEXT_DEVELOPER_INSTRUCTIONS.startswith("This thread uses")
     assert text_initial_context_items() == [
@@ -282,6 +291,60 @@ def test_ai_patch_is_saved_before_commit_is_sent(isolated_text_root, monkeypatch
         assert text_store.load_text(text_id) == "after"
         assert commit["revision"] == 2
         assert commit["content"] == "after"
+
+        await websocket.incoming.put(WebSocketDisconnect())
+        await asyncio.wait_for(websocket_task, timeout=2)
+
+    asyncio.run(scenario())
+
+
+def test_live_read_scopes_browser_snapshot_on_server(isolated_text_root, monkeypatch):
+    async def scenario() -> None:
+        manifest = text_store.initialize_text(
+            "thread-live-read", editor_kind="document"
+        )
+        text_id = manifest["text_id"]
+        broker = text_runtime.TextBroker()
+        monkeypatch.setattr(text_runtime, "TEXT_BROKER", broker)
+        monkeypatch.setattr(text_runtime, "auth_required", lambda: False)
+        websocket = _FakeTextWebSocket(text_id)
+        websocket_task = asyncio.create_task(text_runtime.text_websocket(websocket))
+        await _wait_for_message(websocket, "sync")
+
+        broker_call = asyncio.create_task(
+            asyncio.to_thread(
+                broker.call,
+                text_id,
+                "read",
+                {"scope": "section", "heading": "Live"},
+            )
+        )
+        request = await _wait_for_message(websocket, "request")
+        await websocket.incoming.put(
+            {
+                "type": "response",
+                "id": request["request"]["id"],
+                "ok": True,
+                "payload": {
+                    "content": "# Live\nunsaved\n# Next\nbody",
+                    "revision": 0,
+                    "selection": {
+                        "selection_kind": "caret",
+                        "anchor": {"line": 2, "column": 1},
+                        "head": {"line": 2, "column": 1},
+                        "from_line": 2,
+                        "to_line": 2,
+                        "text": "",
+                    },
+                },
+            }
+        )
+
+        result = await asyncio.wait_for(broker_call, timeout=2)
+        assert result["ok"] is True
+        assert result["payload"]["text"] == "# Live\nunsaved\n"
+        assert result["payload"]["scope"]["to_line"] == 2
+        assert result["payload"]["live"] is True
 
         await websocket.incoming.put(WebSocketDisconnect())
         await asyncio.wait_for(websocket_task, timeout=2)
@@ -447,6 +510,45 @@ def test_export_snapshot_uses_canonical_revision_when_content_is_already_saved(
         assert commit["revision"] == 1
         assert commit["content"] == "already saved"
         assert text_store.read_text_manifest(text_id)["current_revision"] == 1
+
+        await websocket.incoming.put(WebSocketDisconnect())
+        await asyncio.wait_for(websocket_task, timeout=2)
+
+    asyncio.run(scenario())
+
+
+def test_sync_snapshot_persists_current_browser_text_before_agent_send(
+    isolated_text_root, monkeypatch
+):
+    async def scenario() -> None:
+        manifest = text_store.initialize_text("thread-sync-snapshot")
+        text_id = manifest["text_id"]
+        broker = text_runtime.TextBroker()
+        monkeypatch.setattr(text_runtime, "TEXT_BROKER", broker)
+        monkeypatch.setattr(text_runtime, "auth_required", lambda: False)
+        websocket = _FakeTextWebSocket(text_id)
+        websocket_task = asyncio.create_task(text_runtime.text_websocket(websocket))
+        await _wait_for_message(websocket, "sync")
+
+        broker_call = asyncio.create_task(
+            asyncio.to_thread(text_runtime.sync_text_for_agent, text_id)
+        )
+        request = await _wait_for_message(websocket, "request")
+        assert request["request"]["method"] == "sync_snapshot"
+        await websocket.incoming.put(
+            {
+                "type": "response",
+                "id": request["request"]["id"],
+                "ok": True,
+                "payload": {"text": "latest before send", "revision": 0},
+            }
+        )
+
+        result = await asyncio.wait_for(broker_call, timeout=2)
+        commit = await _wait_for_message(websocket, "snapshot_commit")
+        assert result == {"revision": 1}
+        assert commit["content"] == "latest before send"
+        assert text_store.load_text(text_id) == "latest before send"
 
         await websocket.incoming.put(WebSocketDisconnect())
         await asyncio.wait_for(websocket_task, timeout=2)

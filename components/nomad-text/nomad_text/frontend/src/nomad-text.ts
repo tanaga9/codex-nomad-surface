@@ -39,7 +39,6 @@ type RequestMessage = {
 const language = new Compartment();
 const assistance = new Compartment();
 const editability = new Compartment();
-const TEXT_READ_MAX_CHARS = 80_000;
 
 const languageExtensions = (format: TextFormat): Extension[] =>
   format === "markdown" ? [markdown(), syntaxHighlighting(defaultHighlightStyle)] : [];
@@ -70,7 +69,10 @@ export class NomadText {
     string,
     { baseRevision: number; before: string; after: string }
   >();
-  private snapshotRequests = new Map<string, string>();
+  private snapshotRequests = new Map<
+    string,
+    { content: string; purpose: "export" | "sync" }
+  >();
 
   constructor(root: HTMLElement, data: NomadTextData) {
     this.root = root;
@@ -304,7 +306,9 @@ export class NomadText {
         method === "read"
           ? this.read(args)
           : method === "export_snapshot"
-            ? this.exportSnapshot(id)
+            ? this.prepareSnapshot(id, "export")
+            : method === "sync_snapshot"
+              ? this.prepareSnapshot(id, "sync")
             : method === "apply_patch"
               ? this.preparePatch(id, args)
               : (() => { throw new Error("unsupported_method"); })();
@@ -314,64 +318,43 @@ export class NomadText {
     }
   }
 
-  private read(args: Record<string, unknown>): Record<string, unknown> {
+  private read(_args: Record<string, unknown>): Record<string, unknown> {
     if (this.conflict) throw new Error("save_conflict");
-    const scope = String(args.scope || "all");
     const document = this.view.state.doc;
-    let text = document.toString();
-    let scopeResult: Record<string, unknown> = { type: scope };
-    if (scope === "selection") {
-      const range = this.view.state.selection.main;
-      text = document.sliceString(range.from, range.to);
-      scopeResult = {
-        type: scope,
+    const range = this.view.state.selection.main;
+    const point = (position: number) => {
+      const line = document.lineAt(position);
+      return {
+        line: line.number,
+        column: Array.from(document.sliceString(line.from, position)).length + 1,
+      };
+    };
+    return {
+      revision: this.revision,
+      content: document.toString(),
+      selection: {
+        selection_kind: range.empty ? "caret" : "range",
+        column_unit: "unicode_code_point",
+        anchor: point(range.anchor),
+        head: point(range.head),
         from_line: document.lineAt(range.from).number,
         to_line: document.lineAt(range.to).number,
-      };
-    } else if (scope === "lines") {
-      const fromLine = Math.max(1, Number(args.from_line || 1));
-      const toLine = Math.min(document.lines, Math.max(fromLine, Number(args.to_line || fromLine)));
-      text = document.sliceString(document.line(fromLine).from, document.line(toLine).to);
-      scopeResult = { type: scope, from_line: fromLine, to_line: toLine };
-    } else if (scope === "outline") {
-      text = document.toString().split("\n").filter((line) => /^#{1,6}\s/.test(line)).join("\n");
-    } else if (scope === "section") {
-      const lines = document.toString().split("\n");
-      const heading = String(args.heading || "").trim().replace(/^#+\s*/, "");
-      const start = lines.findIndex((line) => line.replace(/^#+\s*/, "").trim() === heading);
-      if (start < 0 || !/^#{1,6}\s/.test(lines[start])) throw new Error("section_not_found");
-      const level = /^#+/.exec(lines[start])?.[0].length || 1;
-      let end = lines.length;
-      for (let index = start + 1; index < lines.length; index += 1) {
-        const marker = /^#+/.exec(lines[index]);
-        if (marker && marker[0].length <= level) { end = index; break; }
-      }
-      text = lines.slice(start, end).join("\n");
-      scopeResult = { type: scope, heading, from_line: start + 1, to_line: end };
-    }
-    if (text.length > TEXT_READ_MAX_CHARS) {
-      text = text.slice(0, TEXT_READ_MAX_CHARS);
-      scopeResult.truncated = true;
-    }
-    return {
-      text_id: this.data.textId,
-      editor_kind: this.data.editorKind,
-      format: this.data.format,
-      revision: this.revision,
-      scope: scopeResult,
-      text,
-      live: true,
+        text: document.sliceString(range.from, range.to),
+      },
     };
   }
 
-  private exportSnapshot(id: string): Record<string, unknown> {
+  private prepareSnapshot(
+    id: string,
+    purpose: "export" | "sync",
+  ): Record<string, unknown> {
     if (this.conflict) throw new Error("save_conflict");
     if (this.preparedPatches.size > 0) throw new Error("apply_in_progress");
-    if (this.snapshotRequests.size > 0) throw new Error("export_in_progress");
+    if (this.snapshotRequests.size > 0) throw new Error("snapshot_in_progress");
     const content = this.view.state.doc.toString();
-    this.snapshotRequests.set(id, content);
+    this.snapshotRequests.set(id, { content, purpose });
     this.setEditable(false);
-    this.status.textContent = "Exporting…";
+    this.status.textContent = purpose === "sync" ? "Syncing…" : "Exporting…";
     return {
       text: content,
       revision: this.revision,
@@ -381,7 +364,7 @@ export class NomadText {
   private preparePatch(id: string, args: Record<string, unknown>): Record<string, unknown> {
     if (this.conflict) throw new Error("save_conflict");
     if (this.preparedPatches.size > 0) throw new Error("apply_in_progress");
-    if (this.snapshotRequests.size > 0) throw new Error("export_in_progress");
+    if (this.snapshotRequests.size > 0) throw new Error("snapshot_in_progress");
     const baseRevision = Number(args.base_revision);
     if (baseRevision !== this.revision) throw new Error("revision_conflict");
     const operations = args.operations;
@@ -427,8 +410,8 @@ export class NomadText {
     this.refreshOperationEditability();
     if (
       snapshot === undefined ||
-      snapshot !== content ||
-      snapshot !== this.view.state.doc.toString()
+      snapshot.content !== content ||
+      snapshot.content !== this.view.state.doc.toString()
     ) {
       this.enterConflict(revision, content);
       return;
@@ -466,6 +449,7 @@ export class NomadText {
     content?: string,
   ) {
     const wasPatch = this.preparedPatches.delete(id);
+    const snapshot = this.snapshotRequests.get(id);
     const wasSnapshot = this.snapshotRequests.delete(id);
     this.refreshOperationEditability();
     if (typeof revision === "number" && typeof content === "string") {
@@ -476,7 +460,7 @@ export class NomadText {
       error === "revision_conflict"
         ? "Save conflict"
         : wasSnapshot
-          ? "Export failed"
+          ? snapshot?.purpose === "sync" ? "Sync failed" : "Export failed"
           : wasPatch
             ? "AI change failed"
             : "Request failed";
