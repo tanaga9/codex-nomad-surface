@@ -21,6 +21,10 @@ dependencies = [
 name = "nomad_canvas"
 asset_dir = "ui_components/generated/nomad_canvas"
 
+[[tool.streamlit.component.components]]
+name = "nomad_text"
+asset_dir = "ui_components/generated/nomad_text"
+
 [project.optional-dependencies]
 dev = [
     "build>=1.2",

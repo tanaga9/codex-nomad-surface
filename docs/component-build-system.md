@@ -2,7 +2,7 @@
 
 ## Decision
 
-Frontend components such as `nomad-canvas` and future `nomad-editor` remain
+Frontend components such as `nomad-canvas` and `nomad-text` remain
 internal to Codex Nomad Surface. They are developed in separate source
 directories but distributed together in one Python package.
 
