@@ -844,6 +844,7 @@ def test_canvas_dynamic_tool_manifest_uses_namespace_shape():
     ]
     assert operation_names == [
         "create",
+        "create_image",
         "draw",
         "draw",
         "draw",

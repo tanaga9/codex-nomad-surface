@@ -3,21 +3,32 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import re
 import threading
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from codex_nomad_surface.async_outbound import AsyncOutboundQueue
+from codex_nomad_surface.canvas_assets import (
+    CANVAS_IMAGE_SOURCE_MAX_BYTES,
+    CanvasImageError,
+    normalize_and_save_canvas_image,
+)
 from codex_nomad_surface.canvas_store import (
     CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS,
     CanvasCommandReceiptError,
     canvas_exists,
+    canvas_asset_path,
     canvas_file_references,
     canvas_id_for_thread,
     canvas_visual_preview_data_url,
@@ -46,6 +57,8 @@ CANVAS_READ_MIN_IMAGE_DIMENSION = 64
 CANVAS_READ_MAX_IMAGE_DIMENSION = 2048
 CANVAS_READ_MAX_TEXT_LENGTH = 2_000
 CANVAS_READ_MAX_FULL_VALUE_LENGTH = 20_000
+CANVAS_PATCH_MAX_IMAGE_OPERATIONS = 8
+CANVAS_ASSET_UPLOAD_MAX_CONCURRENCY = 2
 CANVAS_PREVIEW_IMAGE_PREFIXES = {
     "data:image/webp;base64,": "image/webp",
     "data:image/jpeg;base64,": "image/jpeg",
@@ -53,6 +66,9 @@ CANVAS_PREVIEW_IMAGE_PREFIXES = {
 }
 _CANVAS_APPLY_LOCKS: dict[str, threading.Lock] = {}
 _CANVAS_APPLY_LOCKS_GUARD = threading.Lock()
+_CANVAS_ASSET_UPLOAD_SLOTS = threading.BoundedSemaphore(
+    CANVAS_ASSET_UPLOAD_MAX_CONCURRENCY
+)
 CANVAS_DEVELOPER_INSTRUCTIONS = (
     "This thread uses the Nomad Surface embedded Canvas. When a request concerns "
     "the canvas, use the canvas dynamic tools as the primary interface. Read the "
@@ -72,6 +88,11 @@ CANVAS_DEVELOPER_INSTRUCTIONS = (
     "semantic success and address them before claiming the diagram is complete. "
     "For freehand marks, highlights, and polylines, use the draw operation with "
     "ordinary absolute Canvas points; do not encode tldraw segments yourself. "
+    "To place a generated or workspace image, use the create_image operation "
+    "with its path field set to an absolute path or a project-relative path. Do "
+    "not send raw tldraw image records, props, asset IDs, or src fields. Canvas "
+    "will optimize the file to a bounded static WebP or reject it without "
+    "changing the scene. "
     "Use group, reparent, reorder, and layout operations for structural edits "
     "instead of simulating them with repeated raw coordinate changes. "
     "When the user asks to save or export the current diagram as Obsidian "
@@ -252,6 +273,7 @@ class CanvasBroker:
         arguments: dict[str, Any] | None = None,
         *,
         context: dict[str, Any] | None = None,
+        status_arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         pending = PendingCanvasRequest(context=context or {})
@@ -260,8 +282,7 @@ class CanvasBroker:
             if not connection:
                 raise RuntimeError("canvas_unavailable")
             self._pending[request_id] = pending
-            queued = connection.outgoing.put(
-                {
+            request = {
                     "type": "request",
                     "request": {
                         "id": request_id,
@@ -269,7 +290,9 @@ class CanvasBroker:
                         "arguments": arguments or {},
                     },
                 }
-            )
+            if status_arguments is not None:
+                request["request"]["status_arguments"] = status_arguments
+            queued = connection.outgoing.put(request)
             if not queued:
                 self._pending.pop(request_id, None)
                 raise RuntimeError("canvas_unavailable")
@@ -473,6 +496,7 @@ async def canvas_websocket(websocket: WebSocket) -> None:
                         "refs": payload.get("refs", {}),
                         "warnings": payload.get("warnings", []),
                         "semantic_success": payload.get("semantic_success", True),
+                        "optimized_images": payload.get("optimized_images", []),
                         **canvas_file_references(canvas_id),
                     }
                 result["payload"] = payload
@@ -491,6 +515,111 @@ async def canvas_websocket(websocket: WebSocket) -> None:
     finally:
         CANVAS_BROKER.unregister(canvas_id, connection)
         sender.cancel()
+
+
+def _canvas_http_authorized(scope: dict[str, Any]) -> bool:
+    return not auth_required() or valid_auth_session_token(
+        auth_cookie_from_scope(scope)
+    )
+
+
+async def canvas_asset_upload(request: Request) -> Response:
+    if not _canvas_http_authorized(request.scope):
+        return JSONResponse({"error": "authentication_required"}, status_code=401)
+    canvas_id = str(request.path_params.get("canvas_id") or "")
+    if not canvas_exists(canvas_id):
+        return JSONResponse({"error": "canvas_not_found"}, status_code=404)
+
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+    if content_type not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        return JSONResponse(
+            {
+                "error": "image_type_unsupported",
+                "message": "Canvas accepts static JPEG, PNG, and WebP images only.",
+            },
+            status_code=415,
+        )
+    try:
+        declared_size = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return JSONResponse({"error": "invalid_content_length"}, status_code=400)
+    if declared_size > CANVAS_IMAGE_SOURCE_MAX_BYTES:
+        return JSONResponse(
+            {
+                "error": "image_source_too_large",
+                "message": "The original image exceeds the 10 MiB Canvas limit.",
+            },
+            status_code=413,
+        )
+
+    if not _CANVAS_ASSET_UPLOAD_SLOTS.acquire(blocking=False):
+        return JSONResponse(
+            {
+                "error": "image_processing_busy",
+                "message": "Canvas is already processing images. Try again shortly.",
+            },
+            status_code=503,
+            headers={"Retry-After": "1"},
+        )
+    try:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > CANVAS_IMAGE_SOURCE_MAX_BYTES:
+                return JSONResponse(
+                    {
+                        "error": "image_source_too_large",
+                        "message": "The original image exceeds the 10 MiB Canvas limit.",
+                    },
+                    status_code=413,
+                )
+            chunks.append(chunk)
+        filename = unquote(request.headers.get("x-nomad-filename", "image"))
+        try:
+            result = await asyncio.to_thread(
+                normalize_and_save_canvas_image,
+                canvas_id,
+                b"".join(chunks),
+                filename,
+            )
+        except CanvasImageError as exc:
+            status = 413 if exc.code in {
+                "image_source_too_large",
+                "image_dimensions_too_large",
+            } else 422
+            return JSONResponse(
+                {"error": exc.code, "message": str(exc)}, status_code=status
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": "canvas_asset_limit", "message": str(exc)},
+                status_code=409,
+            )
+    finally:
+        _CANVAS_ASSET_UPLOAD_SLOTS.release()
+    return JSONResponse(result, status_code=201)
+
+
+async def canvas_asset_content(request: Request) -> Response:
+    if not _canvas_http_authorized(request.scope):
+        return JSONResponse({"error": "authentication_required"}, status_code=401)
+    canvas_id = str(request.path_params.get("canvas_id") or "")
+    if not canvas_exists(canvas_id):
+        return JSONResponse({"error": "canvas_not_found"}, status_code=404)
+    try:
+        path = canvas_asset_path(
+            canvas_id, str(request.path_params.get("filename") or "")
+        )
+    except ValueError:
+        return JSONResponse({"error": "asset_not_found"}, status_code=404)
+    if not path.is_file():
+        return JSONResponse({"error": "asset_not_found"}, status_code=404)
+    return FileResponse(
+        path,
+        media_type="image/webp",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 def _closed_object(
@@ -744,6 +873,28 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
         _closed_object(
             {"op": {"const": "create"}, "ref": {"type": "string", "minLength": 1, "maxLength": 128}, "shape": {"oneOf": create_shapes}},
             ["op", "ref", "shape"],
+        ),
+        _closed_object(
+            {
+                "op": {"const": "create_image"},
+                "ref": {"type": "string", "minLength": 1, "maxLength": 128},
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2_000,
+                    "description": (
+                        "Absolute host path or path relative to the Canvas project."
+                    ),
+                },
+                "x": coordinate,
+                "y": coordinate,
+                "width": dimension,
+                "height": dimension,
+                "alt_text": {"type": "string", "maxLength": 1_000},
+                "semantic_id": semantic_id,
+                "source_refs": source_refs,
+            },
+            ["op", "ref", "path", "x", "y"],
         ),
         *draw_operations,
         update_operation,
@@ -1067,6 +1218,10 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                         "omitting source_refs preserves existing provenance. The draw "
                         "operation accepts absolute Canvas points for freehand, "
                         "highlight, and line marks."
+                        " To add an image, use create_image with path at the "
+                        "operation root; path may be absolute or relative to the "
+                        "Canvas project. Do not send raw tldraw image shapes, "
+                        "props, asset IDs, or src fields."
                         " A patch may change at most "
                         f"{CANVAS_COMMAND_RECEIPT_MAX_CHANGED_IDS} unique shapes."
                     ),
@@ -1504,6 +1659,134 @@ def _content_result(
     }
 
 
+def _prepare_canvas_image_operations(
+    canvas_id: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    operations = arguments.get("operations")
+    if not isinstance(operations, list):
+        return arguments
+    image_operations = [
+        operation
+        for operation in operations
+        if isinstance(operation, dict)
+        and operation.get("op") == "create_image"
+    ]
+    if not image_operations:
+        return arguments
+    if len(image_operations) > CANVAS_PATCH_MAX_IMAGE_OPERATIONS:
+        raise CanvasImageError(
+            "image_operation_limit",
+            f"A Canvas patch may add at most {CANVAS_PATCH_MAX_IMAGE_OPERATIONS} images.",
+        )
+
+    manifest = read_canvas_manifest(canvas_id) or {}
+    project_value = str(manifest.get("project_path") or "")
+    if not project_value:
+        raise CanvasImageError(
+            "image_path_unavailable",
+            "This Canvas has no project directory for image imports.",
+        )
+    project_path = Path(project_value).expanduser().resolve()
+    prepared = copy.deepcopy(arguments)
+    for operation_index, operation in enumerate(prepared["operations"]):
+        if (
+            not isinstance(operation, dict)
+            or operation.get("op") != "create_image"
+        ):
+            continue
+        unknown_keys = set(operation) - {
+            "op",
+            "ref",
+            "path",
+            "x",
+            "y",
+            "width",
+            "height",
+            "alt_text",
+            "semantic_id",
+            "source_refs",
+        }
+        if unknown_keys:
+            raise CanvasImageError(
+                "image_operation_invalid",
+                "create_image contains unsupported fields: "
+                + ", ".join(sorted(unknown_keys)),
+            )
+        source_value = operation.get("path")
+        if not isinstance(source_value, str) or not source_value:
+            raise CanvasImageError(
+                "image_path_invalid",
+                "create_image.path must be a non-empty string.",
+            )
+        source_candidate = Path(source_value).expanduser()
+        source_path = (
+            source_candidate
+            if source_candidate.is_absolute()
+            else project_path / source_candidate
+        ).resolve()
+        if not source_path.is_relative_to(project_path) or not source_path.is_file():
+            raise CanvasImageError(
+                "image_path_not_allowed",
+                "Canvas images must be readable files inside the current project.",
+            )
+        if source_path.stat().st_size > CANVAS_IMAGE_SOURCE_MAX_BYTES:
+            raise CanvasImageError(
+                "image_source_too_large",
+                "The original image exceeds the 10 MiB Canvas limit.",
+            )
+        with source_path.open("rb") as source:
+            content = source.read(CANVAS_IMAGE_SOURCE_MAX_BYTES + 1)
+        normalized = normalize_and_save_canvas_image(
+            canvas_id, content, source_path.name
+        )
+        prepared["operations"][operation_index] = {
+            "op": "create",
+            "ref": operation.get("ref"),
+            "shape": {
+                "type": "image",
+                "x": operation.get("x"),
+                "y": operation.get("y"),
+                **(
+                    {"width": operation["width"]}
+                    if "width" in operation
+                    else {}
+                ),
+                **(
+                    {"height": operation["height"]}
+                    if "height" in operation
+                    else {}
+                ),
+                **(
+                    {"alt_text": operation["alt_text"]}
+                    if "alt_text" in operation
+                    else {}
+                ),
+                **(
+                    {"semantic_id": operation["semantic_id"]}
+                    if "semantic_id" in operation
+                    else {}
+                ),
+                **(
+                    {"source_refs": operation["source_refs"]}
+                    if "source_refs" in operation
+                    else {}
+                ),
+                "asset": {
+                    "src": normalized["src"],
+                    "name": normalized["name"],
+                    "mime_type": normalized["mime_type"],
+                    "width": normalized["width"],
+                    "height": normalized["height"],
+                    "byte_size": normalized["byte_size"],
+                    "original_byte_size": normalized["original_byte_size"],
+                    "quality": normalized["quality"],
+                    "content_hash": normalized["content_hash"],
+                },
+            },
+        }
+    return prepared
+
+
 def canvas_dynamic_tool_handler_for_canvas(
     canvas_id: str,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -1588,8 +1871,29 @@ def canvas_dynamic_tool_handler_for_canvas(
                 }
 
                 try:
+                    prepared_arguments = _prepare_canvas_image_operations(
+                        canvas_id, arguments
+                    )
+                except (CanvasImageError, OSError, ValueError) as exc:
+                    return _content_result(
+                        False,
+                        {
+                            "error": (
+                                exc.code
+                                if isinstance(exc, CanvasImageError)
+                                else "image_import_failed"
+                            ),
+                            "message": str(exc),
+                        },
+                    )
+
+                try:
                     broker_result = CANVAS_BROKER.call(
-                        canvas_id, tool, arguments, context=request_context
+                        canvas_id,
+                        tool,
+                        prepared_arguments,
+                        context=request_context,
+                        status_arguments=arguments,
                     )
                 except RuntimeError as exc:
                     return _content_result(False, {"error": str(exc)})

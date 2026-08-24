@@ -36,7 +36,8 @@
   opacity: 0.72;
 }
 
-.nomad-canvas-export-error {
+.nomad-canvas-export-error,
+.nomad-canvas-asset-error {
   position: absolute;
   z-index: 1000;
   top: 0.75rem;
@@ -48,6 +49,10 @@
   background: var(--st-background-color, #fff);
   color: var(--st-red-70, #b91c1c);
   font: 500 0.75rem/1.35 var(--st-font, sans-serif);
+}
+
+.nomad-canvas-asset-error {
+  top: 3.4rem;
 }
 
 .nomad-canvas-root > .tl-container {

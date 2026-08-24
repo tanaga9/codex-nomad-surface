@@ -22,10 +22,12 @@ from urllib.request import Request, urlopen
 
 import streamlit as st
 from starlette.middleware import Middleware
-from starlette.routing import WebSocketRoute
+from starlette.routing import Route, WebSocketRoute
 from streamlit.starlette import App
 
 from codex_nomad_surface.canvas_runtime import (
+    canvas_asset_content,
+    canvas_asset_upload,
     canvas_initial_context_items,
     canvas_dynamic_tool_handler_for_canvas,
     canvas_dynamic_tools,
@@ -5762,6 +5764,16 @@ def main() -> None:
 app = App(
     __file__,
     routes=[
+        Route(
+            "/api/canvas/{canvas_id}/assets",
+            canvas_asset_upload,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/canvas/{canvas_id}/assets/{filename}",
+            canvas_asset_content,
+            methods=["GET"],
+        ),
         WebSocketRoute("/api/canvas/{canvas_id}/ws", canvas_websocket),
         WebSocketRoute("/api/text/{text_id}/ws", text_websocket),
     ],

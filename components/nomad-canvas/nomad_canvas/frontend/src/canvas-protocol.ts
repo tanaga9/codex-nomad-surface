@@ -1,5 +1,6 @@
 import {
   Editor,
+  TLAssetId,
   TLShapeId,
   b64Vecs,
   createShapeId,
@@ -54,8 +55,8 @@ export class CanvasProtocolError extends Error {
 
 type JsonObject = Record<string, unknown>;
 type ShapeType =
-  "geo" | "text" | "note" | "frame" | "draw" | "highlight" | "line";
-type CreateShapeType = "geo" | "text" | "note" | "frame";
+  "geo" | "text" | "note" | "frame" | "image" | "draw" | "highlight" | "line";
+type CreateShapeType = "geo" | "text" | "note" | "frame" | "image";
 type Target = { id: string } | { semantic_id: string } | { ref: string };
 type MetadataPatch = {
   semanticId?: string | null;
@@ -66,6 +67,17 @@ type PlannedShape = {
   type: ShapeType | "arrow" | "group";
   availableAt: number;
 };
+type NormalizedImageAsset = {
+  id: TLAssetId;
+  src: string;
+  name: string;
+  width: number;
+  height: number;
+  byteSize: number;
+  originalByteSize: number;
+  quality: number;
+  contentHash: string;
+};
 type NormalizedOperation =
   | {
       op: "create";
@@ -73,6 +85,7 @@ type NormalizedOperation =
       ref: string;
       shape: JsonObject;
       metadata: MetadataPatch;
+      asset?: NormalizedImageAsset;
       resize?: { width: number; height: number };
     }
   | {
@@ -154,6 +167,7 @@ const SHAPE_TYPES = new Set<ShapeType>([
   "text",
   "note",
   "frame",
+  "image",
   "draw",
   "highlight",
   "line",
@@ -163,6 +177,7 @@ const CREATE_SHAPE_TYPES = new Set<CreateShapeType>([
   "text",
   "note",
   "frame",
+  "image",
 ]);
 const STYLE_KEYS: Record<ShapeType | "arrow", Set<string>> = {
   geo: new Set([
@@ -178,6 +193,7 @@ const STYLE_KEYS: Record<ShapeType | "arrow", Set<string>> = {
   text: new Set(["color", "size", "font", "align"]),
   note: new Set(["color", "size", "font", "align", "vertical_align"]),
   frame: new Set(["color"]),
+  image: new Set(),
   draw: new Set(["color", "fill", "dash", "size"]),
   highlight: new Set(["color", "size"]),
   line: new Set(["color", "dash", "size"]),
@@ -282,6 +298,30 @@ const finiteNumber = (
       path,
       code: "invalid_number",
       message: `${path} must be a finite ${positive ? "positive " : ""}number within Canvas limits.`,
+    });
+    return undefined;
+  }
+  return value;
+};
+
+const boundedPositiveNumber = (
+  value: unknown,
+  maximum: number,
+  operationIndex: number,
+  path: string,
+  errors: CanvasOperationError[],
+): number | undefined => {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value <= 0 ||
+    value > maximum
+  ) {
+    errors.push({
+      operation_index: operationIndex,
+      path,
+      code: "invalid_number",
+      message: `${path} must be a positive number within Canvas limits.`,
     });
     return undefined;
   }
@@ -1121,6 +1161,17 @@ export const validateCanvasPatch = (
           "semantic_id",
           "source_refs",
         ]),
+        image: new Set([
+          "type",
+          "x",
+          "y",
+          "width",
+          "height",
+          "alt_text",
+          "semantic_id",
+          "source_refs",
+          "asset",
+        ]),
       };
       rejectUnknownKeys(shape, shapeKeys[shapeType], index, "shape", errors);
       const x = finiteNumber(shape.x, index, "shape.x", errors);
@@ -1165,6 +1216,16 @@ export const validateCanvasPatch = (
         shape.name === undefined
           ? undefined
           : boundedString(shape.name, index, "shape.name", errors, 500);
+      const altText =
+        shape.alt_text === undefined
+          ? ""
+          : boundedString(
+              shape.alt_text,
+              index,
+              "shape.alt_text",
+              errors,
+              1_000,
+            );
       if (shapeType === "text" && shape.text === undefined) {
         errors.push({
           operation_index: index,
@@ -1173,6 +1234,7 @@ export const validateCanvasPatch = (
           message: "Text shapes require text.",
         });
       }
+      let imageAsset: NormalizedImageAsset | undefined;
       if (shapeType === "geo") {
         props.geo = props.geo || "rectangle";
         props.w = width ?? 240;
@@ -1186,10 +1248,137 @@ export const validateCanvasPatch = (
         }
       } else if (shapeType === "note") {
         props.richText = toRichText(shapeText ?? "");
-      } else {
+      } else if (shapeType === "frame") {
         props.w = width ?? 320;
         props.h = height ?? 180;
         props.name = shapeName ?? "";
+      } else {
+        const asset = shape.asset;
+        if (!isObject(asset)) {
+          errors.push({
+            operation_index: index,
+            path: "shape.asset",
+            code: "invalid_operation",
+            message: "The optimized image asset is missing.",
+          });
+          return;
+        }
+        rejectUnknownKeys(
+          asset,
+          new Set([
+            "src",
+            "name",
+            "mime_type",
+            "width",
+            "height",
+            "byte_size",
+            "original_byte_size",
+            "quality",
+            "content_hash",
+          ]),
+          index,
+          "shape.asset",
+          errors,
+        );
+        const assetWidth = finiteNumber(
+          asset.width,
+          index,
+          "shape.asset.width",
+          errors,
+          true,
+        );
+        const assetHeight = finiteNumber(
+          asset.height,
+          index,
+          "shape.asset.height",
+          errors,
+          true,
+        );
+        const assetByteSize = finiteNumber(
+          asset.byte_size,
+          index,
+          "shape.asset.byte_size",
+          errors,
+          true,
+        );
+        const originalByteSize = boundedPositiveNumber(
+          asset.original_byte_size,
+          10 * 1024 * 1024,
+          index,
+          "shape.asset.original_byte_size",
+          errors,
+        );
+        const quality = boundedPositiveNumber(
+          asset.quality,
+          100,
+          index,
+          "shape.asset.quality",
+          errors,
+        );
+        const src = typeof asset.src === "string" ? asset.src : "";
+        const name = typeof asset.name === "string" ? asset.name : "";
+        const contentHash =
+          typeof asset.content_hash === "string" ? asset.content_hash : "";
+        if (
+          asset.mime_type !== "image/webp" ||
+          !/^\/api\/canvas\/canvas-[0-9a-f]{24}\/assets\/[0-9a-f]{64}\.webp$/.test(
+            src,
+          ) ||
+          !/^sha256:[0-9a-f]{64}$/.test(contentHash) ||
+          !name ||
+          assetWidth === undefined ||
+          assetHeight === undefined ||
+          assetByteSize === undefined ||
+          originalByteSize === undefined ||
+          quality === undefined ||
+          assetByteSize > 768 * 1024
+        ) {
+          errors.push({
+            operation_index: index,
+            path: "shape.asset",
+            code: "invalid_operation",
+            message: "The optimized image asset is invalid.",
+          });
+          return;
+        }
+        const hash = contentHash.slice("sha256:".length);
+        imageAsset = {
+          id: `asset:${hash}` as TLAssetId,
+          src,
+          name,
+          width: assetWidth,
+          height: assetHeight,
+          byteSize: assetByteSize,
+          originalByteSize,
+          quality,
+          contentHash,
+        };
+        const naturalScale = Math.min(
+          1,
+          640 / Math.max(assetWidth, assetHeight),
+        );
+        const naturalWidth = assetWidth * naturalScale;
+        const naturalHeight = assetHeight * naturalScale;
+        if (width !== undefined && height !== undefined) {
+          props.w = width;
+          props.h = height;
+        } else if (width !== undefined) {
+          props.w = width;
+          props.h = width * (assetHeight / assetWidth);
+        } else if (height !== undefined) {
+          props.h = height;
+          props.w = height * (assetWidth / assetHeight);
+        } else {
+          props.w = naturalWidth;
+          props.h = naturalHeight;
+        }
+        props.assetId = imageAsset.id;
+        props.url = "";
+        props.crop = null;
+        props.flipX = false;
+        props.flipY = false;
+        props.playing = true;
+        props.altText = altText ?? "";
       }
       normalized.push({
         op: "create",
@@ -1202,6 +1391,7 @@ export const validateCanvasPatch = (
           props,
         },
         metadata,
+        ...(imageAsset ? { asset: imageAsset } : {}),
         ...(shapeType === "note" && width !== undefined && height !== undefined
           ? { resize: { width, height } }
           : {}),
@@ -1869,6 +2059,32 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
     editor.run(() => {
       for (const operation of plan.operations) {
         if (operation.op === "create") {
+          if (operation.asset && !editor.getAsset(operation.asset.id)) {
+            editor.createAssets([
+              {
+                id: operation.asset.id,
+                typeName: "asset",
+                type: "image",
+                props: {
+                  w: operation.asset.width,
+                  h: operation.asset.height,
+                  name: operation.asset.name,
+                  isAnimated: false,
+                  mimeType: "image/webp",
+                  src: operation.asset.src,
+                  fileSize: operation.asset.byteSize,
+                },
+                meta: {
+                  nomad: {
+                    content_hash: operation.asset.contentHash,
+                    original_byte_size: operation.asset.originalByteSize,
+                    quality: operation.asset.quality,
+                    optimized: true,
+                  },
+                },
+              },
+            ] as never);
+          }
           editor.createShape({
             id: operation.id,
             ...operation.shape,
@@ -2080,6 +2296,21 @@ export const applyCanvasPatch = (editor: Editor, plan: NormalizedPatchPlan) => {
       changed_ids: Array.from(changedIds),
       refs: plan.refs,
       warnings: [],
+      optimized_images: plan.operations.flatMap((operation) =>
+        operation.op === "create" && operation.asset
+          ? [
+              {
+                ref: operation.ref,
+                name: operation.asset.name,
+                width: operation.asset.width,
+                height: operation.asset.height,
+                byte_size: operation.asset.byteSize,
+                original_byte_size: operation.asset.originalByteSize,
+                quality: operation.asset.quality,
+              },
+            ]
+          : [],
+      ),
     },
     rollback: () => editor.bailToMark(mark),
   };

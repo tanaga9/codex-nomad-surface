@@ -1,4 +1,5 @@
 import {
+  AssetRecordType,
   HistoryManager,
   Store,
   StoreSchema,
@@ -44,6 +45,15 @@ import {
   parseObsidianTldrawMarkdown,
   parseObsidianTldrawStore,
 } from "./obsidian-tldraw";
+import {
+  CANVAS_IMAGE_MAX_FILES_AT_ONCE,
+  normalizeUploadedCanvasImageAsset,
+} from "./canvas-assets";
+
+assert(
+  CANVAS_IMAGE_MAX_FILES_AT_ONCE === 2,
+  "Canvas did not keep a strict browser-side image batch limit.",
+);
 
 {
   const sourceStore = createTLStore();
@@ -91,6 +101,104 @@ import {
     invalidError instanceof ObsidianTldrawFormatError,
     "An incomplete Obsidian tldraw document was accepted.",
   );
+}
+
+{
+  const hash = "c".repeat(64);
+  const original = AssetRecordType.create({
+    id: AssetRecordType.createId(hash),
+    type: "image",
+    props: {
+      w: 2_048,
+      h: 1_365,
+      name: "camera.jpg",
+      isAnimated: false,
+      mimeType: "image/jpeg",
+      src: "",
+      fileSize: 4_000_000,
+      pixelRatio: 2,
+    },
+    meta: {},
+  });
+  const normalized = normalizeUploadedCanvasImageAsset(original, {
+    src: `/api/canvas/canvas-${"d".repeat(24)}/assets/${hash}.webp`,
+    name: "camera.webp",
+    mime_type: "image/webp",
+    content_hash: `sha256:${hash}`,
+    byte_size: 600_000,
+    original_byte_size: 4_000_000,
+    width: 1_280,
+    height: 853,
+    quality: 64,
+  });
+  assert(
+    normalized.type === "image" &&
+      normalized.props.mimeType === "image/webp" &&
+      normalized.props.fileSize === 600_000 &&
+      normalized.props.w === 1_280 &&
+      normalized.props.h === 853 &&
+      normalized.props.name === "camera.webp" &&
+      normalized.props.pixelRatio === undefined,
+    "A user-uploaded image kept its pre-optimization asset metadata.",
+  );
+}
+
+{
+  const editor = {
+    getCurrentPageShapes: () => [],
+    getShape: () => undefined,
+    isShapeOrAncestorLocked: () => false,
+  } as unknown as Editor;
+  const hash = "a".repeat(64);
+  const plan = validateCanvasPatch(editor, {
+    command_id: "create-optimized-image",
+    base_revision: 0,
+    operations: [
+      {
+        op: "create",
+        ref: "image",
+        shape: {
+          type: "image",
+          x: 40,
+          y: 80,
+          alt_text: "Generated image",
+          asset: {
+            src: `/api/canvas/canvas-${"b".repeat(24)}/assets/${hash}.webp`,
+            name: "generated.webp",
+            mime_type: "image/webp",
+            width: 1_600,
+            height: 900,
+            byte_size: 500_000,
+            original_byte_size: 2_000_000,
+            quality: 72,
+            content_hash: `sha256:${hash}`,
+          },
+        },
+      },
+    ],
+  });
+  const operation = plan.operations[0];
+  assert(
+    operation?.op === "create" &&
+      operation.shape.type === "image" &&
+      operation.asset?.id === `asset:${hash}`,
+    "A prepared Canvas image was not normalized into an image asset and shape.",
+  );
+  if (operation?.op === "create") {
+    const props = operation.shape.props as {
+      w: number;
+      h: number;
+      assetId: string;
+      altText: string;
+    };
+    assert(
+      props.w === 640 &&
+        props.h === 360 &&
+        props.assetId === `asset:${hash}` &&
+        props.altText === "Generated image",
+      "The optimized image dimensions or metadata were not preserved.",
+    );
+  }
 }
 
 {

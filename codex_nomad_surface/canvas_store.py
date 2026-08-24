@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,10 @@ CANVAS_PREVIEW_IMAGE_MIME_TYPES = frozenset(
 )
 CANVAS_VISUAL_PREVIEW_PATH = "current/preview.webp"
 CANVAS_OBSIDIAN_EXPORT_MAX_BYTES = 32 * 1024 * 1024
+CANVAS_ASSET_MAX_COUNT = 64
+CANVAS_ASSET_TOTAL_MAX_BYTES = 32 * 1024 * 1024
+CANVAS_ASSET_PENDING_GRACE_SECONDS = 5 * 60
+CANVAS_ASSET_FILENAME_PATTERN = re.compile(r"^[0-9a-f]{64}\.webp$")
 CANVAS_OBSIDIAN_START_MARKER = (
     "!!!_START_OF_TLDRAW_DATA__DO_NOT_CHANGE_THIS_PHRASE_!!!"
 )
@@ -119,6 +124,149 @@ def _validate_canvas_id(canvas_id: str) -> str:
 
 def canvas_directory(canvas_id: str) -> Path:
     return CANVAS_ROOT / _validate_canvas_id(canvas_id)
+
+
+def canvas_asset_path(canvas_id: str, filename: str) -> Path:
+    if not CANVAS_ASSET_FILENAME_PATTERN.fullmatch(filename):
+        raise ValueError("Invalid Canvas asset name.")
+    return canvas_directory(canvas_id) / "assets" / filename
+
+
+def _canvas_asset_filenames_in_document(
+    canvas_id: str, document: dict[str, Any]
+) -> set[str]:
+    store = document.get("store")
+    if not isinstance(store, dict):
+        return set()
+    prefix = f"/api/canvas/{canvas_id}/assets/"
+    used_asset_ids: set[str] = set()
+    for record in store.values():
+        if not isinstance(record, dict) or record.get("typeName") != "shape":
+            continue
+        props = record.get("props")
+        asset_id = props.get("assetId") if isinstance(props, dict) else None
+        if isinstance(asset_id, str):
+            used_asset_ids.add(asset_id)
+    filenames: set[str] = set()
+    for record in store.values():
+        if (
+            not isinstance(record, dict)
+            or record.get("typeName") != "asset"
+            or record.get("id") not in used_asset_ids
+        ):
+            continue
+        props = record.get("props")
+        src = props.get("src") if isinstance(props, dict) else None
+        if not isinstance(src, str) or not src.startswith(prefix):
+            continue
+        filename = src.removeprefix(prefix)
+        if CANVAS_ASSET_FILENAME_PATTERN.fullmatch(filename):
+            filenames.add(filename)
+    return filenames
+
+
+def _referenced_canvas_asset_filenames(
+    canvas_id: str, directory: Path
+) -> set[str] | None:
+    revisions = directory / "revisions"
+    revision_document_paths = (
+        [
+            revision / "document.json"
+            for revision in revisions.iterdir()
+            if revision.is_dir() and revision.name.isdigit()
+        ]
+        if revisions.is_dir()
+        else []
+    )
+    document_paths = revision_document_paths or [
+        directory / "current" / "document.json"
+    ]
+
+    referenced: set[str] = set()
+    for document_path in document_paths:
+        if not document_path.is_file():
+            if revision_document_paths:
+                return None
+            continue
+        try:
+            document = json.loads(document_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(document, dict):
+            # A retained document that cannot be inspected may still reference
+            # an asset. Fail closed instead of deleting recovery data.
+            return None
+        referenced.update(
+            _canvas_asset_filenames_in_document(canvas_id, document)
+        )
+    return referenced
+
+
+def _prune_canvas_assets_locked(
+    canvas_id: str, directory: Path, *, now: float | None = None
+) -> int:
+    assets_directory = directory / "assets"
+    if not assets_directory.is_dir():
+        return 0
+    referenced = _referenced_canvas_asset_filenames(canvas_id, directory)
+    if referenced is None:
+        return 0
+    cutoff = (time.time() if now is None else now) - CANVAS_ASSET_PENDING_GRACE_SECONDS
+    removed = 0
+    for path in assets_directory.glob("*.webp"):
+        if not path.is_file() or path.name in referenced:
+            continue
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def prune_canvas_assets(canvas_id: str) -> int:
+    directory = canvas_directory(canvas_id)
+    with _canvas_lock(canvas_id):
+        if not read_canvas_manifest(canvas_id):
+            raise FileNotFoundError("Canvas manifest was not found.")
+        return _prune_canvas_assets_locked(canvas_id, directory)
+
+
+def save_canvas_asset(
+    canvas_id: str, content: bytes, content_hash: str, extension: str
+) -> dict[str, Any]:
+    if extension != "webp" or not re.fullmatch(r"[0-9a-f]{64}", content_hash):
+        raise ValueError("Canvas asset identity is invalid.")
+    if hashlib.sha256(content).hexdigest() != content_hash:
+        raise ValueError("Canvas asset content hash does not match.")
+    filename = f"{content_hash}.{extension}"
+    path = canvas_asset_path(canvas_id, filename)
+    with _canvas_lock(canvas_id):
+        if not read_canvas_manifest(canvas_id):
+            raise FileNotFoundError("Canvas manifest was not found.")
+        canvas_root = canvas_directory(canvas_id)
+        _prune_canvas_assets_locked(canvas_id, canvas_root)
+        directory = path.parent
+        existing = list(directory.glob("*.webp")) if directory.is_dir() else []
+        if path.exists():
+            return {
+                "filename": filename,
+                "content_hash": f"sha256:{content_hash}",
+                "deduplicated": True,
+            }
+        total_bytes = sum(item.stat().st_size for item in existing if item.is_file())
+        if len(existing) >= CANVAS_ASSET_MAX_COUNT:
+            raise ValueError("Canvas asset count limit has been reached.")
+        if total_bytes + len(content) > CANVAS_ASSET_TOTAL_MAX_BYTES:
+            raise ValueError("Canvas asset storage limit has been reached.")
+        _atomic_write(path, content)
+    return {
+        "filename": filename,
+        "content_hash": f"sha256:{content_hash}",
+        "deduplicated": False,
+    }
 
 
 def _canvas_lock(canvas_id: str) -> threading.Lock:

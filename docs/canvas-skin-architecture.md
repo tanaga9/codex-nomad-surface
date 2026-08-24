@@ -39,6 +39,21 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   thread without replacing the drawing files.
 - Obsidian tldraw Markdown and SVG are downloadable from the Canvas Skin;
   canonical Document JSON remains an internal persistence format.
+- User paste, drop, and file selection share a bounded Canvas asset upload
+  path. Static JPEG, PNG, and WebP inputs are converted to content-addressed
+  WebP assets; oversized, animated, unsupported, or insufficiently compressible
+  images fail without adding a shape. The resulting tldraw asset record uses
+  the optimized WebP's actual name, MIME type, dimensions, and byte size so
+  snapshots and Obsidian exports do not retain stale source metadata.
+  Browser batches are limited to two files, while the server admits at most
+  two image uploads from receipt through conversion at once and rejects excess
+  work before reading its request body.
+- `canvas.apply_patch` provides a `create_image` operation for a file inside the
+  current project. Its `path` may be absolute or project-relative. It uses the
+  same optimizer and commit barrier as user-added images; raw tldraw image
+  records are not part of the tool contract. This path-based Codex operation
+  requires Nomad Surface and Codex App Server to share the same host filesystem;
+  Codex image insertion from a separate host is not currently supported.
 - On wider screens, the canvas remains fixed in the viewport while chat history
   scrolls independently in a right-side panel; the native `st.chat_input` sits
   at the bottom of that panel so the canvas can use the full remaining height.
@@ -48,8 +63,8 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   without polling and redrawing the completed history.
 - Canvas metadata and export actions are kept in a compact disclosure.
 
-The prototype does not yet implement asset ingestion, fork-copy behavior, or
-the full proposed operation vocabulary beyond the six operations above.
+The prototype does not yet implement fork-copy behavior or the full proposed
+operation vocabulary beyond the current bounded operations.
 Before production distribution, the tldraw production-license prompt visible
 in the editor must also be resolved under the chosen tldraw license.
 
@@ -303,6 +318,14 @@ the editor is disconnected, the tool returns `canvas_unavailable`; Nomad
 Surface does not introduce a separate headless tldraw process merely to apply
 the command.
 
+The `create_image` path contract also assumes that Nomad Surface and Codex App
+Server run on hosts that share the Canvas project filesystem. Browser uploads
+continue to use the authenticated Canvas HTTP endpoint, but a Codex App Server
+on a separate host cannot currently transfer an image into Canvas. Supporting
+that deployment would require a separate authenticated, bounded binary upload
+and asset-reference protocol; embedding Base64 file data in Dynamic Tool JSON
+is intentionally not used as a fallback.
+
 ### `canvas.export`
 
 Serializes the current live editor as Obsidian tldraw Markdown and atomically
@@ -399,6 +422,12 @@ illustrative layout is:
 - `preview.webp` is the bounded whole-canvas raster used for Codex visual
   recognition and as a compatibility image.
 - `assets/` contains validated image and media files referenced by the document.
+  The current limits are 10 MiB and 20 megapixels for a static source image,
+  2048 px for its longest optimized edge, and 768 KiB for the stored WebP.
+  Assets referenced by the current or retained revision documents are kept.
+  Unreferenced uploads receive a short in-flight grace period and are then
+  reclaimed before later asset quota checks without rescanning every retained
+  document after each Canvas checkpoint.
 - An Obsidian tldraw Markdown file containing a standard `TldrawFile` is
   generated on demand for device download or atomically saved under `exports/`
   when Codex calls `canvas.export`; it is not rewritten after every editor
@@ -511,6 +540,8 @@ problem.
 
 - Canvas HTTP and WebSocket endpoints are same-origin and pass through the
   existing Nomad Surface authentication boundary.
+- Authenticated asset responses are not stored in the browser cache, so an
+  expired authentication session cannot reuse a fresh immutable response.
 - No document, preview, connection detail, or canvas existence information is
   exposed before authentication.
 - Canvas IDs and thread ownership are checked on every request.

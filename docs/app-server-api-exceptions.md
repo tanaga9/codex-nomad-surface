@@ -24,10 +24,18 @@ instead of a current Codex App Server API.
 snapshots and previews are stored as local files, and the live editor is
 brokered over an authenticated same-origin WebSocket. A local draft ID keeps a
 new canvas addressable until its first App Server turn returns a durable thread
-ID. Canvas documents are Nomad Surface product state; App Server Dynamic Tools
-carry Codex calls but do not store or edit tldraw documents. Keep this layer
-small, continue using the current Dynamic Tools API directly, and do not add a
-legacy Codex transport fallback.
+ID. Validated Canvas images are optimized and stored as content-addressed local
+assets. An image-create Dynamic Tool operation may read only a file inside the
+Canvas project directory, because App Server Dynamic Tools carry structured
+arguments but do not transfer asset bytes. This operation therefore requires
+Nomad Surface and Codex App Server to share the project filesystem; Codex image
+insertion from a separate host is not supported. A future remote-host design
+would need an authenticated, bounded binary upload and asset-reference
+protocol, not Base64 data inside Dynamic Tool JSON. Canvas documents and assets
+are Nomad Surface product state; App Server Dynamic Tools carry Codex calls but
+do not store or edit tldraw documents. Keep this layer small, continue using
+the current Dynamic Tools API directly, and do not add a legacy Codex transport
+fallback.
 
 `EX-011` — Text and Document persistence and live editor bridge: CodeMirror
 content and revisions are stored as local files, and the live editor is

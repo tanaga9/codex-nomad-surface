@@ -5,6 +5,7 @@ import {
   ReactElement,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -26,6 +27,14 @@ import {
   canProcessCanvasRequest,
   isRedundantCanvasCheckpoint,
 } from "./canvas-snapshot-gate";
+import {
+  CANVAS_IMAGE_MAX_DIMENSION,
+  CANVAS_IMAGE_MAX_FILES_AT_ONCE,
+  CANVAS_IMAGE_MIME_TYPES,
+  CANVAS_IMAGE_SOURCE_MAX_BYTES,
+  createCanvasAssetStore,
+  registerCanvasImageAssetHandler,
+} from "./canvas-assets";
 
 export type NomadCanvasStateShape = Record<string, never>;
 
@@ -43,6 +52,7 @@ type CanvasRequest = {
   id: string;
   method: "read_scene" | "apply_patch" | "export";
   arguments?: Record<string, unknown>;
+  status_arguments?: Record<string, unknown>;
 };
 
 type CanvasResponseAck = {
@@ -67,6 +77,9 @@ type CanvasExportRequest = {
 const CANVAS_SNAPSHOT_STABILITY_ATTEMPTS = 3;
 const CANVAS_DOCUMENT_SAVE_DELAY_MS = 700;
 const CANVAS_PREVIEW_SAVE_DELAY_MS = 4_000;
+const CANVAS_TLDRAW_OPTIONS = {
+  maxFilesAtOnce: CANVAS_IMAGE_MAX_FILES_AT_ONCE,
+};
 
 const waitForCanvasGeometry = () =>
   new Promise<void>((resolve) => {
@@ -98,6 +111,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("connecting");
   const [exportError, setExportError] = useState<string | null>(null);
+  const [assetError, setAssetError] = useState<string | null>(null);
   const initialDocumentRef = useRef(initialDocument);
   const websocketRef = useRef<WebSocket | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -109,6 +123,17 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const lastPersistedDocumentFingerprintRef = useRef<string | null>(null);
   const lastExportRequestRef = useRef<string | null>(null);
   const pendingExportRequestRef = useRef<CanvasExportRequest | null>(null);
+  const assetStore = useMemo(
+    () =>
+      createCanvasAssetStore(canvasId, (message) =>
+        setAssetError(message || null),
+      ),
+    [canvasId],
+  );
+  const mountEditor = useCallback((activeEditor: Editor) => {
+    registerCanvasImageAssetHandler(activeEditor);
+    setEditor(activeEditor);
+  }, []);
 
   const serializeObsidianDocument = useCallback(
     async (activeEditor: Editor) => {
@@ -561,7 +586,10 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
               return;
             }
 
-            const ack = waitForResponseAck(request.id, request.arguments || {});
+            const ack = waitForResponseAck(
+              request.id,
+              request.status_arguments || request.arguments || {},
+            );
             nextWebsocket.send(
               JSON.stringify({
                 type: "response",
@@ -661,9 +689,19 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           Export failed: {exportError}
         </div>
       ) : null}
+      {assetError ? (
+        <div className="nomad-canvas-asset-error" role="alert">
+          Image not added: {assetError}
+        </div>
+      ) : null}
       <Tldraw
+        assets={assetStore}
+        options={CANVAS_TLDRAW_OPTIONS}
+        maxAssetSize={CANVAS_IMAGE_SOURCE_MAX_BYTES}
+        maxImageDimension={CANVAS_IMAGE_MAX_DIMENSION}
+        acceptedImageMimeTypes={CANVAS_IMAGE_MIME_TYPES}
         snapshot={initialDocumentRef.current || undefined}
-        onMount={setEditor}
+        onMount={mountEditor}
       />
     </div>
   );
