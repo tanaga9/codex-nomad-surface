@@ -78,6 +78,10 @@ Build clean, verified Python distributions under `dist/` with:
 python scripts/dev.py build-package
 ```
 
+GitHub Actions also builds and verifies the wheel for pull requests, updates
+to `main`, and manual workflow runs. Download the resulting `.whl` from the
+workflow run's artifacts.
+
 Standard PEP 517 builds, including `python -m build` and `pip install .`, also
 prepare or validate the registered frontend components automatically. Source
 distributions include the generated runtime assets, so installing from an
