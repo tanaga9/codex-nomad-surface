@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -677,6 +678,7 @@ def test_document_only_websocket_save_preserves_saved_preview(
     class FakeWebSocket:
         scope = {}
         path_params = {"canvas_id": canvas_id}
+        query_params = {"owner_id": "document-save", "generation": "1"}
         received = False
 
         async def accept(self):
@@ -800,6 +802,299 @@ def test_canvas_broker_retires_the_previous_connection():
         assert await first.outgoing.get() is None
         assert broker.is_current("canvas-one", first) is False
         assert broker.is_current("canvas-one", second) is True
+
+    asyncio.run(scenario())
+
+
+def test_canvas_broker_newer_same_owner_generation_replaces_with_retryable_code():
+    async def scenario() -> None:
+        broker = CanvasBroker()
+        first = broker.register("canvas-one", "tab-one", 1)
+
+        second = broker.register("canvas-one", "tab-one", 2)
+
+        assert first.retired.is_set()
+        assert (
+            first.retired_close_code
+            == canvas_runtime.CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE
+        )
+        assert await first.outgoing.get() is None
+        assert broker.is_current("canvas-one", second) is True
+
+    asyncio.run(scenario())
+
+
+def test_canvas_broker_replacement_immediately_fails_pending_request():
+    async def scenario() -> None:
+        broker = CanvasBroker()
+        first = broker.register("canvas-one", "tab-one", 1)
+        call = asyncio.create_task(
+            asyncio.to_thread(broker.call, "canvas-one", "read_scene")
+        )
+        request = await first.outgoing.get()
+
+        broker.register("canvas-one", "tab-one", 2)
+
+        result = await asyncio.wait_for(call, timeout=1)
+        assert request is not None
+        assert result == {
+            "ok": False,
+            "error": "canvas_connection_replaced",
+            "payload": {
+                "error": "canvas_connection_replaced",
+                "retryable": True,
+                "message": (
+                    "The Canvas connection changed before the command completed."
+                ),
+            },
+        }
+
+    asyncio.run(scenario())
+
+
+def test_canvas_broker_older_same_owner_generation_cannot_replace_current():
+    async def scenario() -> None:
+        broker = CanvasBroker()
+        current = broker.register("canvas-one", "tab-one", 2)
+
+        stale = broker.register("canvas-one", "tab-one", 1)
+
+        assert stale.retired.is_set()
+        assert (
+            stale.retired_close_code
+            == canvas_runtime.CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE
+        )
+        assert await stale.outgoing.get() is None
+        assert broker.is_current("canvas-one", stale) is False
+        assert broker.is_current("canvas-one", current) is True
+
+    asyncio.run(scenario())
+
+
+def test_canvas_broker_different_owner_replacement_remains_terminal():
+    async def scenario() -> None:
+        broker = CanvasBroker()
+        first = broker.register("canvas-one", "tab-one", 1)
+
+        second = broker.register("canvas-one", "tab-two", 1)
+
+        assert first.retired.is_set()
+        assert first.retired_close_code == canvas_runtime.CANVAS_REPLACED_CLOSE_CODE
+        assert await first.outgoing.get() is None
+        assert broker.is_current("canvas-one", second) is True
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "query_params",
+    [
+        {},
+        {"owner_id": "page-one"},
+        {"generation": "1"},
+        {"owner_id": "invalid owner", "generation": "1"},
+    ],
+)
+def test_canvas_websocket_accepts_before_invalid_identity_close(
+    isolated_canvas_root, monkeypatch, query_params
+):
+    manifest = canvas_store.initialize_canvas("thread-invalid-identity")
+    monkeypatch.setattr(canvas_runtime, "auth_required", lambda: False)
+
+    class FakeWebSocket:
+        scope = {}
+        path_params = {"canvas_id": manifest["canvas_id"]}
+        accepted = False
+        close_code = 0
+
+        def __init__(self):
+            self.query_params = query_params
+
+        async def accept(self):
+            self.accepted = True
+
+        async def close(self, code=1000):
+            self.close_code = code
+
+    websocket = FakeWebSocket()
+    asyncio.run(canvas_runtime.canvas_websocket(websocket))
+
+    assert websocket.accepted is True
+    assert (
+        websocket.close_code
+        == canvas_runtime.CANVAS_INVALID_CONNECTION_CLOSE_CODE
+    )
+
+
+@pytest.mark.parametrize(
+    ("auth_is_required", "canvas_is_present", "expected_close_code"),
+    [
+        (True, True, canvas_runtime.CANVAS_AUTH_REQUIRED_CLOSE_CODE),
+        (False, False, canvas_runtime.CANVAS_NOT_FOUND_CLOSE_CODE),
+    ],
+)
+def test_canvas_websocket_accepts_before_terminal_access_close(
+    monkeypatch, auth_is_required, canvas_is_present, expected_close_code
+):
+    monkeypatch.setattr(canvas_runtime, "auth_required", lambda: auth_is_required)
+    monkeypatch.setattr(
+        canvas_runtime, "valid_auth_session_token", lambda _token: False
+    )
+    monkeypatch.setattr(
+        canvas_runtime, "canvas_exists", lambda _canvas_id: canvas_is_present
+    )
+
+    class FakeWebSocket:
+        scope = {}
+        path_params = {"canvas_id": "canvas-one"}
+        accepted = False
+        close_code = 0
+
+        async def accept(self):
+            self.accepted = True
+
+        async def close(self, code=1000):
+            self.close_code = code
+
+    websocket = FakeWebSocket()
+    asyncio.run(canvas_runtime.canvas_websocket(websocket))
+
+    assert websocket.accepted is True
+    assert websocket.close_code == expected_close_code
+
+
+def test_canvas_replacement_waits_for_active_response_commit(
+    isolated_canvas_root, monkeypatch
+):
+    manifest = canvas_store.initialize_canvas("thread-replacement-drain")
+    canvas_id = manifest["canvas_id"]
+    broker = CanvasBroker()
+    monkeypatch.setattr(canvas_runtime, "CANVAS_BROKER", broker)
+    monkeypatch.setattr(canvas_runtime, "auth_required", lambda: False)
+    save_started = threading.Event()
+    allow_save = threading.Event()
+    real_save = canvas_runtime._save_canvas_payload
+
+    def blocking_save(*args, **kwargs):
+        save_started.set()
+        assert allow_save.wait(timeout=2)
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(canvas_runtime, "_save_canvas_payload", blocking_save)
+
+    async def scenario() -> None:
+        request_id = "replacement-drain-response"
+        pending = canvas_runtime.PendingCanvasRequest(
+            context={
+                "command_id": "replacement-drain-command",
+                "input_hash": "sha256:" + ("d" * 64),
+                "base_revision": 0,
+            }
+        )
+        response_ack = asyncio.Event()
+        old_disconnect = asyncio.Event()
+        new_accepted = asyncio.Event()
+        new_registered = asyncio.Event()
+        new_disconnect = asyncio.Event()
+
+        class OldWebSocket:
+            scope = {}
+            path_params = {"canvas_id": canvas_id}
+            query_params = {"owner_id": "old-page", "generation": "1"}
+            receive_count = 0
+
+            async def accept(self):
+                return None
+
+            async def close(self, code=1000):
+                return None
+
+            async def receive_json(self):
+                if self.receive_count == 0:
+                    self.receive_count += 1
+                    with broker._lock:
+                        connection = broker._connections[canvas_id]
+                        pending.connection = connection
+                        broker._pending[request_id] = pending
+                    return {
+                        "type": "response",
+                        "id": request_id,
+                        "ok": True,
+                        "payload": {
+                            "document": {
+                                "store": {
+                                    "shape:drained": {
+                                        "id": "shape:drained",
+                                        "typeName": "shape",
+                                    }
+                                }
+                            },
+                            "changed_ids": ["shape:drained"],
+                            "refs": {},
+                            "warnings": [],
+                        },
+                    }
+                await old_disconnect.wait()
+                raise WebSocketDisconnect()
+
+            async def send_json(self, message):
+                if message.get("type") == "response_ack":
+                    response_ack.set()
+
+        class NewWebSocket:
+            scope = {}
+            path_params = {"canvas_id": canvas_id}
+            query_params = {"owner_id": "new-page", "generation": "1"}
+
+            async def accept(self):
+                new_accepted.set()
+
+            async def close(self, code=1000):
+                return None
+
+            async def receive_json(self):
+                new_registered.set()
+                await new_disconnect.wait()
+                raise WebSocketDisconnect()
+
+            async def send_json(self, message):
+                return None
+
+        old_task = asyncio.create_task(
+            canvas_runtime.canvas_websocket(OldWebSocket())
+        )
+        assert await asyncio.to_thread(save_started.wait, 1)
+        with broker._lock:
+            old_connection = broker._connections[canvas_id]
+
+        new_task = asyncio.create_task(
+            canvas_runtime.canvas_websocket(NewWebSocket())
+        )
+        await asyncio.wait_for(new_accepted.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+        assert new_registered.is_set() is False
+        assert broker.is_current(canvas_id, old_connection) is True
+
+        allow_save.set()
+        await asyncio.wait_for(response_ack.wait(), timeout=1)
+        await asyncio.wait_for(new_registered.wait(), timeout=1)
+
+        assert pending.result is not None
+        assert pending.result["ok"] is True
+        assert old_connection.retired.is_set()
+        assert canvas_store.load_canvas_document(canvas_id) == {
+            "store": {
+                "shape:drained": {
+                    "id": "shape:drained",
+                    "typeName": "shape",
+                }
+            }
+        }
+
+        old_disconnect.set()
+        new_disconnect.set()
+        await asyncio.gather(old_task, new_task)
 
     asyncio.run(scenario())
 
@@ -1603,6 +1898,7 @@ def test_apply_response_without_document_fails_closed_and_is_not_receipted(
         class FakeWebSocket:
             scope = {}
             path_params = {"canvas_id": canvas_id}
+            query_params = {"owner_id": "invalid-response", "generation": "1"}
             receive_count = 0
             sent_messages = []
 
@@ -1677,6 +1973,7 @@ def test_export_response_is_saved_without_returning_markdown(
         class FakeWebSocket:
             scope = {}
             path_params = {"canvas_id": canvas_id}
+            query_params = {"owner_id": "export-response", "generation": "1"}
             receive_count = 0
 
             async def accept(self):
@@ -1740,6 +2037,7 @@ def test_successful_apply_result_excludes_document_scene_and_images(
         class FakeWebSocket:
             scope = {}
             path_params = {"canvas_id": canvas_id}
+            query_params = {"owner_id": "compact-response", "generation": "1"}
             receive_count = 0
 
             async def accept(self):

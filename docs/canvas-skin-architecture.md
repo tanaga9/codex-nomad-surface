@@ -220,10 +220,20 @@ remain local to the component so they do not rerun the Streamlit application.
 ### Canvas Command Broker
 
 - Tracks the active browser connection for each canvas.
-- Keeps only the most recently connected editor writable and retires an older
-  connection when the same canvas is opened again.
+- Keeps only one editor connection active. Each page execution creates its own
+  owner ID, so reloads, duplicated tabs, and separate tabs cannot share an
+  owner. A per-canvas in-memory component generation lets a newer remount
+  replace its predecessor without allowing a stale remount to take the
+  connection back. Opening the canvas from a different page remains an explicit
+  terminal replacement of the previous page. Connections without both a valid
+  owner ID and generation are rejected before broker registration.
 - Sends structured read or apply requests to the live editor.
 - Correlates replies by request ID.
+- Ties each pending request to its editor connection and fails it immediately
+  when that connection is replaced or lost. Commands are not replayed onto a
+  new connection because an apply may already have taken effect.
+- Serializes connection replacement with active message persistence for each
+  canvas, so a retired editor cannot finish a late snapshot or command commit.
 - Applies bounded timeouts and disconnect handling.
 - Contains no tldraw document logic of its own.
 

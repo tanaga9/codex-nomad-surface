@@ -48,6 +48,12 @@ from codex_nomad_surface.http_gate import (
 
 CANVAS_TOOL_TIMEOUT_SECONDS = 25.0
 CANVAS_REPLACED_CLOSE_CODE = 4001
+CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE = 4002
+CANVAS_INVALID_CONNECTION_CLOSE_CODE = 4400
+CANVAS_AUTH_REQUIRED_CLOSE_CODE = 4401
+CANVAS_NOT_FOUND_CLOSE_CODE = 4404
+CANVAS_CONNECTION_OWNER_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+CANVAS_CONNECTION_MAX_GENERATION = (1 << 53) - 1
 CANVAS_PREVIEW_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 CANVAS_READ_MAX_REQUESTED_IDS = 100
 CANVAS_READ_MAX_SHAPES = 500
@@ -230,14 +236,18 @@ class PendingCanvasRequest:
     event: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    connection: CanvasConnection | None = None
 
 
 @dataclass
 class CanvasConnection:
+    owner_id: str = ""
+    generation: int = 0
     outgoing: AsyncOutboundQueue[dict[str, Any] | None] = field(
         default_factory=AsyncOutboundQueue
     )
     retired: threading.Event = field(default_factory=threading.Event)
+    retired_close_code: int = CANVAS_REPLACED_CLOSE_CODE
 
 
 class CanvasBroker:
@@ -245,14 +255,58 @@ class CanvasBroker:
         self._lock = threading.Lock()
         self._connections: dict[str, CanvasConnection] = {}
         self._pending: dict[str, PendingCanvasRequest] = {}
+        self._transition_locks: dict[str, asyncio.Lock] = {}
 
-    def register(self, canvas_id: str) -> CanvasConnection:
-        connection = CanvasConnection()
+    def transition_lock(self, canvas_id: str) -> asyncio.Lock:
         with self._lock:
-            previous = self._connections.pop(canvas_id, None)
+            return self._transition_locks.setdefault(canvas_id, asyncio.Lock())
+
+    def _fail_pending_for_connection_locked(
+        self, connection: CanvasConnection, error: str
+    ) -> None:
+        request_ids = [
+            request_id
+            for request_id, pending in self._pending.items()
+            if pending.connection is connection
+        ]
+        for request_id in request_ids:
+            pending = self._pending.pop(request_id)
+            pending.result = {
+                "ok": False,
+                "error": error,
+                "payload": {
+                    "error": error,
+                    "retryable": True,
+                    "message": "The Canvas connection changed before the command completed.",
+                },
+            }
+            pending.event.set()
+
+    def register(
+        self, canvas_id: str, owner_id: str = "", generation: int = 0
+    ) -> CanvasConnection:
+        connection = CanvasConnection(owner_id=owner_id, generation=generation)
+        with self._lock:
+            previous = self._connections.get(canvas_id)
             if previous:
+                same_owner = bool(owner_id) and previous.owner_id == owner_id
+                if same_owner and generation <= previous.generation:
+                    connection.retired_close_code = (
+                        CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE
+                    )
+                    connection.retired.set()
+                    connection.outgoing.put(None)
+                    return connection
+                previous.retired_close_code = (
+                    CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE
+                    if same_owner
+                    else CANVAS_REPLACED_CLOSE_CODE
+                )
                 previous.retired.set()
                 previous.outgoing.put(None)
+                self._fail_pending_for_connection_locked(
+                    previous, "canvas_connection_replaced"
+                )
             self._connections[canvas_id] = connection
         return connection
 
@@ -264,6 +318,9 @@ class CanvasBroker:
         with self._lock:
             if self._connections.get(canvas_id) is connection:
                 self._connections.pop(canvas_id, None)
+            self._fail_pending_for_connection_locked(
+                connection, "canvas_disconnected"
+            )
         connection.outgoing.put(None)
 
     def call(
@@ -281,6 +338,7 @@ class CanvasBroker:
             connection = self._connections.get(canvas_id)
             if not connection:
                 raise RuntimeError("canvas_unavailable")
+            pending.connection = connection
             self._pending[request_id] = pending
             request = {
                     "type": "request",
@@ -324,196 +382,237 @@ async def _canvas_sender(websocket: WebSocket, connection: CanvasConnection) -> 
         if message is None:
             if connection.retired.is_set():
                 try:
-                    await websocket.close(code=CANVAS_REPLACED_CLOSE_CODE)
+                    await websocket.close(code=connection.retired_close_code)
                 except RuntimeError:
                     pass
             return
         await websocket.send_json(message)
 
 
+async def _handle_canvas_message(
+    broker: CanvasBroker,
+    canvas_id: str,
+    connection: CanvasConnection,
+    message: object,
+) -> None:
+    if not isinstance(message, dict):
+        return
+    message_type = str(message.get("type") or "")
+    if message_type == "command_status":
+        status = await asyncio.to_thread(
+            _canvas_command_status, canvas_id, message.get("arguments")
+        )
+        connection.outgoing.put(
+            {
+                "type": "response_ack",
+                "id": str(message.get("id") or ""),
+                **status,
+            }
+        )
+        return
+    if message_type == "snapshot":
+        document = message.get("document")
+        if isinstance(document, dict):
+            await asyncio.to_thread(
+                _save_canvas_payload,
+                canvas_id,
+                document,
+                (
+                    str(message.get("preview_svg") or "")
+                    if "preview_svg" in message
+                    else None
+                ),
+                (
+                    message.get("preview_image_url")
+                    if "preview_image_url" in message
+                    else None
+                ),
+                message.get("preview_image_error"),
+            )
+        return
+    if message_type != "response":
+        return
+
+    request_id = str(message.get("id") or "")
+    payload = message.get("payload")
+    request_context = broker.request_context(request_id)
+    if request_context is None:
+        return
+    result: dict[str, Any] = {
+        "ok": bool(message.get("ok")),
+        "error": str(message.get("error") or ""),
+    }
+    is_apply_response = bool(request_context.get("command_id"))
+    is_export_response = request_context.get("method") == "export"
+    if is_export_response:
+        if result["ok"] and (
+            not isinstance(payload, dict)
+            or set(payload) != {"format", "markdown"}
+            or payload.get("format") != "obsidian"
+            or not isinstance(payload.get("markdown"), str)
+        ):
+            result = {
+                "ok": False,
+                "error": "canvas_invalid_response: export result is invalid",
+            }
+            payload = {
+                "error": "canvas_invalid_response",
+                "message": "A successful export response must include Obsidian Markdown.",
+            }
+        elif result["ok"]:
+            try:
+                saved_export = await asyncio.to_thread(
+                    save_canvas_obsidian_export,
+                    canvas_id,
+                    payload["markdown"],
+                )
+                payload = {"live": True, **saved_export}
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "error": f"export_save_failed: {exc}",
+                }
+                payload = {
+                    "error": "export_save_failed",
+                    "message": str(exc),
+                }
+        if isinstance(payload, dict):
+            result["payload"] = payload
+        broker.resolve(request_id, result)
+        return
+    if result["ok"] and is_apply_response and (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("document"), dict)
+    ):
+        result = {
+            "ok": False,
+            "error": "canvas_invalid_response: apply result has no document",
+        }
+        payload = {
+            "error": "canvas_invalid_response",
+            "message": "A successful apply response must include a document.",
+        }
+    if isinstance(payload, dict):
+        document = payload.pop("document", None)
+        preview_svg = str(payload.pop("preview_svg", "") or "")
+        preview_image_url = str(payload.pop("preview_image_url", "") or "")
+        if bool(message.get("ok")) and isinstance(document, dict):
+            try:
+                command_receipt = (
+                    {
+                        **request_context,
+                        "changed_ids": payload.get("changed_ids", []),
+                        "refs": payload.get("refs", {}),
+                        "warnings": payload.get("warnings", []),
+                    }
+                    if request_context.get("command_id")
+                    else None
+                )
+                manifest, preview_error = await asyncio.to_thread(
+                    _save_canvas_payload,
+                    canvas_id,
+                    document,
+                    preview_svg,
+                    preview_image_url,
+                    payload.get("preview_image_error"),
+                    command_receipt,
+                )
+                payload["revision"] = int(manifest.get("current_revision") or 0)
+                if preview_error:
+                    preview_image_url = ""
+                    payload["preview_image_error"] = preview_error
+            except Exception as exc:
+                result = {"ok": False, "error": f"save_failed: {exc}"}
+                payload = {"error": "save_failed", "message": str(exc)}
+        if result["ok"]:
+            payload.update(canvas_file_references(canvas_id))
+            if preview_image_url:
+                payload["preview_image_url"] = preview_image_url
+        if is_apply_response and result["ok"]:
+            payload = {
+                "live": True,
+                "revision": payload.get("revision", 0),
+                "changed_ids": payload.get("changed_ids", []),
+                "refs": payload.get("refs", {}),
+                "warnings": payload.get("warnings", []),
+                "semantic_success": payload.get("semantic_success", True),
+                "optimized_images": payload.get("optimized_images", []),
+                **canvas_file_references(canvas_id),
+            }
+        result["payload"] = payload
+    if is_apply_response:
+        connection.outgoing.put(
+            {
+                "type": "response_ack",
+                "id": request_id,
+                "ok": result["ok"],
+                "error": result.get("error", ""),
+            }
+        )
+    broker.resolve(request_id, result)
+
+
 async def canvas_websocket(websocket: WebSocket) -> None:
     if auth_required() and not valid_auth_session_token(
         auth_cookie_from_scope(websocket.scope)
     ):
-        await websocket.close(code=4401)
+        await websocket.accept()
+        await websocket.close(code=CANVAS_AUTH_REQUIRED_CLOSE_CODE)
         return
 
     canvas_id = str(websocket.path_params.get("canvas_id") or "")
     if not canvas_exists(canvas_id):
-        await websocket.close(code=4404)
+        await websocket.accept()
+        await websocket.close(code=CANVAS_NOT_FOUND_CLOSE_CODE)
         return
 
+    query_params = getattr(websocket, "query_params", {})
+    owner_id = str(query_params.get("owner_id") or "")
+    generation_value = str(query_params.get("generation") or "")
+    try:
+        generation = int(generation_value)
+    except ValueError:
+        generation = 0
+    if (
+        not CANVAS_CONNECTION_OWNER_PATTERN.fullmatch(owner_id)
+        or not 1 <= generation <= CANVAS_CONNECTION_MAX_GENERATION
+    ):
+        await websocket.accept()
+        await websocket.close(code=CANVAS_INVALID_CONNECTION_CLOSE_CODE)
+        return
+
+    broker = CANVAS_BROKER
+    transition_lock = broker.transition_lock(canvas_id)
     await websocket.accept()
-    connection = CANVAS_BROKER.register(canvas_id)
+    async with transition_lock:
+        connection = broker.register(canvas_id, owner_id, generation)
     sender = asyncio.create_task(_canvas_sender(websocket, connection))
     try:
         while True:
             message = await websocket.receive_json()
-            if not CANVAS_BROKER.is_current(canvas_id, connection):
-                return
-            if not isinstance(message, dict):
-                continue
-            message_type = str(message.get("type") or "")
-            if message_type == "command_status":
-                status = await asyncio.to_thread(
-                    _canvas_command_status, canvas_id, message.get("arguments")
-                )
-                connection.outgoing.put(
-                    {
-                        "type": "response_ack",
-                        "id": str(message.get("id") or ""),
-                        **status,
-                    }
-                )
-                continue
-            if message_type == "snapshot":
-                document = message.get("document")
-                if isinstance(document, dict):
-                    await asyncio.to_thread(
-                        _save_canvas_payload,
-                        canvas_id,
-                        document,
-                        (
-                            str(message.get("preview_svg") or "")
-                            if "preview_svg" in message
-                            else None
-                        ),
-                        (
-                            message.get("preview_image_url")
-                            if "preview_image_url" in message
-                            else None
-                        ),
-                        message.get("preview_image_error"),
+            message_type = (
+                str(message.get("type") or "")
+                if isinstance(message, dict)
+                else ""
+            )
+            if message_type in {"snapshot", "response"}:
+                async with transition_lock:
+                    if not broker.is_current(canvas_id, connection):
+                        return
+                    await _handle_canvas_message(
+                        broker, canvas_id, connection, message
                     )
-                continue
-            if message_type != "response":
-                continue
-
-            request_id = str(message.get("id") or "")
-            payload = message.get("payload")
-            request_context = CANVAS_BROKER.request_context(request_id)
-            if request_context is None:
-                continue
-            result: dict[str, Any] = {
-                "ok": bool(message.get("ok")),
-                "error": str(message.get("error") or ""),
-            }
-            is_apply_response = bool(request_context.get("command_id"))
-            is_export_response = request_context.get("method") == "export"
-            if is_export_response:
-                if result["ok"] and (
-                    not isinstance(payload, dict)
-                    or set(payload) != {"format", "markdown"}
-                    or payload.get("format") != "obsidian"
-                    or not isinstance(payload.get("markdown"), str)
-                ):
-                    result = {
-                        "ok": False,
-                        "error": "canvas_invalid_response: export result is invalid",
-                    }
-                    payload = {
-                        "error": "canvas_invalid_response",
-                        "message": "A successful export response must include Obsidian Markdown.",
-                    }
-                elif result["ok"]:
-                    try:
-                        saved_export = await asyncio.to_thread(
-                            save_canvas_obsidian_export,
-                            canvas_id,
-                            payload["markdown"],
-                        )
-                        payload = {"live": True, **saved_export}
-                    except Exception as exc:
-                        result = {
-                            "ok": False,
-                            "error": f"export_save_failed: {exc}",
-                        }
-                        payload = {
-                            "error": "export_save_failed",
-                            "message": str(exc),
-                        }
-                if isinstance(payload, dict):
-                    result["payload"] = payload
-                CANVAS_BROKER.resolve(request_id, result)
-                continue
-            if result["ok"] and is_apply_response and (
-                not isinstance(payload, dict)
-                or not isinstance(payload.get("document"), dict)
-            ):
-                result = {
-                    "ok": False,
-                    "error": "canvas_invalid_response: apply result has no document",
-                }
-                payload = {
-                    "error": "canvas_invalid_response",
-                    "message": "A successful apply response must include a document.",
-                }
-            if isinstance(payload, dict):
-                document = payload.pop("document", None)
-                preview_svg = str(payload.pop("preview_svg", "") or "")
-                preview_image_url = str(
-                    payload.pop("preview_image_url", "") or ""
+            else:
+                if not broker.is_current(canvas_id, connection):
+                    return
+                await _handle_canvas_message(
+                    broker, canvas_id, connection, message
                 )
-                if bool(message.get("ok")) and isinstance(document, dict):
-                    try:
-                        command_receipt = (
-                            {
-                                **request_context,
-                                "changed_ids": payload.get("changed_ids", []),
-                                "refs": payload.get("refs", {}),
-                                "warnings": payload.get("warnings", []),
-                            }
-                            if request_context.get("command_id")
-                            else None
-                        )
-                        manifest, preview_error = await asyncio.to_thread(
-                            _save_canvas_payload,
-                            canvas_id,
-                            document,
-                            preview_svg,
-                            preview_image_url,
-                            payload.get("preview_image_error"),
-                            command_receipt,
-                        )
-                        payload["revision"] = int(
-                            manifest.get("current_revision") or 0
-                        )
-                        if preview_error:
-                            preview_image_url = ""
-                            payload["preview_image_error"] = preview_error
-                    except Exception as exc:
-                        result = {"ok": False, "error": f"save_failed: {exc}"}
-                        payload = {"error": "save_failed", "message": str(exc)}
-                if result["ok"]:
-                    payload.update(canvas_file_references(canvas_id))
-                    if preview_image_url:
-                        payload["preview_image_url"] = preview_image_url
-                if is_apply_response and result["ok"]:
-                    payload = {
-                        "live": True,
-                        "revision": payload.get("revision", 0),
-                        "changed_ids": payload.get("changed_ids", []),
-                        "refs": payload.get("refs", {}),
-                        "warnings": payload.get("warnings", []),
-                        "semantic_success": payload.get("semantic_success", True),
-                        "optimized_images": payload.get("optimized_images", []),
-                        **canvas_file_references(canvas_id),
-                    }
-                result["payload"] = payload
-            if is_apply_response:
-                connection.outgoing.put(
-                    {
-                        "type": "response_ack",
-                        "id": request_id,
-                        "ok": result["ok"],
-                        "error": result.get("error", ""),
-                    }
-                )
-            CANVAS_BROKER.resolve(request_id, result)
     except WebSocketDisconnect:
         pass
     finally:
-        CANVAS_BROKER.unregister(canvas_id, connection)
+        async with transition_lock:
+            broker.unregister(canvas_id, connection)
         sender.cancel()
 
 

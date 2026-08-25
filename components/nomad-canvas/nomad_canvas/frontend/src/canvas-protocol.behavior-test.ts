@@ -49,6 +49,73 @@ import {
   CANVAS_IMAGE_MAX_FILES_AT_ONCE,
   normalizeUploadedCanvasImageAsset,
 } from "./canvas-assets";
+import {
+  CANVAS_REPLACED_CLOSE_CODE,
+  CANVAS_SAME_OWNER_MAX_RETRIES,
+  CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE,
+  createCanvasConnectionIdentityFactory,
+  createCanvasPageOwnerId,
+  shouldReconnectCanvasSocket,
+} from "./canvas-connection-policy";
+
+assert(
+  !shouldReconnectCanvasSocket(CANVAS_REPLACED_CLOSE_CODE, false, 0),
+  "Canvas retried a replacement by a different browser tab.",
+);
+assert(
+  shouldReconnectCanvasSocket(
+    CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE,
+    false,
+    CANVAS_SAME_OWNER_MAX_RETRIES - 1,
+  ),
+  "Canvas stopped before its bounded same-tab retry limit.",
+);
+assert(
+  !shouldReconnectCanvasSocket(
+    CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE,
+    false,
+    CANVAS_SAME_OWNER_MAX_RETRIES,
+  ),
+  "Canvas allowed same-tab retries to continue without a bound.",
+);
+assert(
+  !shouldReconnectCanvasSocket(4401, false, 0) &&
+    !shouldReconnectCanvasSocket(4404, false, 0),
+  "Canvas retried a terminal authentication or missing-document close.",
+);
+assert(
+  !shouldReconnectCanvasSocket(1006, true, 0),
+  "Canvas retried after its component was disposed.",
+);
+assert(
+  shouldReconnectCanvasSocket(1006, false, CANVAS_SAME_OWNER_MAX_RETRIES),
+  "Canvas same-tab retries disabled ordinary network recovery.",
+);
+
+{
+  const nextIdentity = createCanvasConnectionIdentityFactory("page-owner");
+  const first = nextIdentity("canvas-one");
+  const second = nextIdentity("canvas-one");
+  const otherCanvas = nextIdentity("canvas-two");
+  assert(
+    first.ownerId === "page-owner" &&
+      first.generation === 1 &&
+      second.ownerId === first.ownerId &&
+      second.generation === 2 &&
+      otherCanvas.ownerId === first.ownerId &&
+      otherCanvas.generation === 1,
+    "Canvas connection identity did not preserve page ownership and per-canvas generations.",
+  );
+}
+
+assert(
+  createCanvasPageOwnerId(
+    () => undefined,
+    () => 1_000,
+    () => 0.5,
+  ) === "page-rs-i",
+  "Canvas page ownership had no fallback outside a secure context.",
+);
 
 assert(
   CANVAS_IMAGE_MAX_FILES_AT_ONCE === 2,

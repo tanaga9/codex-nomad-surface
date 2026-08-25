@@ -35,6 +35,13 @@ import {
   createCanvasAssetStore,
   registerCanvasImageAssetHandler,
 } from "./canvas-assets";
+import {
+  CANVAS_CONNECTION_STABILITY_RESET_MS,
+  CANVAS_RECONNECT_DELAY_MS,
+  CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE,
+  nextCanvasConnectionIdentity,
+  shouldReconnectCanvasSocket,
+} from "./canvas-connection-policy";
 
 export type NomadCanvasStateShape = Record<string, never>;
 
@@ -123,6 +130,17 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   const lastPersistedDocumentFingerprintRef = useRef<string | null>(null);
   const lastExportRequestRef = useRef<string | null>(null);
   const pendingExportRequestRef = useRef<CanvasExportRequest | null>(null);
+  const connectionIdentityRef = useRef<
+    | (ReturnType<typeof nextCanvasConnectionIdentity> & { canvasId: string })
+    | null
+  >(null);
+  if (connectionIdentityRef.current?.canvasId !== canvasId) {
+    connectionIdentityRef.current = {
+      canvasId,
+      ...nextCanvasConnectionIdentity(canvasId),
+    };
+  }
+  const connectionIdentity = connectionIdentityRef.current;
   const assetStore = useMemo(
     () =>
       createCanvasAssetStore(canvasId, (message) =>
@@ -434,12 +452,24 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
   }, [editor, persistSnapshot, scheduleSnapshot]);
 
   useEffect(() => {
-    if (!editor || !websocketUrl) return;
-    const resolvedWebsocketUrl = websocketUrl.startsWith("/")
-      ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${websocketUrl}`
-      : websocketUrl;
+    if (!editor || !websocketUrl || !connectionIdentity) {
+      return;
+    }
+    const resolvedWebsocketUrl = new URL(websocketUrl, window.location.href);
+    resolvedWebsocketUrl.protocol =
+      window.location.protocol === "https:" ? "wss:" : "ws:";
+    resolvedWebsocketUrl.searchParams.set(
+      "owner_id",
+      connectionIdentity.ownerId,
+    );
+    resolvedWebsocketUrl.searchParams.set(
+      "generation",
+      String(connectionIdentity.generation),
+    );
     let disposed = false;
     let retryTimer: number | null = null;
+    let stabilityTimer: number | null = null;
+    let sameOwnerRetryCount = 0;
     let websocket: WebSocket | null = null;
     const responseAcks = new Map<
       string,
@@ -511,8 +541,15 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       websocketRef.current = nextWebsocket;
 
       nextWebsocket.onopen = () => {
-        if (disposed) return;
+        if (disposed || websocket !== nextWebsocket) return;
         setConnectionState("connected");
+        if (stabilityTimer !== null) window.clearTimeout(stabilityTimer);
+        stabilityTimer = window.setTimeout(() => {
+          stabilityTimer = null;
+          if (!disposed && websocket === nextWebsocket) {
+            sameOwnerRetryCount = 0;
+          }
+        }, CANVAS_CONNECTION_STABILITY_RESET_MS);
         nextWebsocket.send(
           JSON.stringify({ type: "hello", canvas_id: canvasId }),
         );
@@ -522,20 +559,37 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         }
       };
       nextWebsocket.onclose = (event) => {
-        if (disposed) return;
+        if (disposed || websocket !== nextWebsocket) return;
+        if (stabilityTimer !== null) {
+          window.clearTimeout(stabilityTimer);
+          stabilityTimer = null;
+        }
         if (websocketRef.current === nextWebsocket) {
           websocketRef.current = null;
         }
-        if ([4001, 4401, 4404].includes(event.code)) {
+        if (
+          !shouldReconnectCanvasSocket(
+            event.code,
+            disposed,
+            sameOwnerRetryCount,
+          )
+        ) {
           failPendingAcks("canvas_commit_status_unavailable");
           setConnectionState("disconnected");
           return;
         }
+        if (event.code === CANVAS_SAME_OWNER_REPLACED_CLOSE_CODE) {
+          sameOwnerRetryCount += 1;
+        }
         setConnectionState("reconnecting");
-        retryTimer = window.setTimeout(connect, 1500);
+        retryTimer = window.setTimeout(connect, CANVAS_RECONNECT_DELAY_MS);
       };
-      nextWebsocket.onerror = () => nextWebsocket.close();
+      nextWebsocket.onerror = () => {
+        if (disposed || websocket !== nextWebsocket) return;
+        nextWebsocket.close();
+      };
       nextWebsocket.onmessage = (event) => {
+        if (disposed || websocket !== nextWebsocket) return;
         void (async () => {
           let message: {
             type?: string;
@@ -656,6 +710,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       failPendingAcks("canvas_component_disposed_before_commit");
       window.clearInterval(statusTimer);
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (stabilityTimer !== null) window.clearTimeout(stabilityTimer);
       websocket?.close();
       websocketRef.current = null;
     };
@@ -664,6 +719,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
     buildExportPayload,
     buildReadPayload,
     canvasId,
+    connectionIdentity,
     editor,
     persistSnapshot,
     websocketUrl,
