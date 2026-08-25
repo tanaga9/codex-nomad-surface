@@ -82,6 +82,15 @@ GitHub Actions also builds and verifies the wheel for pull requests, updates
 to `main`, and manual workflow runs. Download the resulting `.whl` from the
 workflow run's artifacts.
 
+The wheel includes the bundled frontend dependencies and their required
+license notices. Project code is MIT-licensed; bundled dependencies remain
+under the notices in `components/licenses/`, including the separate tldraw
+license. During packaging, these notices are copied into
+`codex_nomad_surface/licenses/` inside the wheel. A tldraw production license
+key is not embedded in the wheel and is a deployment-time concern. After
+changing frontend dependencies, optionally run
+`python scripts/generate_third_party_licenses.py` to refresh the notices.
+
 Standard PEP 517 builds, including `python -m build` and `pip install .`, also
 prepare or validate the registered frontend components automatically. Source
 distributions include the generated runtime assets, so installing from an

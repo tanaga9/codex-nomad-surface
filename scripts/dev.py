@@ -24,6 +24,11 @@ RUNTIME_ROOT = ROOT / "codex_nomad_surface" / "ui_components" / "generated"
 PYTHON_BUILD_DIR = ROOT / "build"
 PACKAGE_OUTPUT_DIR = ROOT / "dist"
 PACKAGE_METADATA_DIR = ROOT / "codex_nomad_surface.egg-info"
+REQUIRED_LICENSE_FILES = (
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.md",
+    "TLDRAW_LICENSE.md",
+)
 MINIMUM_PYTHON = (3, 12)
 COMPONENT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -210,6 +215,20 @@ def _verify_package_entries(
     *,
     artifact: str,
 ) -> None:
+    missing_licenses = [
+        filename
+        for filename in REQUIRED_LICENSE_FILES
+        if not any(
+            name == filename or name.endswith(f"/licenses/{filename}")
+            for name in names
+        )
+    ]
+    if missing_licenses:
+        raise DevCommandError(
+            f"{artifact} is missing required license files: "
+            f"{', '.join(missing_licenses)}."
+        )
+
     runtime_prefixes: list[str] = []
     for component in components:
         runtime_prefix = component.runtime_dir.relative_to(ROOT).as_posix() + "/"

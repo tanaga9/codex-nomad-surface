@@ -46,7 +46,11 @@ packages = [
 
 [tool.setuptools.package-data]
 "codex_nomad_surface.ui_components" = ["assets/*.js", "assets/*.css", "assets/*.svg"]
-"codex_nomad_surface" = ["pyproject.toml", "ui_components/generated/**/*"]
+"codex_nomad_surface" = [
+    "pyproject.toml",
+    "licenses/*.md",
+    "ui_components/generated/**/*",
+]
 
 [tool.ruff]
 target-version = "py312"

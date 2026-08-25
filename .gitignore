@@ -11,5 +11,6 @@ node_modules/
 /build/
 components/*/*/frontend/build/
 codex_nomad_surface/ui_components/generated/
+codex_nomad_surface/licenses/
 codex_nomad_surface/pyproject.toml
 dist/

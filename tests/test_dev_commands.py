@@ -138,6 +138,26 @@ def _write_runtime_assets(
         "codex_nomad_surface/pyproject.toml",
         "[project]\nname = 'test'\nversion = '0.0.0'\n",
     )
+    for filename in dev.REQUIRED_LICENSE_FILES:
+        archive.writestr(f"test-0.0.0.dist-info/licenses/{filename}", "license")
+
+
+def test_verify_package_wheel_rejects_missing_third_party_licenses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component = _component_with_nested_asset(tmp_path, monkeypatch)
+    wheel = tmp_path / "missing-licenses.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for path in component.runtime_dir.rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(dev.ROOT).as_posix())
+        archive.writestr(
+            "codex_nomad_surface/pyproject.toml",
+            "[project]\nname = 'test'\nversion = '0.0.0'\n",
+        )
+
+    with pytest.raises(dev.DevCommandError, match="missing required license files"):
+        dev.verify_package_wheel(wheel, (component,))
 
 
 def test_verify_package_wheel_rejects_missing_nested_asset(

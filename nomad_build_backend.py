@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -18,6 +19,12 @@ REGISTRY_PATH = ROOT / "components.toml"
 RUNTIME_ROOT = ROOT / "codex_nomad_surface" / "ui_components" / "generated"
 PACKAGE_MANIFEST_PATH = ROOT / "codex_nomad_surface" / "pyproject.toml"
 PROJECT_CONFIG_PATH = ROOT / "pyproject.toml"
+COMPONENT_LICENSES_ROOT = ROOT / "components" / "licenses"
+PACKAGE_LICENSES_ROOT = ROOT / "codex_nomad_surface" / "licenses"
+COMPONENT_LICENSE_FILES = (
+    "THIRD_PARTY_LICENSES.md",
+    "TLDRAW_LICENSE.md",
+)
 
 
 @dataclass(frozen=True)
@@ -168,6 +175,15 @@ def _write_package_manifest(components: tuple[BuildComponent, ...]) -> None:
     PACKAGE_MANIFEST_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _sync_component_licenses() -> None:
+    PACKAGE_LICENSES_ROOT.mkdir(parents=True, exist_ok=True)
+    for filename in COMPONENT_LICENSE_FILES:
+        source = COMPONENT_LICENSES_ROOT / filename
+        if not source.is_file():
+            raise RuntimeError(f"Component license file is missing: {source}.")
+        shutil.copyfile(source, PACKAGE_LICENSES_ROOT / filename)
+
+
 def _prepare_components() -> None:
     components = _load_components()
     is_sdist = (ROOT / "PKG-INFO").is_file()
@@ -212,6 +228,7 @@ def _prepare_components() -> None:
             cwd=ROOT,
             check=True,
         )
+        _sync_component_licenses()
     _verify_generated_components(components)
     _write_package_manifest(components)
 
