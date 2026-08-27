@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mind Map"
+  short_description: "Create Buzan-style Mind Maps in Nomad Canvas."
+  default_prompt: "Use $mindmap in the active Nomad Canvas. If Canvas Dynamic Tools are unavailable, explain that a Canvas Skin task is required."

@@ -1,0 +1,20 @@
+{
+  "name": "nomad-surface-local",
+  "interface": {
+    "displayName": "Nomad Surface Local"
+  },
+  "plugins": [
+    {
+      "name": "nomad-surface",
+      "source": {
+        "source": "local",
+        "path": "./plugins/nomad-surface"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

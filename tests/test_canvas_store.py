@@ -2157,4 +2157,9 @@ def test_canvas_initial_context_is_a_developer_message():
         "text"
     ]
     assert "narrowest useful" in items[0]["content"][0]["text"]
-    assert "canvas.export with format obsidian" in items[0]["content"][0]["text"]
+    assert "current schemas as authoritative" in items[0]["content"][0]["text"]
+    assert "preserving unrelated user content" in items[0]["content"][0]["text"]
+    assert "external or offline canvas integrations" in items[0]["content"][0][
+        "text"
+    ]
+    assert "Export only when the user asks" in items[0]["content"][0]["text"]

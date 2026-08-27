@@ -26,6 +26,10 @@ This directory is organized by document role rather than by feature chronology.
   - Architecture and implemented prototype status for the embedded tldraw
     Canvas Skin, Codex App Server tool bridge, and file-backed persistence.
 
+- [nomad-surface-plugin.md](nomad-surface-plugin.md)
+  - Minimal bundled plugin architecture for a Nomad Canvas-specific mind-map
+    skill, plus distribution, validation, and lightweight update policy.
+
 ## Protocols
 
 - [protocols/promptform.md](protocols/promptform.md)
