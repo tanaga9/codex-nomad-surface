@@ -179,7 +179,11 @@ minute.
 - `codex_nomad_surface/settings.py`: storage in `.nomad_surface/settings.json`.
 - `promptform-defs/*.json`: reusable Prompt Form definitions for this project or shared general forms.
 - `codex_nomad_surface/promptform_defs.py`: loader for Prompt Form definition files.
-- `codex_nomad_surface/skill_defs.py`: loader for Codex Skill definition files.
+- `.agents/skills/`: Skills that maintain this repository's implementation.
+- `plugins/nomad-surface/skills/`: project-independent Skills distributed with
+  the Nomad Surface plugin.
+- `codex_nomad_surface/skill_defs.py`: adapter for Skill metadata returned by
+  Codex App Server.
 - `components.toml`: registry of buildable frontend components and their
   generated-asset destinations.
 - `scripts/dev.py`: project-wide setup, component build, and verification

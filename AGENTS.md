@@ -19,6 +19,12 @@ Use `git diff --cached` for staged-review or commit-message requests. Use
 `git diff` for current unstaged edits. If both exist, clearly distinguish them.
 Do not stage, unstage, revert, or commit unless explicitly asked.
 
+## Bundled Skills
+
+- Keep Skills that inspect or modify this repository in `.agents/skills/`.
+- Keep project-independent plugin Skills in `plugins/nomad-surface/skills/`.
+  They may depend on runtime capabilities, but not on this repository checkout.
+
 
 # Embedded Response Forms
 

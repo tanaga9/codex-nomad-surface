@@ -52,6 +52,11 @@ plugins/nomad-surface/
         └── references/mindmap-basics.md
 ```
 
+Plugin Skills are project-independent: once installed, they may be used while
+working in another project. They may require Nomad Surface runtime capabilities,
+but must not depend on this repository checkout. Skills that maintain this
+repository live under `.agents/skills/` instead.
+
 ## `mindmap`
 
 The skill provides Tony Buzan-style Mind Map guidance for Nomad Canvas. It is
