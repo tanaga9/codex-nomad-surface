@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import shlex
+import socket
 import subprocess
 import tempfile
 import textwrap
@@ -5371,7 +5372,19 @@ def project_creation_workspace(
 
 
 def render_sidebar_home_title() -> None:
-    with st.container(key="sidebar-home-title"):
+    st.html(
+        """
+        <style>
+        .st-key-sidebar-home-title > [data-testid="stVerticalBlock"] {
+          gap: 0 !important;
+        }
+        .st-key-sidebar-home-title [data-testid="stCaptionContainer"] {
+          margin-top: -0.55rem;
+        }
+        </style>
+        """
+    )
+    with st.container(key="sidebar-home-title", gap="xsmall"):
         st.button(
             "Codex Nomad Surface",
             key="reset_home_view",
@@ -5379,6 +5392,7 @@ def render_sidebar_home_title() -> None:
             type="tertiary",
             width="content",
         )
+        st.caption(socket.gethostname())
 
 
 def surface_sidebar(
