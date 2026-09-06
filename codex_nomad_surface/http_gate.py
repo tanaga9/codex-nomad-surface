@@ -36,6 +36,7 @@ STREAMLIT_RESERVED_PATH_PREFIXES = (
     "/component/",
     "/static/",
 )
+FILE_CONTENT_ROUTE = "/_nomad_file"
 
 
 def auth_required() -> bool:
@@ -83,6 +84,28 @@ def file_content_target_from_url_path(url_path: str) -> tuple[Path, int | None] 
         line_number = int(line_match.group(1))
         target = target[: line_match.start()]
     return Path(target), line_number
+
+
+def file_content_target_from_scope(
+    scope: dict[str, Any],
+) -> tuple[Path, int | None] | None:
+    request_path = str(scope.get("path") or "")
+    if request_path != FILE_CONTENT_ROUTE:
+        return file_content_target_from_url_path(request_path)
+
+    query = parse_qs(
+        bytes(scope.get("query_string") or b"").decode("latin-1"),
+        keep_blank_values=True,
+    )
+    raw_path = str((query.get("path") or [""])[0])
+    if not re.match(r"^[A-Za-z]:[\\/]", raw_path):
+        return None
+    line_number = None
+    line_match = re.search(r":([1-9][0-9]*)$", raw_path)
+    if line_match:
+        line_number = int(line_match.group(1))
+        raw_path = raw_path[: line_match.start()]
+    return Path(raw_path), line_number
 
 
 def file_content_path_from_url_path(url_path: str) -> Path | None:
@@ -223,7 +246,7 @@ class FileContentMiddleware:
             await self._handle_login(scope, receive, send)
             return
 
-        target = file_content_target_from_url_path(request_path)
+        target = file_content_target_from_scope(scope)
         if auth_required() and not valid_auth_session_token(auth_cookie_from_scope(scope)):
             if file_content_route_enabled() and target is not None:
                 await self._send_response(

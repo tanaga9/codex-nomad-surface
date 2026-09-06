@@ -207,7 +207,10 @@ answer instead of leaving the turn blocked on an invisible prompt.
 When the Settings Codex App Server URL host is exactly `127.0.0.1`, HTTP paths
 that look like absolute host file paths are served as local file previews. For
 example, `/path/to/file.py:67` reads `/path/to/file.py` and treats `67` as a
-line number. File previews require the same signed authentication cookie as the
+line number. Windows drive-letter links are converted to an authenticated,
+same-origin preview URL before the browser sees them, so Codex can use its
+normal absolute-path Markdown links without browser-specific handling. File
+previews require the same signed authentication cookie as the
 main app. File contents are returned directly, and directory paths return an
 empty response. This exposes files readable by the web server process and is
 intended for local-host operation only.

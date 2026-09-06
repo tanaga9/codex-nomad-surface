@@ -1,6 +1,9 @@
 import unittest
 
-from codex_nomad_surface.markdown_rendering import markdown_with_soft_line_breaks
+from codex_nomad_surface.markdown_rendering import (
+    markdown_with_local_file_links,
+    markdown_with_soft_line_breaks,
+)
 
 
 class MarkdownRenderingTests(unittest.TestCase):
@@ -56,6 +59,63 @@ class MarkdownRenderingTests(unittest.TestCase):
         source = "alpha  \nbeta\\\ngamma"
 
         self.assertEqual(markdown_with_soft_line_breaks(source), source)
+
+    def test_windows_absolute_path_link_uses_same_origin_route(self) -> None:
+        source = r"[app.py](C:\Users\person\repo\app.py:12)"
+
+        self.assertEqual(
+            markdown_with_local_file_links(source),
+            "[app.py](/_nomad_file?path=C%3A%5CUsers%5Cperson%5Crepo%5Capp.py%3A12)",
+        )
+
+    def test_angle_wrapped_windows_path_with_spaces_uses_same_origin_route(self) -> None:
+        source = r"[My Report.md](<C:\Work Files\My Report.md:3>)"
+
+        self.assertEqual(
+            markdown_with_local_file_links(source),
+            "[My Report.md](/_nomad_file?path=C%3A%5CWork%20Files%5CMy%20Report.md%3A3)",
+        )
+
+    def test_web_and_posix_links_are_preserved(self) -> None:
+        source = "[web](https://example.com) [local](/srv/repo/app.py:4)"
+
+        self.assertEqual(markdown_with_local_file_links(source), source)
+
+    def test_links_in_fenced_code_blocks_are_preserved(self) -> None:
+        source = (
+            "before [app](C:\\repo\\app.py)\n"
+            "```markdown\n"
+            "[sample](C:\\example\\file.py)\n"
+            "```\n"
+            "after [test](C:\\repo\\test.py)"
+        )
+
+        self.assertEqual(
+            markdown_with_local_file_links(source),
+            "before [app](/_nomad_file?path=C%3A%5Crepo%5Capp.py)\n"
+            "```markdown\n"
+            "[sample](C:\\example\\file.py)\n"
+            "```\n"
+            "after [test](/_nomad_file?path=C%3A%5Crepo%5Ctest.py)",
+        )
+
+    def test_links_in_indented_code_and_html_blocks_are_preserved(self) -> None:
+        source = (
+            "    [indented](C:\\example\\indented.py)\n"
+            "<pre>\n"
+            "[html](C:\\example\\html.py)\n"
+            "</pre>\n"
+            "[link](C:\\example\\linked.py)"
+        )
+
+        self.assertEqual(
+            markdown_with_local_file_links(source),
+            "    [indented](C:\\example\\indented.py)\n"
+            "<pre>\n"
+            "[html](C:\\example\\html.py)\n"
+            "</pre>\n"
+            "[link](/_nomad_file?path=C%3A%5Cexample%5Clinked.py)",
+        )
 
 
 if __name__ == "__main__":

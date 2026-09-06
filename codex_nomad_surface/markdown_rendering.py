@@ -1,6 +1,63 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
+
+
+WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+MARKDOWN_ANGLE_LINK = re.compile(
+    r"(?P<prefix>!?\[[^\]\n]*\]\(\s*)<(?P<destination>[A-Za-z]:[\\/][^>\n]+)>(?P<suffix>\s*\))"
+)
+MARKDOWN_PLAIN_LINK = re.compile(
+    r"(?P<prefix>!?\[[^\]\n]*\]\(\s*)(?P<destination>[A-Za-z]:[\\/][^)\n]*)(?P<suffix>\s*\))"
+)
+
+
+def markdown_with_local_file_links(text: object) -> str:
+    """Route Windows absolute Markdown links back through this web app."""
+    source = str(text or "")
+
+    def replace(match: re.Match[str]) -> str:
+        destination = match.group("destination").strip()
+        if not WINDOWS_ABSOLUTE_PATH.match(destination):
+            return match.group(0)
+        href = f"/_nomad_file?path={quote(destination, safe='')}"
+        return f"{match.group('prefix')}{href}{match.group('suffix')}"
+
+    rendered: list[str] = []
+    in_fence = False
+    fence_char = ""
+    fence_length = 0
+    in_html_block = False
+
+    for line in source.splitlines(keepends=True):
+        body, _ = split_line_ending(line)
+        fence = markdown_fence_start_marker(body)
+        if fence and not in_fence:
+            fence_char, fence_length = fence
+            in_fence = True
+            rendered.append(line)
+            continue
+        if in_fence:
+            rendered.append(line)
+            if markdown_fence_close_marker(body, fence_char, fence_length):
+                in_fence = False
+                fence_char = ""
+                fence_length = 0
+            continue
+
+        if markdown_html_block_start(body):
+            in_html_block = True
+        if in_html_block or body.startswith(("    ", "\t")):
+            rendered.append(line)
+            if in_html_block and markdown_html_block_end(body):
+                in_html_block = False
+            continue
+
+        rewritten = MARKDOWN_ANGLE_LINK.sub(replace, line)
+        rendered.append(MARKDOWN_PLAIN_LINK.sub(replace, rewritten))
+
+    return "".join(rendered)
 
 
 def markdown_with_soft_line_breaks(text: object) -> str:

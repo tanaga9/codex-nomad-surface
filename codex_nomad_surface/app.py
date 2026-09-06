@@ -84,7 +84,10 @@ from codex_nomad_surface.http_gate import (
     cookie_auth_is_valid,
     sync_file_content_route_setting,
 )
-from codex_nomad_surface.markdown_rendering import markdown_with_soft_line_breaks
+from codex_nomad_surface.markdown_rendering import (
+    markdown_with_local_file_links,
+    markdown_with_soft_line_breaks,
+)
 from codex_nomad_surface.promptform_defs import (
     PromptFormDef,
     load_promptform_defs,
@@ -1498,6 +1501,10 @@ def render_chat_user_markdown(text: object) -> None:
     st.markdown(markdown_with_soft_line_breaks(text))
 
 
+def render_assistant_markdown(text: object) -> None:
+    st.markdown(markdown_with_local_file_links(text))
+
+
 def user_message_needs_copy_backup(metadata: dict[str, Any]) -> bool:
     return metadata.get("delivery_status") in {"sending", "failed"}
 
@@ -1687,7 +1694,7 @@ def render_codex_output_auxiliary(
                 if segment.get("kind") == "operation_event"
             ]
             for segment in commentary_segments:
-                st.markdown(str(segment.get("text") or ""))
+                render_assistant_markdown(segment.get("text"))
             render_progress_operation_segments(operation_segments)
 
     for kind, label in CODEX_OUTPUT_AUXILIARY_LABELS.items():
@@ -1698,7 +1705,7 @@ def render_codex_output_auxiliary(
             st.error(text)
         else:
             with st.expander(label, expanded=False):
-                st.markdown(text)
+                render_assistant_markdown(text)
 
 def render_progress_operation_segments(operation_segments: list[dict[str, Any]]) -> None:
     if not operation_segments:
@@ -1726,7 +1733,7 @@ def render_codex_stream_output(parts: dict[str, Any]) -> None:
         normalized, expanded_until_final_answer=not final_answer_started
     )
     if final_answer_started:
-        st.markdown(normalized["output"])
+        render_assistant_markdown(normalized["output"])
 
 
 def render_chat(
@@ -1888,7 +1895,7 @@ def render_chat(
                         content, message.metadata, f"{chat.id}-{index}"
                     )
                 else:
-                    st.markdown(content)
+                    render_assistant_markdown(content)
             if message.role == "user":
                 render_chat_attachment_summary(message.metadata)
             if message.metadata.get("kind") == "interrupt_draft":
@@ -4036,7 +4043,7 @@ def server_thread_info_metadata(runtime: dict[str, Any]) -> dict[str, Any]:
 def render_server_thread_info_message(message: ChatMessage) -> None:
     fields = message.metadata.get("fields")
     if not isinstance(fields, list):
-        st.markdown(message.content)
+        render_assistant_markdown(message.content)
         return
 
     primary_labels = {
@@ -4350,7 +4357,7 @@ def render_ui_test_workspace(settings: AppSettings) -> None:
                 if message.role == "user":
                     render_chat_user_markdown(message.content)
                 else:
-                    st.markdown(message.content)
+                    render_assistant_markdown(message.content)
 
         if skip_latest_user and isinstance(pending, dict):
             client = CodexClient(settings.app_server_url)

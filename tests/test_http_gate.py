@@ -1,9 +1,76 @@
 import asyncio
+import os
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
-from codex_nomad_surface.http_gate import FileContentMiddleware
+from codex_nomad_surface.http_gate import (
+    FileContentMiddleware,
+    file_content_target_from_scope,
+)
+
+
+def test_windows_file_content_route_decodes_absolute_path_and_line() -> None:
+    target = file_content_target_from_scope(
+        {
+            "path": "/_nomad_file",
+            "query_string": b"path=C%3A%5CUsers%5Cperson%5Crepo%5Capp.py%3A12",
+        }
+    )
+
+    assert target is not None
+    path, line_number = target
+    assert str(path) == r"C:\Users\person\repo\app.py"
+    assert line_number == 12
+
+
+def test_windows_file_content_route_rejects_relative_path() -> None:
+    assert (
+        file_content_target_from_scope(
+            {"path": "/_nomad_file", "query_string": b"path=relative.txt"}
+        )
+        is None
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows drive-letter paths")
+def test_windows_file_content_route_serves_file(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "file with spaces.txt"
+    source.write_text("Windows preview", encoding="utf-8")
+    messages: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    async def downstream(scope, receive, send) -> None:
+        raise AssertionError("request unexpectedly reached Streamlit")
+
+    monkeypatch.setattr(
+        "codex_nomad_surface.http_gate.file_content_route_enabled", lambda: True
+    )
+    monkeypatch.setattr("codex_nomad_surface.http_gate.auth_required", lambda: False)
+    middleware = FileContentMiddleware(downstream)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/_nomad_file",
+        "query_string": f"path={quote(str(source), safe='')}".encode("ascii"),
+        "headers": [],
+    }
+
+    asyncio.run(middleware(scope, None, send))
+
+    start = next(
+        message for message in messages if message["type"] == "http.response.start"
+    )
+    body = next(
+        message["body"]
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    assert start["status"] == 200
+    assert body == b"Windows preview"
 
 
 async def _login_page_body() -> str:
