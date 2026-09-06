@@ -8,6 +8,7 @@ import pytest
 from codex_nomad_surface.http_gate import (
     FileContentMiddleware,
     file_content_target_from_scope,
+    file_content_target_from_url_path,
 )
 
 
@@ -32,6 +33,18 @@ def test_windows_file_content_route_rejects_relative_path() -> None:
         )
         is None
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows drive-letter paths")
+def test_browser_normalized_windows_url_path_decodes_as_drive_path() -> None:
+    target = file_content_target_from_url_path(
+        "/C:/Users/person/repo/file%20with%20spaces.py:14"
+    )
+
+    assert target is not None
+    path, line_number = target
+    assert str(path) == r"C:\Users\person\repo\file with spaces.py"
+    assert line_number == 14
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows drive-letter paths")

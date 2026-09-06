@@ -4,6 +4,7 @@ import html
 from http.cookies import SimpleCookie
 import hmac
 import mimetypes
+import os
 import re
 import secrets
 import time
@@ -77,7 +78,11 @@ def file_content_target_from_url_path(url_path: str) -> tuple[Path, int | None] 
     if any(url_path.startswith(prefix) for prefix in STREAMLIT_RESERVED_PATH_PREFIXES):
         return None
 
-    target = "/" + unquote(url_path).lstrip("/")
+    decoded_path = unquote(url_path)
+    if os.name == "nt" and re.match(r"^/[A-Za-z]:[\\/]", decoded_path):
+        target = decoded_path[1:]
+    else:
+        target = "/" + decoded_path.lstrip("/")
     line_number = None
     line_match = re.search(r":([1-9][0-9]*)$", target)
     if line_match:
