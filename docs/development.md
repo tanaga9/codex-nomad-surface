@@ -114,3 +114,21 @@ After updating Streamlit, verify these browser flows before release:
 - In UI Test mode, exercise an approval and a multi-question user response.
 - At a phone-sized viewport, append a Prompt Form, Skill, and file path to the
   native chat input, then send a message with an image attachment.
+- Drag a file over the page, exit through each viewport edge, and cancel
+  without dropping. Confirm the chat upload overlay clears and a subsequent
+  file drop still works. `chat_input_drag_guard.js` hides only the recognized
+  chat overlay pair after a drag ends, restoring it on the next file drag.
+  It does not dispatch events or modify Streamlit state. Unknown DOM layouts
+  are left untouched; recheck the workaround when upgrading Streamlit.
+  Event lifecycle tests run through pytest when Node.js is available.
+
+Run the standalone chat drag browser integration check with:
+
+```bash
+.venv/bin/python -m streamlit run tests/browser/chat_input_drag_app.py --server.address 127.0.0.1
+```
+
+Click **Run drag regression**, confirm PASS, then send the prepared draft and
+confirm the server-side PASS. This uses real Streamlit DOM and uploads, with
+synthetic drag events; also check OS file dragging and cancellation in each
+supported browser. It does not connect to Codex App Server.

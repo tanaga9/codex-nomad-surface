@@ -1,0 +1,61 @@
+<button id="run-drag-check">Run drag regression</button>
+<p id="drag-check-result" role="status">Ready</p>
+<script>
+(() => {
+  const button = document.getElementById('run-drag-check');
+  const result = document.getElementById('drag-check-result');
+  const root = () => document.querySelector('[data-testid="stChatInput"]');
+  const visible = element => element && getComputedStyle(element).display !== 'none' && element.getBoundingClientRect().height > 0;
+  const overlayVisible = () => Array.from(root().querySelectorAll('div')).some(element =>
+    element.children.length === 0 && element.textContent === 'Drag and drop files here' && visible(element));
+  const waitFor = async (predicate, description) => {
+    const deadline = Date.now() + 10000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(description);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  };
+  const transfer = () => {
+    const data = new DataTransfer();
+    data.items.add(new File(['drag regression content'], 'drag-regression.txt', {type: 'text/plain'}));
+    return data;
+  };
+  const begin = async () => {
+    root().dispatchEvent(new DragEvent('dragover', {bubbles: true, cancelable: true, dataTransfer: transfer(), clientX: 100, clientY: 100}));
+    await waitFor(overlayVisible, 'overlay did not reappear');
+  };
+  button.onclick = async () => {
+    button.disabled = true;
+    result.textContent = 'Running';
+    try {
+      const textarea = root().querySelector('textarea');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, 'Preserve this draft');
+      textarea.dispatchEvent(new Event('input', {bubbles: true}));
+      await begin();
+      root().dispatchEvent(new DragEvent('dragend', {bubbles: true}));
+      await waitFor(() => !overlayVisible(), 'cancel did not clear overlay');
+      for (const [x, y] of [[0,100], [innerWidth,100], [100,0], [100,innerHeight]]) {
+        await begin();
+        root().dispatchEvent(new DragEvent('dragleave', {bubbles: true, clientX:x, clientY:y}));
+        await waitFor(() => !overlayVisible(), 'edge exit did not clear overlay');
+      }
+      await begin();
+      // Use a hit-tested DOM target, not a window listener or a mock upload.
+      const rect = root().getBoundingClientRect();
+      const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      target.dispatchEvent(new DragEvent('drop', {bubbles:true, cancelable:true, dataTransfer:transfer()}));
+      await waitFor(() => root().textContent.includes('drag-regression.txt'), 'file was not attached');
+      await waitFor(() => !overlayVisible(), 'drop did not clear overlay');
+      await begin();
+      root().dispatchEvent(new DragEvent('dragend', {bubbles: true}));
+      await waitFor(() => !overlayVisible(), 'second cancel did not clear overlay');
+      if (textarea.value !== 'Preserve this draft') throw new Error('draft was lost');
+      if (!root().textContent.includes('drag-regression.txt')) throw new Error('attachment was lost');
+      result.textContent = 'PASS: cancel, four edges, reentry, upload and draft preservation. Send the draft to finish server verification.';
+    } catch (error) {
+      result.textContent = 'FAIL: ' + error.message;
+    }
+    button.disabled = false;
+  };
+})();
+</script>

@@ -31,7 +31,7 @@ async def _middleware_messages(
 
 
 def test_streamlit_version_matches_supported_upgrade_target() -> None:
-    assert streamlit.__version__ == "1.59.2"
+    assert streamlit.__version__ == "1.63.0"
 
 
 def test_unauthenticated_file_route_does_not_expose_content(

@@ -204,6 +204,7 @@ def inject_chat_input_bridge() -> None:
         f"""
         <div id="chat-input-bridge" style="display:none"></div>
         <script>{load_asset_text("chat_input_bridge.js")}</script>
+        <script>{load_asset_text("chat_input_drag_guard.js")}</script>
         """,
         unsafe_allow_javascript=True,
     )
