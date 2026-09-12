@@ -27,7 +27,9 @@ the browser before the first message may require entering the path again.
 
 `EX-010` — Canvas document persistence and live editor bridge: tldraw
 snapshots and previews are stored as local files, and the live editor is
-brokered over an authenticated same-origin WebSocket. A local draft ID keeps a
+brokered over an authenticated same-origin WebSocket. In-app Canvas navigation
+uses this bridge to save a paused browser snapshot before replacing the editor;
+failed saves keep the current Canvas selected. A local draft ID keeps a
 new canvas addressable until its first App Server turn returns a durable thread
 ID. Validated Canvas images are optimized and stored as content-addressed local
 assets. An image-create Dynamic Tool operation may read only a file inside the

@@ -219,6 +219,7 @@ class PendingCanvasRequest:
 
 @dataclass
 class CanvasConnection:
+    navigation_owner: str = ""
     owner_id: str = ""
     generation: int = 0
     outgoing: AsyncOutboundQueue[dict[str, Any] | None] = field(
@@ -261,9 +262,12 @@ class CanvasBroker:
             pending.event.set()
 
     def register(
-        self, canvas_id: str, owner_id: str = "", generation: int = 0
+        self, canvas_id: str, owner_id: str = "", generation: int = 0,
+        *, navigation_owner: str = "",
     ) -> CanvasConnection:
-        connection = CanvasConnection(owner_id=owner_id, generation=generation)
+        connection = CanvasConnection(
+            owner_id=owner_id, generation=generation, navigation_owner=navigation_owner
+        )
         with self._lock:
             previous = self._connections.get(canvas_id)
             if previous:
@@ -301,6 +305,18 @@ class CanvasBroker:
             )
         connection.outgoing.put(None)
 
+    def navigation_connection(self, canvas_id: str, owner: str) -> CanvasConnection:
+        with self._lock:
+            connection = self._connections.get(canvas_id)
+            if not connection:
+                raise RuntimeError("canvas_unavailable")
+            if not owner or connection.navigation_owner != owner:
+                raise RuntimeError("canvas_connection_replaced")
+            return connection
+
+    def cancel_leave(self, connection: CanvasConnection, request_id: str) -> None:
+        connection.outgoing.put({"type": "cancel_leave", "id": request_id})
+
     def call(
         self,
         canvas_id: str,
@@ -309,13 +325,17 @@ class CanvasBroker:
         *,
         context: dict[str, Any] | None = None,
         status_arguments: dict[str, Any] | None = None,
+        expected_connection: CanvasConnection | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
-        request_id = str(uuid.uuid4())
+        request_id = request_id or str(uuid.uuid4())
         pending = PendingCanvasRequest(context=context or {})
         with self._lock:
             connection = self._connections.get(canvas_id)
             if not connection:
                 raise RuntimeError("canvas_unavailable")
+            if expected_connection is not None and connection is not expected_connection:
+                raise RuntimeError("canvas_connection_replaced")
             pending.connection = connection
             self._pending[request_id] = pending
             request = {
@@ -421,6 +441,7 @@ async def _handle_canvas_message(
         "error": str(message.get("error") or ""),
     }
     is_apply_response = bool(request_context.get("command_id"))
+    is_leave_response = request_context.get("method") == "prepare_leave"
     is_export_response = request_context.get("method") == "export"
     if is_export_response:
         if result["ok"] and (
@@ -458,7 +479,7 @@ async def _handle_canvas_message(
             result["payload"] = payload
         broker.resolve(request_id, result)
         return
-    if result["ok"] and is_apply_response and (
+    if result["ok"] and (is_apply_response or is_leave_response) and (
         not isinstance(payload, dict)
         or not isinstance(payload.get("document"), dict)
     ):
@@ -474,7 +495,7 @@ async def _handle_canvas_message(
         document = payload.pop("document", None)
         preview_svg = str(payload.pop("preview_svg", "") or "")
         preview_image_url = str(payload.pop("preview_image_url", "") or "")
-        if bool(message.get("ok")) and isinstance(document, dict):
+        if result["ok"] and isinstance(document, dict):
             try:
                 command_receipt = (
                     {
@@ -490,8 +511,8 @@ async def _handle_canvas_message(
                     _save_canvas_payload,
                     canvas_id,
                     document,
-                    preview_svg,
-                    preview_image_url,
+                    None if is_leave_response else preview_svg,
+                    None if is_leave_response else preview_image_url,
                     payload.get("preview_image_error"),
                     command_receipt,
                 )
@@ -563,7 +584,10 @@ async def canvas_websocket(websocket: WebSocket) -> None:
     transition_lock = broker.transition_lock(canvas_id)
     await websocket.accept()
     async with transition_lock:
-        connection = broker.register(canvas_id, owner_id, generation)
+        connection = broker.register(
+            canvas_id, owner_id, generation,
+            navigation_owner=str(query_params.get("navigation_owner") or ""),
+        )
     sender = asyncio.create_task(_canvas_sender(websocket, connection))
     try:
         while True:
@@ -1256,6 +1280,25 @@ def _normalize_canvas_export_arguments(arguments: object) -> dict[str, str]:
     if arguments.get("format") != "obsidian":
         raise ValueError("Canvas export format is unsupported.")
     return {"format": "obsidian"}
+
+
+def prepare_canvas_leave(canvas_id: str, navigation_owner: str) -> None:
+    """Persist only the editor belonging to the navigating UI session."""
+    connection = CANVAS_BROKER.navigation_connection(canvas_id, navigation_owner)
+    request_id = str(uuid.uuid4())
+    try:
+        result = CANVAS_BROKER.call(
+            canvas_id, "prepare_leave", context={"method": "prepare_leave"},
+            expected_connection=connection, request_id=request_id,
+        )
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or "canvas_save_failed")
+        payload = result.get("payload")
+        if not isinstance(payload, dict) or type(payload.get("revision")) is not int:
+            raise RuntimeError("canvas_invalid_response")
+    except Exception:
+        CANVAS_BROKER.cancel_leave(connection, request_id)
+        raise
 
 
 def canvas_dynamic_tools() -> list[dict[str, Any]]:

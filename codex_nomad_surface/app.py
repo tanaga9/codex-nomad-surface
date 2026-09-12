@@ -27,6 +27,7 @@ from starlette.routing import Route, WebSocketRoute
 from streamlit.starlette import App
 
 from codex_nomad_surface.canvas_runtime import (
+    prepare_canvas_leave,
     canvas_asset_content,
     canvas_asset_upload,
     canvas_initial_context_items,
@@ -4990,6 +4991,11 @@ def canvas_workspace(
         return
     canvas_id = str(manifest["canvas_id"])
     chat.canvas_id = canvas_id
+    navigation_owner = st.session_state.setdefault("canvas_navigation_owner", str(uuid.uuid4()))
+    st.session_state.canvas_navigation_source = (project, chat)
+    navigation_error = st.session_state.pop("canvas_navigation_error", "")
+    if navigation_error:
+        st.error(navigation_error)
     initial_document = load_canvas_document(canvas_id)
     preview_svg = load_canvas_preview(canvas_id)
     references = canvas_file_references(canvas_id)
@@ -5196,7 +5202,7 @@ def canvas_workspace(
                     nomad_canvas(
                         canvas_id,
                         initial_document=initial_document,
-                        websocket_url=f"/api/canvas/{canvas_id}/ws",
+                        websocket_url=f"/api/canvas/{canvas_id}/ws?navigation_owner={navigation_owner}",
                         export_request=export_request,
                         key=f"nomad_canvas_{canvas_id}",
                         height="stretch",
@@ -5730,6 +5736,32 @@ def settings_screen(
             st.rerun()
 
 
+def save_canvas_before_navigation(chat: ChatSession | None) -> bool:
+    source = st.session_state.get("canvas_navigation_source")
+    if not source:
+        return True
+    previous_project, previous_chat = source
+    if chat is not None and chat.id == previous_chat.id:
+        return True
+    try:
+        prepare_canvas_leave(
+            chat_canvas_id(previous_chat), st.session_state["canvas_navigation_owner"]
+        )
+    except Exception as exc:
+        # Restore both selectors and URL before rerunning the previous Canvas.
+        set_selected_project_key(project_key(previous_project))
+        st.session_state[PENDING_PROJECT_SELECT_KEY] = project_key(previous_project)
+        st.session_state.selected_chat_id = previous_chat.id
+        st.session_state[PENDING_CHAT_SELECT_KEY] = previous_chat.id
+        set_query_chat_id(previous_chat.id)
+        st.session_state.canvas_navigation_error = (
+            f"Canvas could not be saved. Stay here and retry after saving or reconnecting. {exc}"
+        )
+        return False
+    st.session_state.pop("canvas_navigation_source", None)
+    return True
+
+
 def main_screen() -> None:
     settings = settings_state()
     if test_mode_enabled():
@@ -5747,10 +5779,13 @@ def main_screen() -> None:
     server_threads = server_threads_state(client)
     sync_chat_selection_from_url(server_threads)
     project, chat = surface_sidebar(settings, server_threads)
+    chat = chat or draft_chat_for_project(project)
+    if not save_canvas_before_navigation(chat):
+        st.rerun()
+        return
     if project_creation_selected():
         project_creation_workspace(client, server_threads)
         return
-    chat = chat or draft_chat_for_project(project)
     cancel_pending_turn_if_needed(client, chat)
     hydrate_thread_chat(client, chat)
     if chat and chat.id != st.session_state.last_rendered_chat_id:

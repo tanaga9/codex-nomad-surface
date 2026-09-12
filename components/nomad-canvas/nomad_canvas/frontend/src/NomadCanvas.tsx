@@ -57,7 +57,7 @@ export type NomadCanvasProps = NomadCanvasDataShape;
 
 type CanvasRequest = {
   id: string;
-  method: "read_scene" | "apply_patch" | "export";
+  method: "read_scene" | "apply_patch" | "export" | "prepare_leave";
   arguments?: Record<string, unknown>;
   status_arguments?: Record<string, unknown>;
 };
@@ -471,6 +471,16 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
     let stabilityTimer: number | null = null;
     let sameOwnerRetryCount = 0;
     let websocket: WebSocket | null = null;
+    let leaveReadonly: boolean | null = null;
+    let leaveRequestId: string | null = null;
+    const cancelLeave = (requestId?: string) => {
+      if (requestId !== undefined && requestId !== leaveRequestId) return;
+      if (leaveReadonly === null) return;
+      editor.updateInstanceState({ isReadonly: leaveReadonly });
+      leaveReadonly = null;
+      leaveRequestId = null;
+      applyingRemoteRef.current = false;
+    };
     const responseAcks = new Map<
       string,
       {
@@ -560,6 +570,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
       };
       nextWebsocket.onclose = (event) => {
         if (disposed || websocket !== nextWebsocket) return;
+        cancelLeave();
         if (stabilityTimer !== null) {
           window.clearTimeout(stabilityTimer);
           stabilityTimer = null;
@@ -601,6 +612,10 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
           try {
             message = JSON.parse(String(event.data));
           } catch {
+            return;
+          }
+          if (message.type === "cancel_leave" && typeof message.id === "string") {
+            cancelLeave(message.id);
             return;
           }
           if (message.type === "response_ack" && message.id) {
@@ -658,6 +673,18 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
             return;
           }
           try {
+            if (request.method === "prepare_leave") {
+              leaveRequestId = request.id;
+              leaveReadonly = editor.getIsReadonly();
+              editor.updateInstanceState({ isReadonly: true });
+              applyingRemoteRef.current = true;
+              commitEpochRef.current += 1;
+              nextWebsocket.send(JSON.stringify({
+                type: "response", id: request.id, ok: true,
+                payload: { document: captureDocument(editor) },
+              }));
+              return;
+            }
             const startedAtCommitEpoch = commitEpochRef.current;
             const payload =
               request.method === "export"
@@ -682,6 +709,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
               }),
             );
           } catch (error) {
+            if (request.method === "prepare_leave") cancelLeave();
             if (nextWebsocket.readyState === WebSocket.OPEN) {
               const payload =
                 error instanceof CanvasProtocolError ||
@@ -707,6 +735,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
 
     return () => {
       disposed = true;
+      cancelLeave();
       failPendingAcks("canvas_component_disposed_before_commit");
       window.clearInterval(statusTimer);
       if (retryTimer !== null) window.clearTimeout(retryTimer);

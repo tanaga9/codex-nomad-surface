@@ -520,7 +520,14 @@ safely overwritten and completed by the next save.
 
 - User document changes are saved with a short debounce.
 - A Codex transaction is saved immediately before its tool call completes.
-- Explicit save, task close, and archive actions flush pending changes.
+- In-app navigation to another task, project, or Home requests a live snapshot
+  before replacing Canvas. The browser pauses editing until navigation completes;
+  a save failure restores the previous selection and releases the pause.
+  Requests are restricted to the navigating UI session and captured connection;
+  cancellation releases only that request. A connection owned by another tab
+  is left untouched and navigation reports a save failure.
+- Reloads, browser termination, and authentication or connection-gate transitions
+  are outside this navigation guard; recovery uses the last saved checkpoint.
 - Obsidian export is serialized directly from the active editor so it contains
   its current records and portable assets. The canonical saved snapshot is not
   exposed as the user-facing interchange file.
