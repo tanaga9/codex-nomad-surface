@@ -1374,6 +1374,7 @@ class CodexClientApprovalTests(unittest.TestCase):
             ],
         )
         self.assertEqual(calls[1][1]["dynamicTools"], [{"name": "canvas"}])
+        self.assertNotIn("dynamicTools", calls[0][1])
         self.assertEqual(
             calls[2][1],
             {
@@ -1538,3 +1539,67 @@ class CodexClientApprovalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DynamicToolRegistrationTests(unittest.TestCase):
+    def test_tools_are_only_sent_when_a_thread_is_created(self):
+        for namespace in ("canvas", "text"):
+            for scenario in ("new", "resume", "missing", "missing_disabled", "other_error"):
+                with self.subTest(namespace=namespace, scenario=scenario):
+                    calls = []
+                    definitions = [{"name": namespace}]
+                    overrides = {"dynamicTools": definitions, "personality": "friendly"}
+                    client = CodexClient("ws://127.0.0.1:1234")
+
+                    class FakeWebSocket:
+                        async def close(self):
+                            pass
+
+                    async def connect(_):
+                        return FakeWebSocket()
+
+                    async def initialize(*args, **kwargs):
+                        return {}
+
+                    async def rpc(_socket, method, params, *args, **kwargs):
+                        calls.append((method, params))
+                        if method == "thread/resume":
+                            self.assertNotIn("dynamicTools", params)
+                            self.assertEqual(params["personality"], "friendly")
+                            if scenario in {"missing", "missing_disabled"}:
+                                raise RuntimeError("no rollout found for thread id old")
+                            if scenario == "other_error":
+                                raise RuntimeError("connection failed")
+                            return {"thread": {"id": "old"}}
+                        if method == "thread/start":
+                            self.assertEqual(params["dynamicTools"], definitions)
+                            self.assertEqual(params["personality"], "friendly")
+                            return {"thread": {"id": "new"}}
+                        if method == "turn/start":
+                            return {"turn": {"id": "turn"}}
+                        raise AssertionError(method)
+
+                    async def collect(runtime):
+                        return {"ok": True, "thread_id": runtime["thread_id"]}
+
+                    client._connect_ws = connect
+                    client._initialize_ws = initialize
+                    client._rpc_call = rpc
+                    client._collect_chat_turn_ws = collect
+                    result = asyncio.run(client._start_chat_turn_ws(
+                        "/path/to/project", "Hello",
+                        None if scenario == "new" else "old", None,
+                        thread_overrides=overrides,
+                        replace_missing_rollout=scenario != "missing_disabled",
+                    ))
+                    methods = [method for method, _ in calls]
+                    expected = {
+                        "new": ["thread/start", "turn/start"],
+                        "resume": ["thread/resume", "turn/start"],
+                        "missing": ["thread/resume", "thread/start", "turn/start"],
+                        "missing_disabled": ["thread/resume"],
+                        "other_error": ["thread/resume"],
+                    }
+                    self.assertEqual(methods, expected[scenario])
+                    self.assertEqual(result["ok"], scenario not in {"missing_disabled", "other_error"})
+                    self.assertEqual(overrides, {"dynamicTools": definitions, "personality": "friendly"})

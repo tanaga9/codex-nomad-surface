@@ -103,6 +103,10 @@ Tools are experimental in the current App Server protocol, so Nomad Surface
 reports an unsupported state when they are unavailable and does not add a
 legacy transport fallback. Manual editing remains usable without Codex tools.
 
+The client sends tool definitions on `thread/start`, including replacement of
+a thread with no rollout. Normal `thread/resume` requests omit them and use
+the definitions already persisted by App Server.
+
 ### `text.read`
 
 Reads one bounded scope:

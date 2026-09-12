@@ -252,6 +252,11 @@ Tools are currently experimental. The project should use the current API
 directly and report an explicit unsupported state if it is unavailable; it
 should not add a legacy transport fallback.
 
+Tool definitions are sent only with `thread/start`; `thread/resume` uses the
+server's persisted definitions. The client retains the creation definitions
+locally during a resume attempt so the existing missing-rollout recovery path
+can register them on the replacement thread.
+
 For a newly created Canvas thread, the router injects one short developer
 message before its first user turn. The message defines only the general Canvas
 interaction policy; geometry and other scene facts remain tool results. It is

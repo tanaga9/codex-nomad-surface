@@ -1139,6 +1139,10 @@ class CodexClient:
                     if approval_policy:
                         resume_params["approvalPolicy"] = approval_policy
                     resume_params.update(thread_overrides)
+                    # Dynamic tools are registered at creation and restored by
+                    # the server on resume. Keep the original overrides intact
+                    # in case a missing rollout requires thread/start below.
+                    resume_params.pop("dynamicTools", None)
                     try:
                         thread_result = await self._rpc_call(
                             websocket,
