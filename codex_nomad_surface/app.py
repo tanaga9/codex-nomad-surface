@@ -5360,19 +5360,12 @@ def project_creation_workspace(
         st.error("Project path must be absolute.")
         return
 
-    try:
-        thread = client.start_thread(project_path)
-    except Exception as exc:
-        st.error(f"Could not create project: {exc}")
-        return
-
-    project_path = thread.cwd or project_path
     remember_project_path(project_path)
-    set_selected_project_key(project_path)
+    apply_project_selection(project_path)
     st.session_state[PENDING_PROJECT_SELECT_KEY] = project_path
-    st.session_state.selected_chat_id = f"thread:{thread.id}"
-    st.session_state[PENDING_CHAT_SELECT_KEY] = st.session_state.selected_chat_id
-    set_query_chat_id(st.session_state.selected_chat_id)
+    st.session_state.selected_chat_id = ""
+    st.session_state[PENDING_CHAT_SELECT_KEY] = ""
+    set_query_chat_id("")
     st.session_state.new_project_path = ""
     st.success("Project created.")
     st.rerun()

@@ -20,6 +20,11 @@ instead of a current Codex App Server API.
 
 ## Current Exceptions
 
+New-project selection keeps the entered path in session-local draft state until
+the first message creates an App Server thread. It does not create a server
+thread or filesystem directory just to populate the project picker. Refreshing
+the browser before the first message may require entering the path again.
+
 `EX-010` — Canvas document persistence and live editor bridge: tldraw
 snapshots and previews are stored as local files, and the live editor is
 brokered over an authenticated same-origin WebSocket. A local draft ID keeps a

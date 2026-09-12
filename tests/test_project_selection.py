@@ -165,3 +165,43 @@ class ProjectSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_project_creation_selects_new_chat_without_starting_thread(monkeypatch):
+    from contextlib import nullcontext
+    from unittest.mock import Mock
+    from codex_nomad_surface import app
+
+    class State(dict):
+        __getattr__ = dict.__getitem__
+        __setattr__ = dict.__setitem__
+
+    state = State(
+        selected_project_key="", selected_chat_id="thread:old",
+        manual_project_paths=[], new_project_path="", draft_chat=None,
+    )
+    query = {"chat": "thread:old"}
+    monkeypatch.setattr(app.st, "session_state", state)
+    monkeypatch.setattr(app.st, "query_params", query)
+    monkeypatch.setattr(app.st, "form", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(app.st, "text_input", lambda *a, **k: "/path/to/project")
+    monkeypatch.setattr(app.st, "form_submit_button", lambda *a, **k: True)
+    for name in ("subheader", "success", "rerun"):
+        monkeypatch.setattr(app.st, name, lambda *a, **k: None)
+    monkeypatch.setattr(app, "render_recent_threads", lambda *a: None)
+    client = Mock()
+
+    app.project_creation_workspace(client, [])
+
+    client.start_thread.assert_not_called()
+    assert state.manual_project_paths == ["/path/to/project"]
+    assert state.selected_project_key == "/path/to/project"
+    assert state[app.PENDING_PROJECT_SELECT_KEY] == "/path/to/project"
+    assert state.selected_chat_id == ""
+    assert state[app.PENDING_CHAT_SELECT_KEY] == ""
+    assert "chat" not in query
+    project = Project(name="project", path="/path/to/project")
+    draft = app.draft_chat(project)
+    assert draft.thread_id is None
+    assert not draft.messages
+    assert draft.surface == "chat"
