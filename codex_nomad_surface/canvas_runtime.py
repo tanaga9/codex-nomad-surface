@@ -805,7 +805,14 @@ def _canvas_apply_patch_schema() -> dict[str, Any]:
             "enum": ["black", "grey", "light-violet", "violet", "blue", "light-blue", "yellow", "orange", "green", "light-green", "light-red", "red", "white"],
         },
         "size": {"type": "string", "enum": ["s", "m", "l", "xl"]},
-        "font": {"type": "string", "enum": ["draw", "sans", "serif", "mono"]},
+        "font": {
+            "type": "string",
+            "enum": ["draw", "sans", "serif", "mono"],
+            "description": (
+                "Choose a font style: draw (handwriting), "
+                "sans (sans-serif), serif, or mono (monospace)."
+            ),
+        },
     }
     geo_style = _closed_object(
         {
@@ -1338,6 +1345,8 @@ def canvas_dynamic_tools() -> list[dict[str, Any]]:
                         "omitting source_refs preserves existing provenance. The draw "
                         "operation accepts absolute Canvas points for freehand, "
                         "highlight, and line marks."
+                        " Choose text fonts with style.font: draw, sans, serif, "
+                        "or mono."
                         " To add an image, use create_image with path at the "
                         "operation root; path may be absolute or relative to the "
                         "Canvas project. Do not send raw tldraw image shapes, "

@@ -6,11 +6,15 @@ import {
   b64Vecs,
   createRecordType,
   createTLStore,
+  getFontsFromRichText,
+  tipTapDefaultExtensions,
   type BaseRecord,
   type Editor,
   type RecordId,
   type TLRecord,
 } from "tldraw";
+import { addCanvasFontsFromNode } from "./canvas-fonts";
+
 import {
   applyCanvasPatch,
   CANVAS_PATCH_MAX_CHANGED_IDS,
@@ -57,6 +61,48 @@ import {
   createCanvasPageOwnerId,
   shouldReconnectCanvasSocket,
 } from "./canvas-connection-policy";
+
+{
+  const editor = {
+    getTextOptions: () => ({
+      tipTapConfig: { extensions: tipTapDefaultExtensions },
+      addFontsFromNode: addCanvasFontsFromNode,
+    }),
+  } as unknown as Editor;
+  for (const { text, family = "tldraw_draw", marks = [], expected } of [
+    { text: "Hello, Canvas! 123", expected: false },
+    { text: "", expected: false },
+    { text: "日本語", expected: true },
+    { text: "ひらがな・カタカナ", expected: true },
+    { text: "「」。、", expected: true },
+    { text: "Ａ１２ ｶﾀｶﾅ", expected: true },
+    { text: "Hello 世界", expected: true },
+    { text: "日本語", marks: [{ type: "bold" }], expected: true },
+    { text: "日本語", marks: [{ type: "italic" }], expected: true },
+    { text: "日本語", marks: [{ type: "code" }], expected: false },
+    { text: "日本語", family: "tldraw_sans", expected: false },
+    { text: "日本語", family: "tldraw_serif", expected: false },
+    { text: "日本語", family: "tldraw_mono", expected: false },
+  ]) {
+    const fonts = getFontsFromRichText(
+      editor,
+      {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: text ? [{ type: "text", text, marks }] : [],
+          },
+        ],
+      },
+      { family, weight: "normal", style: "normal" },
+    );
+    assert(
+      fonts.some((font) => font.family === "Nomad Yomogi") === expected,
+      `Unexpected Japanese font embedding for ${JSON.stringify({ text, family, marks })}.`,
+    );
+  }
+}
 
 assert(
   !shouldReconnectCanvasSocket(CANVAS_REPLACED_CLOSE_CODE, false, 0),

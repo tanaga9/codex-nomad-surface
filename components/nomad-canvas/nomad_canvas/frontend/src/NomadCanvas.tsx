@@ -1,4 +1,5 @@
 import { Editor, TLStoreSnapshot, Tldraw, getSnapshot } from "tldraw";
+import { addCanvasFontsFromNode, CANVAS_THEMES } from "./canvas-fonts";
 import "tldraw/tldraw.css";
 import {
   FC,
@@ -86,6 +87,7 @@ const CANVAS_DOCUMENT_SAVE_DELAY_MS = 700;
 const CANVAS_PREVIEW_SAVE_DELAY_MS = 4_000;
 const CANVAS_TLDRAW_OPTIONS = {
   maxFilesAtOnce: CANVAS_IMAGE_MAX_FILES_AT_ONCE,
+  text: { addFontsFromNode: addCanvasFontsFromNode },
 };
 
 const waitForCanvasGeometry = () =>
@@ -780,6 +782,7 @@ const NomadCanvas: FC<NomadCanvasProps> = ({
         </div>
       ) : null}
       <Tldraw
+        themes={CANVAS_THEMES}
         assets={assetStore}
         options={CANVAS_TLDRAW_OPTIONS}
         maxAssetSize={CANVAS_IMAGE_SOURCE_MAX_BYTES}

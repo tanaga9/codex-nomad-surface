@@ -21,6 +21,8 @@ Codex App Server API, and divided cleanly between UI and Codex integration.
   existing instructions while telling Codex to use the embedded Canvas tools
   instead of backing files or unrelated offline integrations.
 - The Canvas Skin mounts tldraw through a packaged Streamlit CCv2 component.
+- Text supports `draw`, `sans`, `serif`, and `mono` font styles.
+  SVG exports embed the required fonts.
 - A same-origin WebSocket brokers `read_scene`, bounded `apply_patch`, and
   managed Obsidian `export` calls.
 - `apply_patch` exposes closed schemas for create, update, move, resize, delete,
