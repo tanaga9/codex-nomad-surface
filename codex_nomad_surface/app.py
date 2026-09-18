@@ -683,7 +683,6 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
     )
     if st.session_state.app_server_launch_in_progress:
         st.info("Starting Codex App Server...")
-    render_app_server_launch_details(settings)
     openai_api_key = st.text_input(
         "OpenAI API key for launch (optional)",
         type="password",
@@ -720,6 +719,7 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
         app_server_launch_status_dialog(
             st.session_state.app_server_launch_failure_returncode
         )
+    render_app_server_launch_details(settings)
     st.caption(
         "If this web server is force-killed, the launched Codex App Server process may remain running."
     )
@@ -728,6 +728,7 @@ def local_app_server_launcher(settings: AppSettings, status: ConnectionStatus) -
 def connection_gate_screen(settings: AppSettings, status: ConnectionStatus) -> None:
     st.title("Codex Nomad Surface")
     disconnected_connection_status(settings.app_server_url)
+    local_app_server_launcher(settings, status)
     render_disconnected_pending_turn_recovery()
     st.warning(
         "Codex is not connected, so the operation screen is unavailable. Start App Server and confirm the connection URL."
@@ -738,7 +739,6 @@ def connection_gate_screen(settings: AppSettings, status: ConnectionStatus) -> N
         settings,
         disabled=st.session_state.app_server_launch_in_progress,
     )
-    local_app_server_launcher(settings, status)
 
 
 def render_disconnected_pending_turn_recovery() -> None:
@@ -5716,6 +5716,16 @@ def settings_screen(
 ) -> None:
     if heading:
         st.subheader("Settings")
+    process = managed_app_server_process()
+    if process is not None:
+        st.caption(f"This app started Codex App Server on PID {process.pid}.")
+        if st.button("Stop Codex App Server", type="secondary"):
+            ok, message = stop_managed_app_server()
+            if ok:
+                st.success(message)
+            else:
+                st.error(message)
+            st.rerun()
     with st.form("server_settings"):
         url = st.text_input(
             "Codex App Server URL",
@@ -5732,16 +5742,6 @@ def settings_screen(
         saved_client = CodexClient(settings.app_server_url)
         saved_client.status()
         st.rerun()
-    process = managed_app_server_process()
-    if process is not None:
-        st.caption(f"This app started Codex App Server on PID {process.pid}.")
-        if st.button("Stop Codex App Server", type="secondary"):
-            ok, message = stop_managed_app_server()
-            if ok:
-                st.success(message)
-            else:
-                st.error(message)
-            st.rerun()
 
 
 def save_canvas_before_navigation(chat: ChatSession | None) -> bool:
