@@ -20,6 +20,11 @@ instead of a current Codex App Server API.
 
 ## Current Exceptions
 
+The sidebar's **Codex Usage** link opens the official ChatGPT analytics page
+in a new tab, using the browser's signed-in account. This is an explicit external
+navigation feature, not an in-app quota reader. Use `account/rateLimits/read`
+if in-app remaining-usage display is added.
+
 New-project selection keeps the entered path in session-local draft state until
 the first message creates an App Server thread. It does not create a server
 thread or filesystem directory just to populate the project picker. Refreshing

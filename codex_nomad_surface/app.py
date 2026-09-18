@@ -5406,8 +5406,16 @@ def surface_sidebar(
 ) -> tuple[Project | None, ChatSession | None]:
     with st.sidebar:
         render_sidebar_home_title()
-        if st.button("Settings", key="open_settings_dialog"):
-            settings_dialog(settings)
+        with st.container(horizontal=True, gap="small"):
+            if st.button("Settings", key="open_settings_dialog"):
+                settings_dialog(settings)
+            st.link_button(
+                "Codex Usage",
+                "https://chatgpt.com/codex/cloud/settings/analytics",
+                help="Open Codex usage in a new tab. Uses the ChatGPT account signed in to this browser.",
+                icon=":material/open_in_new:",
+                width="content",
+            )
         project = project_selector(server_threads, "sidebar")
         new_project = project_creation_selected()
         chat = select_chat(project, server_threads, disabled=new_project)
