@@ -1,8 +1,9 @@
 # Prompt Templates
 
 Store project prompts in `ops/prompts/**/*.md`. **Use Prompt Template** in the
-sidebar is available in new and existing chats, including while Codex is
-running. Each press adds a local picker entry, like the Skill and File Path
+sidebar is available in new and existing chats. Like Use Skill and Add File
+Path, it is disabled without a selected project or while a turn is pending.
+Each press adds a local picker entry, like the Skill and File Path
 helpers. Its searchable selection shows template titles and relative paths
 from the selected project. Each history render shares one fresh template
 listing across its pickers. Chat, Canvas,

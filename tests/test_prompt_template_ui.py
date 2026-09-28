@@ -142,13 +142,13 @@ def test_stale_ack_does_not_clear_new_delivery():
     assert state['drafts']['t']['values']['x'] == 'keep'
 
 
-def test_sidebar_remains_available_during_and_after_turns(tmp_path):
+def test_sidebar_disabled_during_turns_and_available_afterward(tmp_path):
     app, _ = setup(tmp_path)
-    for pending in (None, {'status': 'running'}, {'recovery_only': True}):
+    choose(app, 'plain.md')
+    for pending in (None, {'status': 'running'}, {'recovery_only': True}, None):
         app.session_state['test_pending'] = pending
         app.run()
-        assert not button(app, 'Use Prompt Template').disabled
-        choose(app, 'plain.md')
+        assert button(app, 'Use Prompt Template').disabled == bool(pending)
         button(app, 'Add to draft').click().run()
         assert app.session_state['picker_states'][0]['pending_addition']['text'] == '  Literal {value}\n'
         button(app, 'Browser confirms insertion').click().run()

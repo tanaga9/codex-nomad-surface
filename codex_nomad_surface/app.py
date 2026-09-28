@@ -4155,7 +4155,8 @@ def render_locked_codex_run_overrides(
 def sidebar_prompt_template_actions(
     project: Project | None, chat: ChatSession | None
 ) -> None:
-    if st.button("Use Prompt Template", disabled=not project, width="stretch"):
+    disabled = not project or bool(st.session_state.get("pending_turn"))
+    if st.button("Use Prompt Template", disabled=disabled, width="stretch"):
         add_draftable_chat_message(
             project, chat, "prompt_template_picker",
             metadata={"picker_id": str(uuid.uuid4())},
