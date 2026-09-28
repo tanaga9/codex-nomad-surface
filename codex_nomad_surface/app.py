@@ -10,7 +10,6 @@ import shlex
 import socket
 import subprocess
 import tempfile
-import textwrap
 import threading
 import time
 import uuid
@@ -89,10 +88,10 @@ from codex_nomad_surface.markdown_rendering import (
     markdown_with_local_file_links,
     markdown_with_soft_line_breaks,
 )
-from codex_nomad_surface.promptform_defs import (
-    PromptFormDef,
-    load_promptform_defs,
-    promptform_def_by_id,
+from codex_nomad_surface.prompt_templates import load_templates
+from codex_nomad_surface.prompt_template_ui import (
+    render_template_composer,
+    render_template_delivery,
 )
 from codex_nomad_surface.settings import (
     AppSettings,
@@ -127,7 +126,6 @@ from codex_nomad_surface.ui_components import (
     inject_chat_input_outbox,
     inject_responsive_input_style,
     render_copy_text_button,
-    render_promptform,
 )
 
 st.set_page_config(
@@ -195,14 +193,6 @@ FILE_PATH_PICKER_SKIP_DIRS = {
     "target",
     "venv",
 }
-PROMPTFORM_BLOCK_PATTERN = re.compile(
-    r"""
-    ^[ \t]*```promptform[ \t]*\r?\n
-    (?P<body>.*?)
-    ^[ \t]*```[ \t]*$
-    """,
-    re.DOTALL | re.MULTILINE | re.VERBOSE,
-)
 
 
 def init_state() -> None:
@@ -1298,6 +1288,65 @@ def chat_message_has_server_item_identity(message: ChatMessage) -> bool:
     return any(str(item_id) for item_id in metadata.get("server_item_ids", []))
 
 
+LOCAL_PICKER_ROLES = {"prompt_template_picker", "skill_picker", "file_path_picker"}
+
+
+def picker_anchor_keys(message: ChatMessage) -> list[tuple[str, ...]]:
+    keys = chat_message_identities(message)
+    turn_role = chat_message_turn_role_identity(message)
+    if turn_role and turn_role not in keys:
+        keys.append(turn_role)
+    return keys
+
+
+def restore_local_picker_positions(
+    existing: list[ChatMessage], messages: list[ChatMessage]
+) -> list[ChatMessage]:
+    """Restore local controls between their original conversation neighbours.
+
+    Anchors survive trimming so loading older messages restores the original
+    position. Controls whose neighbours are outside the window stay on its
+    older edge, retaining inputs and pending deliveries without moving to the end.
+    """
+    if not any(message.role in LOCAL_PICKER_ROLES for message in existing):
+        return messages
+    positions = {}
+    for index, message in enumerate(messages):
+        for key in picker_anchor_keys(message):
+            positions[key] = index
+    following = [None] * len(existing)
+    next_keys = []
+    for index in range(len(existing) - 1, -1, -1):
+        following[index] = next_keys
+        if existing[index].role not in LOCAL_PICKER_ROLES:
+            next_keys = picker_anchor_keys(existing[index])
+    previous_keys = []
+    buckets: dict[int, list[ChatMessage]] = {}
+    for index, message in enumerate(existing):
+        if message.role not in LOCAL_PICKER_ROLES:
+            previous_keys = picker_anchor_keys(message)
+            continue
+        anchor = message.metadata.setdefault(
+            "history_position", {"previous": previous_keys, "next": following[index]}
+        )
+        previous = next(
+            (positions[tuple(key)] for key in anchor["previous"] if tuple(key) in positions),
+            None,
+        )
+        following_index = next(
+            (positions[tuple(key)] for key in anchor["next"] if tuple(key) in positions),
+            None,
+        )
+        slot = previous + 1 if previous is not None else (following_index or 0)
+        buckets.setdefault(slot, []).append(message)
+    result = []
+    for index in range(len(messages) + 1):
+        result.extend(buckets.get(index, []))
+        if index < len(messages):
+            result.append(messages[index])
+    return result
+
+
 def merge_thread_history_messages(
     existing: list[ChatMessage], loaded: list[ChatMessage]
 ) -> list[ChatMessage]:
@@ -1309,6 +1358,8 @@ def merge_thread_history_messages(
         *[("existing", message) for message in existing],
     ]
     for source, message in candidates:
+        if message.role in LOCAL_PICKER_ROLES:
+            continue
         identities = chat_message_identities(message)
         if any(identity in seen for identity in identities):
             continue
@@ -1323,7 +1374,7 @@ def merge_thread_history_messages(
         ):
             loaded_turn_roles.add(turn_role)
         merged.append(message)
-    return merged
+    return restore_local_picker_positions(existing, merged)
 
 
 def trim_chat_history_if_needed(client: CodexClient, chat: ChatSession | None) -> bool:
@@ -1331,7 +1382,8 @@ def trim_chat_history_if_needed(client: CodexClient, chat: ChatSession | None) -
         return False
     if st.session_state.get("pending_turn"):
         return False
-    if len(chat.messages) <= CHAT_HISTORY_RECENT_MESSAGE_LIMIT:
+    conversation_count = sum(message.role not in LOCAL_PICKER_ROLES for message in chat.messages)
+    if conversation_count <= CHAT_HISTORY_RECENT_MESSAGE_LIMIT:
         return False
     result = client.read_thread_messages(
         chat.thread_id, limit=CHAT_HISTORY_RECENT_MESSAGE_LIMIT
@@ -1340,7 +1392,7 @@ def trim_chat_history_if_needed(client: CodexClient, chat: ChatSession | None) -
     if not messages:
         return False
     update_thread_history_state(chat.thread_id, result)
-    chat.messages = messages
+    chat.messages = restore_local_picker_positions(chat.messages, messages)
     chat.touch()
     return True
 
@@ -1747,7 +1799,6 @@ def render_chat(
 ) -> None:
     if not chat:
         return
-    promptform_defs = load_available_promptform_defs(project.path if project else "")
     skill_defs = load_available_skill_defs(
         client.base_url, project.path if project else ""
     )
@@ -1757,7 +1808,7 @@ def render_chat(
                 "An App Server thread is selected. Previous messages have not been loaded yet. The next submission will continue this thread."
             )
             return
-        st.caption("No messages yet. Add a prompt form or type a request for Codex.")
+        st.caption("No messages yet. Choose a template or type a request for Codex.")
         render_codex_run_overrides(
             client.base_url,
             chat,
@@ -1806,15 +1857,19 @@ def render_chat(
     latest_progress_only_index = latest_progress_only_message_index(
         visible_message_items
     )
+    template_defs = []
+    if any(message.role == "prompt_template_picker" for _, message in visible_message_items):
+        template_defs, template_errors = load_templates(project.path if project else "")
+        for error in template_errors:
+            st.warning(f"Prompt Template: {error}")
     for index, message in visible_message_items:
         if message.role == "promptform_picker":
-            picker_id = str(message.metadata.get("picker_id") or f"{chat.id}-{index}")
-            with st.chat_message("promptform-picker", avatar="🧩"):
-                render_promptform_picker_message(
-                    message,
-                    promptform_defs,
-                    message_key=f"{chat.id}-{picker_id}",
-                )
+            # Old local picker messages have no conversational content.
+            continue
+
+        if message.role == "prompt_template_picker":
+            with st.chat_message("prompt-template-picker", avatar=":material/edit_note:"):
+                render_template_composer(message.metadata, template_defs)
             continue
 
         if message.role == "skill_picker":
@@ -1857,8 +1912,6 @@ def render_chat(
 
         with st.chat_message(message.role):
             content = message.content
-            embedded_forms: list[dict] = []
-            embedded_form_errors: list[str] = []
             if message.metadata.get("kind") == "turn_steer":
                 st.caption("turn/steer")
             if message.metadata.get("kind") == "interrupt_draft":
@@ -1868,9 +1921,6 @@ def render_chat(
                     message.metadata.get("codex_output"), content
                 )
                 content = output_parts["output"]
-                content, embedded_forms, embedded_form_errors = extract_promptforms(
-                    content
-                )
             if message.role == "assistant" and codex_output_has_auxiliary(output_parts):
                 progress_only = codex_output_is_progress_only(output_parts)
                 render_codex_output_auxiliary(
@@ -1915,13 +1965,6 @@ def render_chat(
                     render_disabled_interrupt_draft_buttons(
                         f"interrupt-draft-log-{chat.id}-{index}"
                     )
-            for form_index, form_schema in enumerate(embedded_forms):
-                render_promptform(
-                    form_schema,
-                    instance_key=f"{chat.id if chat else 'chat'}-{index}-{form_index}",
-                )
-            for error in embedded_form_errors:
-                st.warning(f"Prompt Form parse error: {error}", icon="⚠️")
 
 
 def render_pending_action_recovery_button(
@@ -2041,108 +2084,6 @@ def handle_pending_action_recovery_result(
     st.session_state.approval_action_queued = None
     st.session_state.chat_history_autoscroll = True
     st.rerun()
-
-
-def normalize_embedded_form_option(option: object) -> dict:
-    if isinstance(option, str):
-        return {"value": option, "label": option}
-    if not isinstance(option, dict):
-        raise ValueError("Form options must be strings or objects.")
-
-    if "value" not in option:
-        raise ValueError("Form option objects must define a value.")
-    value = str(option.get("value") or "")
-    label = str(option.get("label") or value).strip()
-    return {"value": value, "label": label}
-
-
-def normalize_embedded_form_field(field: object) -> dict:
-    if not isinstance(field, dict):
-        raise ValueError("Form fields must be objects.")
-
-    field_id = str(field.get("id") or "").strip()
-    field_type = str(field.get("type") or "").strip().lower()
-    field_label = str(field.get("label") or "").strip()
-    if not field_id:
-        raise ValueError("Form fields must have an id.")
-    if field_type not in {"radio", "select", "text", "textarea", "checkbox"}:
-        raise ValueError(f"Unsupported form field type: {field_type}")
-
-    normalized = {
-        "id": field_id,
-        "type": field_type,
-        "label": field_label or field_id.replace("_", " ").replace("-", " ").title(),
-        "placeholder": str(field.get("placeholder") or "").strip(),
-        "help": str(field.get("help") or "").strip(),
-        "required": bool(field.get("required", False)),
-        "default": str(field.get("default") or "").strip(),
-    }
-
-    if field_type in {"radio", "select"}:
-        options = [
-            normalize_embedded_form_option(option)
-            for option in field.get("options", [])
-        ]
-        if not options:
-            raise ValueError(f"{field_type} fields must provide at least one option.")
-        normalized["options"] = options
-        if not normalized["default"]:
-            normalized["default"] = options[0]["value"]
-    elif field_type == "checkbox":
-        normalized["default"] = bool(field.get("default", False))
-        normalized["checked_value"] = str(field.get("checked_value") or "true")
-        normalized["unchecked_value"] = str(field.get("unchecked_value") or "false")
-
-    return normalized
-
-
-def normalize_promptform(form: object) -> dict:
-    if not isinstance(form, dict):
-        raise ValueError("Prompt Form must be a JSON object.")
-
-    template = str(form.get("template") or "").strip()
-    if not template:
-        raise ValueError("Prompt Form must define a template.")
-
-    fields = [normalize_embedded_form_field(field) for field in form.get("fields", [])]
-    if not fields:
-        raise ValueError("Prompt Form must define at least one field.")
-
-    append_spacing = str(form.get("append_spacing") or "paragraph").strip().lower()
-    if append_spacing not in {"none", "line", "paragraph"}:
-        append_spacing = "paragraph"
-
-    return {
-        "title": str(form.get("title") or "Prompt Form").strip() or "Prompt Form",
-        "purpose": str(form.get("purpose") or "").strip(),
-        "usage": str(form.get("usage") or "").strip(),
-        "response_example": str(form.get("response_example") or "").strip(),
-        "submit_label": str(form.get("submit_label") or "Insert into chat").strip()
-        or "Insert into chat",
-        "template": template,
-        "append_spacing": append_spacing,
-        "fields": fields,
-    }
-
-
-def extract_promptforms(content: str) -> tuple[str, list[dict], list[str]]:
-    forms: list[dict] = []
-    errors: list[str] = []
-
-    def replace(match: re.Match[str]) -> str:
-        raw_json = textwrap.dedent(match.group("body")).strip()
-        try:
-            forms.append(normalize_promptform(json.loads(raw_json)))
-            return ""
-        except json.JSONDecodeError as exc:
-            errors.append(f"invalid JSON at line {exc.lineno}, column {exc.colno}")
-            return match.group(0)
-        except ValueError as exc:
-            errors.append(str(exc))
-            return match.group(0)
-
-    stripped = PROMPTFORM_BLOCK_PATTERN.sub(replace, content).strip()
-    return stripped, forms, errors
 
 
 def render_chat_history_panel_contents(
@@ -3587,16 +3528,6 @@ def ui_test_approval(test_id: str) -> dict[str, Any]:
     }
 
 
-def load_available_promptform_defs(project_path: str = "") -> list[PromptFormDef]:
-    defs = load_promptform_defs(project_path)
-    if not defs:
-        st.error(
-            "No Prompt Form definitions found. Add JSON files under `promptform-defs/`."
-        )
-        st.stop()
-    return defs
-
-
 @st.cache_data(show_spinner=False, ttl=30)
 def load_available_skill_defs(base_url: str, project_path: str = "") -> list[SkillDef]:
     if not project_path:
@@ -4221,19 +4152,13 @@ def render_locked_codex_run_overrides(
         )
 
 
-def sidebar_promptform_actions(
+def sidebar_prompt_template_actions(
     project: Project | None, chat: ChatSession | None
 ) -> None:
-    disabled = not project or bool(st.session_state.get("pending_turn"))
-    if st.button("Add Prompt Form", disabled=disabled, width="stretch"):
+    if st.button("Use Prompt Template", disabled=not project, width="stretch"):
         add_draftable_chat_message(
-            project,
-            chat,
-            "promptform_picker",
-            metadata={
-                "picker_id": str(uuid.uuid4()),
-                "selected_def_id": "",
-            },
+            project, chat, "prompt_template_picker",
+            metadata={"picker_id": str(uuid.uuid4())},
         )
         st.rerun()
 
@@ -4393,44 +4318,6 @@ def render_no_thread_turn_test(chat: ChatSession, pending: dict) -> None:
 def ui_test_screen(settings: AppSettings) -> None:
     ui_test_sidebar(settings)
     render_ui_test_workspace(settings)
-
-
-def render_promptform_picker_message(
-    message: ChatMessage, defs: list[PromptFormDef], message_key: str
-) -> None:
-    selected_def_id = str(message.metadata.get("selected_def_id") or "")
-    options = [item.id for item in defs]
-    label_by_id = {item.id: promptform_def_option_label(item) for item in defs}
-    selected_index = (
-        options.index(selected_def_id) if selected_def_id in options else None
-    )
-    selected_def_id = st.selectbox(
-        "Prompt Form",
-        options,
-        index=selected_index,
-        key=f"promptform_picker_{message_key}",
-        format_func=lambda item_id: label_by_id[item_id],
-        placeholder="Choose a prompt form",
-        label_visibility="collapsed",
-    )
-    message.metadata["selected_def_id"] = selected_def_id
-    if not selected_def_id:
-        return
-    selected_def = promptform_def_by_id(defs, selected_def_id)
-    if selected_def is None:
-        st.warning("The selected Prompt Form was not found.", icon="⚠️")
-        return
-    render_promptform(
-        normalize_promptform(selected_def.form),
-        instance_key=f"{message_key}-{selected_def.id}",
-    )
-
-
-def promptform_def_option_label(item: PromptFormDef) -> str:
-    title = str(item.form.get("title") or item.id)
-    purpose = str(item.form.get("purpose") or "").strip()
-    summary = f"{title} - {purpose}" if purpose else title
-    return f"{item.source_label}: {item.path} - {summary}"
 
 
 def render_skill_picker_message(
@@ -4615,7 +4502,7 @@ def append_once_chat_input_html(token: str, text: str, spacing: str) -> str:
         <script>
         (() => {{
           const token = {json.dumps(dom_id)};
-          const text = {json.dumps(text)};
+          const text = {json.dumps(text).replace("<", "\\u003c")};
           const appendToChatInput = window.codexNomadSurface?.appendToChatInput;
           window.{state_key} = window.{state_key} || new Set();
           if (window.{state_key}.has(token)) {{
@@ -4692,6 +4579,10 @@ def chat_composer(
                 "Wait for the check to finish or stop checking before sending a message."
             )
     restore_pending_text_to_chat_input(chat)
+    if project and chat:
+        for message in chat.messages:
+            if message.role == "prompt_template_picker":
+                render_template_delivery(message.metadata, disabled=prompt_disabled)
 
 
 def chat_workspace(
@@ -5440,7 +5331,7 @@ def surface_sidebar(
         ):
             append_server_thread_info_message(settings, project, chat)
         st.divider()
-        sidebar_promptform_actions(project, chat)
+        sidebar_prompt_template_actions(project, chat)
         sidebar_skill_actions(project, chat)
         sidebar_file_path_actions(project, chat)
     return project, chat

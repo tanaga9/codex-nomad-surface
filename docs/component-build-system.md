@@ -47,3 +47,9 @@ its production build behind `npm run build`, and then:
 Keep this single-package architecture unless component packages are
 intentionally made independently versioned or reusable outside Codex Nomad
 Surface.
+
+The template-delivery acknowledgement uses a small inline Custom Component v2
+module from `ui_components/assets/template_delivery.js`. It has no frontend
+dependencies or generated assets, so it is packaged through the existing static
+asset rule rather than registered as a buildable frontend. It only calls the
+shared chat-input append bridge and reports delivery acknowledgement.

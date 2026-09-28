@@ -184,3 +184,54 @@ class ChatHistoryMergeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def message(content, role='user'):
+    return ChatMessage(role, content, {'server_item_id': content})
+
+
+def picker(name, role='prompt_template_picker'):
+    return ChatMessage(role, '', {'picker_id': name})
+
+
+def test_pickers_keep_positions_on_refresh_and_loading_older_messages():
+    a, b, c = message('a'), message('b', 'assistant'), message('c')
+    first = picker('first')
+    second = picker('second', 'skill_picker')
+    third = picker('third', 'file_path_picker')
+    existing = [a, first, second, b, third, c]
+    result = merge_thread_history_messages(existing, [a, b, c])
+    assert result == existing
+    older = message('older')
+    assert merge_thread_history_messages(result, [older, a]) == [older, *existing]
+    assert merge_thread_history_messages(result, [a, b, c]) == existing
+
+
+def test_trimmed_picker_restores_original_position_when_older_context_returns():
+    from codex_nomad_surface.app import restore_local_picker_positions
+    a, b, c = message('a'), message('b'), message('c')
+    control = picker('control')
+    control.metadata['template_state'] = {'pending_addition': {'token': 'keep', 'text': 'Draft'}}
+    original = [a, control, b, c]
+    trimmed = restore_local_picker_positions(original, [c])
+    assert trimmed == [control, c]
+    restored = merge_thread_history_messages(trimmed, [a, b])
+    assert restored == original
+    assert restored[1] is control
+    assert control.metadata['template_state']['pending_addition']['text'] == 'Draft'
+
+
+def test_anchor_can_match_server_turn_when_item_identity_is_added():
+    from codex_nomad_surface.app import restore_local_picker_positions
+    local = ChatMessage('user', 'Request', {'server_turn_id': 'turn'})
+    server = ChatMessage('user', 'Request', {'server_turn_id': 'turn', 'server_item_id': 'item'})
+    control = picker('control')
+    answer = message('answer', 'assistant')
+    assert restore_local_picker_positions([local, control, answer], [server, answer]) == [server, control, answer]
+
+
+def test_leading_and_trailing_pickers_keep_their_order():
+    from codex_nomad_surface.app import restore_local_picker_positions
+    a = message('a')
+    first, last = picker('first'), picker('last')
+    assert restore_local_picker_positions([first, a, last], [a]) == [first, a, last]

@@ -73,7 +73,19 @@ transport fallback.
 | `EX-003` | Provider model discovery                 | Calls a configured provider `base_url + "/models"` with an optional API key from the environment. | Supplements App Server model discovery with direct provider API discovery.                            | Prefer App Server model APIs. Keep only if direct provider discovery remains an explicit product feature.      |
 | `EX-004` | Local file content serving               | Serves local file bytes through the Streamlit middleware route.                                   | Allows file links shown in the app to open local content from the host.                               | Prefer an App Server file-read capability if it can satisfy the same auth and UX requirements.                 |
 | `EX-005` | Chat input append bridge                 | Finds Streamlit's chat input textarea in the DOM and appends generated text.                      | Streamlit does not expose a first-class Python API for appending to the unsent `st.chat_input` draft. | Keep small and isolated until Streamlit or the app has a supported composer API.                               |
-| `EX-006` | Prompt Form and starter append fallback  | Falls back to local DOM append logic when the shared chat input bridge is unavailable.            | Keeps Prompt Form and starter buttons functional if the bridge script has not initialized.            | Prefer the shared bridge. Avoid adding more independent DOM fallbacks.                                         |
+| `EX-006` | Starter append fallback  | Falls back to local DOM append logic when the shared chat input bridge is unavailable.            | Keeps starter buttons functional if the bridge script has not initialized.            | Prefer the shared bridge. Avoid adding more independent DOM fallbacks.                                         |
 | `EX-007` | Local App Server launcher                | Starts `codex app-server`, or `$CODEX_APP_SERVER_BIN app-server` when configured, as a local subprocess from the web app. | Convenience for local use when the configured App Server endpoint is localhost.                       | Keep as an explicit local convenience, not as a prompt-submission fallback. Do not add CLI execution fallback. |
 | `EX-008` | File Path picker candidates              | Reads project file paths through bounded local filesystem scanning.                               | Keeps the browser candidate list small while helping users reference project files from the composer. | Prefer an App Server project-file listing API if one becomes available with equivalent performance and auth.   |
 | `EX-009` | Uploaded chat image temp files           | Saves browser-uploaded chat images to temporary local files and passes their paths as App Server `local_images`. | App Server image input expects host-local paths, while Streamlit receives browser uploads as bytes.    | Prefer direct App Server upload or attachment support if it becomes available.                                |
+
+`EX-012` — Project Prompt Templates: reads project-owned `ops/prompts/*.md`
+files and keeps unfinished input values in session-local composer state.
+Local picker entries retain neighbouring message identities to preserve their
+positions when server history is refreshed, trimmed, or loaded in pages.
+This is user-authored Nomad Surface composition data, not Codex configuration
+or a substitute for App Server questions. Only the expanded plain-text draft
+is submitted through the normal App Server turn path. Template insertion uses
+the existing shared append bridge (`EX-005`) with no independent DOM fallback.
+An inline Streamlit component reports browser-side success; pending text is
+retained until acknowledgement or explicit cancellation. Receipt tokens avoid
+re-appending an operation when acknowledgement is delayed.

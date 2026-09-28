@@ -245,15 +245,22 @@ The initial policy for assistant-provided micro UI is:
 - It should remain extensible so additional field types and interaction patterns
   can be added later.
 
-The current mechanism supported by Codex Nomad Surface for this is Prompt Form,
-where the assistant emits a structured `promptform` block and the Web UI
-renders an embedded response form that generates editable draft text for the
-user.
+### Prompt Templates
 
-This should be treated as a pragmatic fallback mechanism, not as the project's
-only long-term structured UI direction. If a better-fit existing interaction or
-generative UI protocol is available for a given use case, that protocol may be
-preferred.
+Reusable prompts are project-owned Markdown files under `ops/prompts/`, with
+optional YAML front matter for input metadata. A persistent sidebar entry
+exposes templates in new and existing chats across all surfaces, including
+during an active turn. Each activation adds a searchable picker to the chat, like Skill and File Path
+helpers. Picker entries remain reusable after insertion. Template preparation is
+independent of send availability. Variables use `{{input.name}}`; input controls
+exist only when needed.
+Expansion preserves the body and produces editable text without sending it.
+Unresolved required inputs and malformed definitions must be visible errors.
+
+Template composition is local UI state held by each chat picker entry. It
+does not create an App Server thread or send a conversation message. Do not execute expressions or add a legacy Prompt Form
+loader. Assistant-emitted `promptform` blocks are ordinary text; App Server
+questions and approvals retain their purpose-built handling.
 
 ### Chat Draft Integration Policy
 
@@ -261,7 +268,7 @@ For assistant-provided micro UI that helps compose the next prompt, the app
 should keep `st.chat_input` as the primary draft input.
 
 Pre-send composition state should not create a chat or Codex App Server thread.
-Actions such as adding a Prompt Form, Skill picker, or File Path picker prepare
+Actions such as using a Prompt Template, Skill picker, or File Path picker prepare
 the next user turn; they should remain local composer draft state until the app
 is about to submit the first turn to Codex. The current implementation may use
 a temporary draft `ChatSession` as a bridge, but the cleaner long-term model is

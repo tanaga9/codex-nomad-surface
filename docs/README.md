@@ -34,13 +34,10 @@ This directory is organized by document role rather than by feature chronology.
   - Minimal bundled plugin architecture for a Nomad Canvas-specific mind-map
     skill, plus distribution, validation, and lightweight update policy.
 
-## Protocols
+## Prompt Composition
 
-- [protocols/promptform.md](protocols/promptform.md)
-  - Agent-facing behavior notes for Prompt Form, an embedded structured-input fallback available in supporting clients such as Codex Nomad Surface.
-
-- [protocols/promptform.schema.json](protocols/promptform.schema.json)
-  - Machine-readable schema for the current `promptform` protocol.
+- [prompt-templates.md](prompt-templates.md)
+  - Project Markdown templates, variable inputs, draft lifecycle, and migration.
 
 ## External References
 

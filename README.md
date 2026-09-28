@@ -8,18 +8,14 @@ Codex Nomad Surface is not intended to replace the official Codex interface. It 
 
 Codex is moving from a coding-focused agent toward a broader general-purpose agent, while many interfaces still resemble a traditional chat or coding surface. That mismatch creates repeated input work: task shape, context, constraints, and expected output have to be described again and again. This is not only a mobile problem, but it becomes especially visible on mobile.
 
-## Prompt Form Defs
+## Prompt Templates
 
-Reusable Prompt Form definitions are stored in `promptform-defs/*.json`.
-They are intended to be reused and refined over time for recurring work shapes.
-The Add Prompt Form picker lists `promptform-defs/` forms in this order:
-project-specific forms from the selected project first, then shared general
-forms.
-
-The app supports two paths:
-
-- Assistant-triggered Prompt Forms: normal `promptform` blocks embedded in assistant responses.
-- User-triggered Prompt Forms: the sidebar button inserts a selector message into the chat history, then the selected definition is rendered below it.
+Store reusable Markdown prompts in the selected project's `ops/prompts/`.
+Open **Use Prompt Template** in the sidebar at any point in a chat,
+search and choose a template in the chat picker, fill any `{{input.name}}` variables,
+and append the result to the editable draft. Optional YAML front matter defines
+labels, defaults, and choices. Insertion never sends the prompt automatically.
+See [Prompt Templates](docs/prompt-templates.md) for the format and migration.
 
 ## Features
 
@@ -33,8 +29,7 @@ The system is intended for personal use and includes:
 - Inline approval request display and response
 - Generic display and response handling for App Server requests that require
   user input outside the prompt body
-- Reusable Prompt Form defs loaded from JSON files
-- User-triggered Prompt Form insertion from the sidebar
+- Project Markdown prompt templates with optional variable inputs
 - User-triggered Skill picker insertion from the sidebar
 - User-triggered File Path picker insertion from the sidebar
 - A minimal settings screen
@@ -167,18 +162,20 @@ minute.
 
 ## Layout
 
-- Left sidebar: project / chat selection, Prompt Form, Skill, and File Path insertion, and the Settings dialog.
+- Left sidebar: project / chat selection, Prompt Template, Skill and File Path insertion, and the Settings dialog.
 - Main area: chat history, inline approvals or other user-response requests,
   and the bottom chat input.
 
 ## Structure
 
 - `codex_nomad_surface/app.py`: Streamlit UI.
-- `codex_nomad_surface/ui_components/`: reusable UI helpers and static assets for embedded forms and custom chat-input integrations.
+- `codex_nomad_surface/ui_components/`: reusable UI helpers and static assets for custom chat-input integrations.
 - `codex_nomad_surface/codex_client.py`: Codex App Server WebSocket RPC connection, thread listing, history loading, prompt submission, and approval or user-response requests.
 - `codex_nomad_surface/settings.py`: storage in `.nomad_surface/settings.json`.
-- `promptform-defs/*.json`: reusable Prompt Form definitions for this project or shared general forms.
-- `codex_nomad_surface/promptform_defs.py`: loader for Prompt Form definition files.
+- `ops/prompts/*.md`: project prompt templates with optional input metadata.
+- `ops/prompts/*.md` in the selected project: Markdown prompt templates offered in the same picker.
+- `codex_nomad_surface/prompt_templates.py`: template loading, validation, and expansion.
+- `codex_nomad_surface/prompt_template_ui.py`: session-local template composer.
 - `.agents/skills/`: Skills that maintain this repository's implementation.
 - `plugins/nomad-surface/skills/`: project-independent Skills distributed with
   the Nomad Surface plugin.
@@ -189,10 +186,6 @@ minute.
 - `scripts/dev.py`: project-wide setup, component build, and verification
   commands.
 - `pyproject.toml`: Python project metadata and runtime dependencies.
-
-The embedded Prompt Form UI is assembled at runtime by the `ui_components`
-package, which loads its static CSS/JS assets and injects them into the
-Streamlit app.
 
 ## Notes
 
@@ -214,11 +207,6 @@ previews require the same signed authentication cookie as the
 main app. File contents are returned directly, and directory paths return an
 empty response. This exposes files readable by the web server process and is
 intended for local-host operation only.
-
-`promptform` availability depends on the current Codex client rather than on a
-repository by itself. Codex Nomad Surface supports it, so other repositories
-can also rely on the same guidance when Codex is being used through this
-client.
 
 When Codex Nomad Surface starts Codex App Server, it checks shortly after launch whether the process is still running. If the process exits during startup, the launch status dialog shows the exit code. Codex App Server stdout and stderr are written to the web server logs.
 

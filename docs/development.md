@@ -112,7 +112,7 @@ After updating Streamlit, verify these browser flows before release:
 
 - Confirm unauthenticated users cannot view the operation screen or file links.
 - In UI Test mode, exercise an approval and a multi-question user response.
-- At a phone-sized viewport, append a Prompt Form, Skill, and file path to the
+- At a phone-sized viewport, append a Prompt Template, Skill, and file path to the
   native chat input, then send a message with an image attachment.
 - Drag a file over the page, exit through each viewport edge, and cancel
   without dropping. Confirm the chat upload overlay clears and a subsequent
@@ -132,3 +132,11 @@ Click **Run drag regression**, confirm PASS, then send the prepared draft and
 confirm the server-side PASS. This uses real Streamlit DOM and uploads, with
 synthetic drag events; also check OS file dragging and cancellation in each
 supported browser. It does not connect to Codex App Server.
+
+Run `tests/browser/prompt_template_app.py` with Streamlit for a local-only
+template integration check. Type an existing draft, insert a plain template,
+fill and insert the review template, then send to verify the received text.
+This exercises the real draft append bridge without connecting to App Server.
+Open a fresh page with `?bridge=off` to simulate a missing bridge: insertion
+should retain the pending prompt and offer retry. Enable the bridge and retry;
+verify exactly one insertion and that the pending controls disappear.
