@@ -107,23 +107,14 @@ class CodexClientApprovalTests(unittest.TestCase):
         snapshot = parts.to_snapshot()
         self.assertEqual(snapshot["approval_request"], "An operation requires approval")
 
-    def test_duplicate_approval_response_is_ignored_before_event_loop_reentry(
-        self,
-    ) -> None:
-        loop = type(
-            "FakeLoop",
-            (),
-            {"is_running": lambda self: False, "is_closed": lambda self: False},
-        )()
-        runtime = {"loop": loop, "approval_response_in_progress": True}
-
-        result = self.client.respond_chat_turn(
-            runtime,
-            {"id": "approval-1"},
-            "approve",
-        )
-
-        self.assertEqual(result["status"], "duplicate_approval_response")
+    def test_response_requires_a_live_receiver(self) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            result = self.client.respond_chat_turn({"loop": loop}, {"id": "a"}, "approve")
+            self.assertFalse(result["ok"])
+            self.assertIn("no longer active", result["output"])
+        finally:
+            loop.close()
 
     def test_approval_request_without_top_level_id_still_needs_user_response(
         self,
@@ -534,11 +525,11 @@ class CodexClientApprovalTests(unittest.TestCase):
 
         self.assertEqual(
             self.client._approval_response_result(approval, "option:0"),
-            {"approval": {"answers": ["Accept"]}},
+            {"answers": {"approval": {"answers": ["Accept"]}}},
         )
         self.assertEqual(
             self.client._approval_response_result(approval, "option:1"),
-            {"approval": {"answers": ["Decline"]}},
+            {"answers": {"approval": {"answers": ["Decline"]}}},
         )
 
     def test_tool_request_user_input_response_accepts_explicit_answers_json(
@@ -569,7 +560,7 @@ class CodexClientApprovalTests(unittest.TestCase):
                 approval,
                 'answersJson:{"first":{"answers":["A"]},"second":{"answers":["D"]}}',
             ),
-            {"first": {"answers": ["A"]}, "second": {"answers": ["D"]}},
+            {"answers": {"first": {"answers": ["A"]}, "second": {"answers": ["D"]}}},
         )
 
     def test_unknown_item_is_preserved_as_other_output(self) -> None:
@@ -1150,12 +1141,16 @@ class CodexClientApprovalTests(unittest.TestCase):
                 ]
                 self.sent: list[str] = []
                 self.closed = False
+                self.response_sent = asyncio.Event()
 
             async def recv(self) -> str:
+                if len(self.messages) == 1:
+                    await self.response_sent.wait()
                 return self.messages.pop(0)
 
             async def send(self, payload: str) -> None:
                 self.sent.append(payload)
+                self.response_sent.set()
 
             async def close(self) -> None:
                 self.closed = True
@@ -1199,6 +1194,11 @@ class CodexClientApprovalTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.closed = False
 
+            async def recv(self):
+                return json.dumps({"method": "turn/completed", "params": {
+                    "threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}
+                }})
+
             async def close(self) -> None:
                 self.closed = True
 
@@ -1218,11 +1218,11 @@ class CodexClientApprovalTests(unittest.TestCase):
             _output,
             _approvals,
             _output_callback=None,
-            approval_handler=None,
+            message_handler=None,
             _stream_items=None,
         ):
             rpc_methods.append(method)
-            await approval_handler(
+            await message_handler(
                 {
                     "id": "approval-1",
                     "method": "item/commandExecution/requestApproval",
@@ -1233,20 +1233,22 @@ class CodexClientApprovalTests(unittest.TestCase):
                     },
                 }
             )
-            raise AssertionError("approval handler should stop thread/resume")
+            return {"thread": {"id": "thread-1", "status": {"type": "active"}}}
 
         self.client._connect_ws = connect
         self.client._initialize_ws = initialize
         self.client._rpc_call = rpc_call
 
+        events = []
         result = asyncio.run(
-            self.client._recover_chat_turn_ws("/path/to/project", "thread-1")
+            self.client._recover_chat_turn_ws("/path/to/project", "thread-1", event_callback=events.append)
         )
 
-        self.assertEqual(result["status"], "approval")
-        self.assertEqual(result["approval"]["id"], "approval-1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(events[0]["requests"][0]["id"], "approval-1")
+        self.assertEqual(events[-1]["requests"], [])
         self.assertEqual(rpc_methods, ["thread/resume"])
-        self.assertFalse(websocket.closed)
+        self.assertTrue(websocket.closed)
 
     def test_recover_chat_turn_stops_immediately_when_thread_is_idle(self) -> None:
         class FakeWebSocket:

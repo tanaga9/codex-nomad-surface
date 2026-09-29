@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import shlex
 import uuid
@@ -72,10 +73,6 @@ class CodexThreadMessages:
 class CodexModelListResult:
     models: list[dict[str, Any]]
     error: str = ""
-
-
-class ApprovalRequired(Exception):
-    pass
 
 
 @dataclass
@@ -229,7 +226,7 @@ class AppServerMessageClassification:
 
 class CodexClient:
     WS_MAX_SIZE = 16 * 1024 * 1024
-    TURN_INACTIVITY_TIMEOUT_SECONDS = 180.0
+    TURN_QUIET_NOTICE_SECONDS = 180.0
 
     def __init__(self, base_url: str, timeout: float = 5.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -246,7 +243,7 @@ class CodexClient:
         output: list[str] | OutputState,
         approvals: list[dict[str, Any]],
         output_callback: OutputCallback | None = None,
-        approval_handler: Any | None = None,
+        message_handler: Any | None = None,
         stream_items: dict[str, dict[str, str]] | None = None,
     ) -> Any:
         result = await self._rpc_call(
@@ -256,7 +253,7 @@ class CodexClient:
             output,
             approvals,
             output_callback,
-            approval_handler,
+            message_handler,
             stream_items,
         )
         await websocket.send(
@@ -334,6 +331,7 @@ class CodexClient:
         dynamic_tool_handler: DynamicToolHandler | None = None,
         replace_missing_rollout: bool = False,
         initial_context_items: list[dict[str, Any]] | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         if not self.base_url.startswith(("ws://", "wss://")):
             return {
@@ -357,6 +355,7 @@ class CodexClient:
                     dynamic_tool_handler,
                     replace_missing_rollout,
                     initial_context_items,
+                    event_callback,
                 )
             )
             runtime = result.get("runtime")
@@ -376,6 +375,7 @@ class CodexClient:
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
         dynamic_tool_handler: DynamicToolHandler | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Rejoin an existing turn without starting a new one."""
         if (
@@ -397,6 +397,7 @@ class CodexClient:
                     output_callback,
                     runtime_callback,
                     dynamic_tool_handler,
+                    event_callback,
                 )
             )
             runtime = result.get("runtime")
@@ -454,31 +455,22 @@ class CodexClient:
         output_callback: OutputCallback | None = None,
     ) -> dict[str, Any]:
         loop = runtime.get("loop")
-        if not loop:
-            return {"ok": False, "output": "Approval connection was not found."}
-        if runtime.get("approval_response_in_progress") or loop.is_running():
+        if not loop or loop.is_closed() or not loop.is_running():
+            return {"ok": False, "output": "The response connection is no longer active."}
+        future = asyncio.run_coroutine_threadsafe(
+            self._respond_chat_turn_ws(runtime, approval, decision), loop
+        )
+        try:
+            return future.result(timeout=max(self.timeout, 30.0))
+        except TimeoutError:
+            # Never retry a possibly delivered response on this connection.
+            future.cancel()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._close_chat_turn_ws(runtime), loop)
             return {
                 "ok": False,
-                "status": "duplicate_approval_response",
-                "output": "Approval response is already being processed.",
-                "runtime": runtime,
+                "output": "Could not confirm response delivery; the connection was closed.",
             }
-        if loop.is_closed():
-            return {"ok": False, "output": "Approval connection was already closed."}
-        runtime["approval_response_in_progress"] = True
-        try:
-            asyncio.set_event_loop(loop)
-            runtime["output_callback"] = output_callback
-            result = loop.run_until_complete(
-                self._respond_chat_turn_ws(runtime, approval, decision)
-            )
-            if not result.get("runtime"):
-                loop.run_until_complete(loop.shutdown_asyncgens())
-                loop.close()
-            return result
-        finally:
-            runtime["approval_response_in_progress"] = False
-            asyncio.set_event_loop(None)
 
     def close_chat_turn(self, runtime: dict[str, Any]) -> None:
         loop = runtime.get("loop")
@@ -1087,6 +1079,7 @@ class CodexClient:
         dynamic_tool_handler: DynamicToolHandler | None = None,
         replace_missing_rollout: bool = False,
         initial_context_items: list[dict[str, Any]] | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1106,6 +1099,8 @@ class CodexClient:
             "output_callback": output_callback,
             "control_request_ids": set(),
             "dynamic_tool_handler": dynamic_tool_handler,
+            "event_callback": event_callback,
+            "pending_requests": {},
         }
         runtime["loop"] = asyncio.get_running_loop()
         thread_overrides = thread_overrides or {}
@@ -1113,131 +1108,127 @@ class CodexClient:
         try:
             websocket = await self._connect_ws(websockets)
             runtime["websocket"] = websocket
+            if runtime_callback:
+                runtime_callback(runtime)
 
-            try:
+            async def handle_turn_message(message: dict[str, Any]) -> None:
+                self._dispatch_turn_message(runtime, message)
 
-                async def handle_approval_message(message: dict[str, Any]) -> None:
-                    runtime["approval"] = self._approval_from_message(message)
-                    approvals.append(runtime["approval"])
-                    raise ApprovalRequired
-
-                await self._initialize_ws(
-                    websocket,
-                    output_parts,
-                    approvals,
-                    output_callback,
-                    handle_approval_message,
-                    stream_items=runtime["stream_items"],
-                )
-                started_new_thread = not thread_id
-                if thread_id:
-                    resume_params: dict[str, Any] = {
-                        "threadId": thread_id,
-                        "cwd": project_path,
-                        "persistExtendedHistory": True,
-                    }
-                    if approval_policy:
-                        resume_params["approvalPolicy"] = approval_policy
-                    resume_params.update(thread_overrides)
-                    # Dynamic tools are registered at creation and restored by
-                    # the server on resume. Keep the original overrides intact
-                    # in case a missing rollout requires thread/start below.
-                    resume_params.pop("dynamicTools", None)
-                    try:
-                        thread_result = await self._rpc_call(
-                            websocket,
-                            "thread/resume",
-                            resume_params,
-                            output_parts,
-                            approvals,
-                            output_callback,
-                            handle_approval_message,
-                            runtime["stream_items"],
-                        )
-                    except RuntimeError as exc:
-                        if not (
-                            replace_missing_rollout
-                            and "no rollout found for thread id" in str(exc).lower()
-                        ):
-                            raise
-                        runtime["replaced_thread_id"] = thread_id
-                        thread_id = None
-                        started_new_thread = True
-                if not thread_id:
-                    start_params: dict[str, Any] = {
-                        "cwd": project_path,
-                        "ephemeral": False,
-                        "sessionStartSource": "startup",
-                        "experimentalRawEvents": False,
-                        "persistExtendedHistory": True,
-                    }
-                    if approval_policy:
-                        start_params["approvalPolicy"] = approval_policy
-                    start_params.update(thread_overrides)
-                    thread_result = await self._rpc_call(
-                        websocket,
-                        "thread/start",
-                        start_params,
-                        output_parts,
-                        approvals,
-                        output_callback,
-                        handle_approval_message,
-                        runtime["stream_items"],
-                    )
-                thread_id = thread_result["thread"]["id"]
-                runtime["thread_id"] = thread_id
-                if started_new_thread and initial_context_items:
-                    runtime["initial_context_injection_pending"] = True
-                    await self._rpc_call(
-                        websocket,
-                        "thread/inject_items",
-                        {
-                            "threadId": thread_id,
-                            "items": initial_context_items,
-                        },
-                        output_parts,
-                        approvals,
-                        output_callback,
-                        handle_approval_message,
-                        runtime["stream_items"],
-                    )
-                    runtime.pop("initial_context_injection_pending", None)
-                    runtime["initial_context_injected"] = True
-                turn_params: dict[str, Any] = {
+            await self._initialize_ws(
+                websocket,
+                output_parts,
+                approvals,
+                output_callback,
+                handle_turn_message,
+                stream_items=runtime["stream_items"],
+            )
+            started_new_thread = not thread_id
+            if thread_id:
+                resume_params: dict[str, Any] = {
                     "threadId": thread_id,
                     "cwd": project_path,
-                    "input": self._turn_text_input(prompt, local_images),
-                    **self._turn_image_params(local_images),
+                    "persistExtendedHistory": True,
                 }
                 if approval_policy:
-                    turn_params["approvalPolicy"] = approval_policy
-                turn_result = await self._rpc_call(
+                    resume_params["approvalPolicy"] = approval_policy
+                resume_params.update(thread_overrides)
+                # Dynamic tools are registered at creation and restored by
+                # the server on resume. Keep the original overrides intact
+                # in case a missing rollout requires thread/start below.
+                resume_params.pop("dynamicTools", None)
+                try:
+                    thread_result = await self._rpc_call(
+                        websocket,
+                        "thread/resume",
+                        resume_params,
+                        output_parts,
+                        approvals,
+                        output_callback,
+                        handle_turn_message,
+                        runtime["stream_items"],
+                    )
+                except RuntimeError as exc:
+                    if not (
+                        replace_missing_rollout
+                        and "no rollout found for thread id" in str(exc).lower()
+                    ):
+                        raise
+                    runtime["replaced_thread_id"] = thread_id
+                    thread_id = None
+                    started_new_thread = True
+            if not thread_id:
+                start_params: dict[str, Any] = {
+                    "cwd": project_path,
+                    "ephemeral": False,
+                    "sessionStartSource": "startup",
+                    "experimentalRawEvents": False,
+                    "persistExtendedHistory": True,
+                }
+                if approval_policy:
+                    start_params["approvalPolicy"] = approval_policy
+                start_params.update(thread_overrides)
+                thread_result = await self._rpc_call(
                     websocket,
-                    "turn/start",
-                    turn_params | turn_overrides,
+                    "thread/start",
+                    start_params,
                     output_parts,
                     approvals,
                     output_callback,
-                    handle_approval_message,
+                    handle_turn_message,
                     runtime["stream_items"],
                 )
-                turn = turn_result.get("turn") if isinstance(turn_result, dict) else {}
-                if isinstance(turn, dict) and turn.get("id"):
-                    runtime["turn_id"] = turn["id"]
-                if runtime_callback:
-                    runtime_callback(runtime)
-                if runtime.get("cancel_requested"):
-                    await self._close_chat_turn_ws(runtime)
-                    return {
-                        "ok": False,
-                        "thread_id": thread_id,
-                        "output": "Codex turn was cancelled before it became active in the UI.",
-                    }
-                return await self._collect_chat_turn_ws(runtime)
-            except ApprovalRequired:
-                return self._approval_result(runtime)
-        except ApprovalRequired:
-            return self._approval_result(runtime)
+            thread_id = thread_result["thread"]["id"]
+            runtime["thread_id"] = thread_id
+            if started_new_thread and initial_context_items:
+                runtime["initial_context_injection_pending"] = True
+                await self._rpc_call(
+                    websocket,
+                    "thread/inject_items",
+                    {
+                        "threadId": thread_id,
+                        "items": initial_context_items,
+                    },
+                    output_parts,
+                    approvals,
+                    output_callback,
+                    handle_turn_message,
+                    runtime["stream_items"],
+                )
+                runtime.pop("initial_context_injection_pending", None)
+                runtime["initial_context_injected"] = True
+            turn_params: dict[str, Any] = {
+                "threadId": thread_id,
+                "cwd": project_path,
+                "input": self._turn_text_input(prompt, local_images),
+                **self._turn_image_params(local_images),
+            }
+            if approval_policy:
+                turn_params["approvalPolicy"] = approval_policy
+            runtime.pop("completed_turn", None)
+            runtime.pop("turn_id", None)
+            turn_result = await self._rpc_call(
+                websocket,
+                "turn/start",
+                turn_params | turn_overrides,
+                output_parts,
+                approvals,
+                output_callback,
+                handle_turn_message,
+                runtime["stream_items"],
+            )
+            turn = turn_result.get("turn") if isinstance(turn_result, dict) else {}
+            if isinstance(turn, dict) and turn.get("id"):
+                runtime["turn_id"] = turn["id"]
+            if runtime_callback:
+                runtime_callback(runtime)
+            if runtime.get("cancel_requested"):
+                await self._close_chat_turn_ws(runtime)
+                return {
+                    "ok": False,
+                    "thread_id": thread_id,
+                    "output": "Codex turn was cancelled before it became active in the UI.",
+                }
+            return await self._collect_chat_turn_ws(runtime)
         except Exception as exc:
             await self._close_chat_turn_ws(runtime)
             result_thread_id = (
@@ -1268,6 +1259,7 @@ class CodexClient:
         output_callback: OutputCallback | None = None,
         runtime_callback: Callable[[dict[str, Any]], None] | None = None,
         dynamic_tool_handler: DynamicToolHandler | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -1284,6 +1276,8 @@ class CodexClient:
             "output_callback": output_callback,
             "control_request_ids": set(),
             "dynamic_tool_handler": dynamic_tool_handler,
+            "event_callback": event_callback,
+            "pending_requests": {},
         }
         runtime["loop"] = asyncio.get_running_loop()
         try:
@@ -1300,79 +1294,66 @@ class CodexClient:
                     "output": "Stopped checking this turn.",
                 }
 
-            async def handle_approval_message(message: dict[str, Any]) -> None:
-                runtime["approval"] = self._approval_from_message(message)
-                approvals.append(runtime["approval"])
-                raise ApprovalRequired
+            async def handle_turn_message(message: dict[str, Any]) -> None:
+                self._dispatch_turn_message(runtime, message)
 
-            try:
-                await self._initialize_ws(
-                    websocket,
-                    output_parts,
-                    approvals,
-                    output_callback,
-                    handle_approval_message,
-                    stream_items=runtime["stream_items"],
-                )
-                thread_result = await self._rpc_call(
-                    websocket,
-                    "thread/resume",
-                    {
-                        "threadId": thread_id,
-                        "cwd": project_path,
-                        "persistExtendedHistory": True,
-                    },
-                    output_parts,
-                    approvals,
-                    output_callback,
-                    handle_approval_message,
-                    runtime["stream_items"],
-                )
-                thread = (
-                    thread_result.get("thread")
-                    if isinstance(thread_result, dict)
-                    else None
-                )
-                status = thread.get("status") if isinstance(thread, dict) else None
-                status_type = (
-                    str(status.get("type") or "")
-                    if isinstance(status, dict)
-                    else str(status or "")
-                )
-                if status_type in {"idle", "notLoaded"}:
-                    await self._close_chat_turn_ws(runtime)
-                    return {
-                        "ok": True,
-                        "status": "no_pending_action",
-                        "thread_id": thread_id,
-                        "output": "No active turn is waiting for a response.",
-                    }
-                if status_type != "active":
-                    await self._close_chat_turn_ws(runtime)
-                    return {
-                        "ok": False,
-                        "thread_id": thread_id,
-                        "output": "The thread could not be resumed in an active state.",
-                    }
-                if runtime.get("cancel_requested"):
-                    await self._close_chat_turn_ws(runtime)
-                    return {
-                        "ok": True,
-                        "status": "recovery_cancelled",
-                        "thread_id": thread_id,
-                        "output": "Stopped checking this turn.",
-                    }
-                return await self._collect_chat_turn_ws(runtime)
-            except ApprovalRequired:
-                if runtime.get("cancel_requested"):
-                    await self._close_chat_turn_ws(runtime)
-                    return {
-                        "ok": True,
-                        "status": "recovery_cancelled",
-                        "thread_id": thread_id,
-                        "output": "Stopped checking this turn.",
-                    }
-                return self._approval_result(runtime)
+            await self._initialize_ws(
+                websocket,
+                output_parts,
+                approvals,
+                output_callback,
+                handle_turn_message,
+                stream_items=runtime["stream_items"],
+            )
+            thread_result = await self._rpc_call(
+                websocket,
+                "thread/resume",
+                {
+                    "threadId": thread_id,
+                    "cwd": project_path,
+                    "persistExtendedHistory": True,
+                },
+                output_parts,
+                approvals,
+                output_callback,
+                handle_turn_message,
+                runtime["stream_items"],
+            )
+            thread = (
+                thread_result.get("thread")
+                if isinstance(thread_result, dict)
+                else None
+            )
+            status = thread.get("status") if isinstance(thread, dict) else None
+            status_type = (
+                str(status.get("type") or "")
+                if isinstance(status, dict)
+                else str(status or "")
+            )
+            if status_type in {"idle", "notLoaded"}:
+                await self._close_chat_turn_ws(runtime)
+                return {
+                    "ok": True,
+                    "status": "no_pending_action",
+                    "thread_id": thread_id,
+                    "output": "No active turn is waiting for a response.",
+                }
+            if status_type != "active":
+                await self._close_chat_turn_ws(runtime)
+                return {
+                    "ok": False,
+                    "thread_id": thread_id,
+                    "output": "The thread could not be resumed in an active state.",
+                }
+            if runtime.get("cancel_requested"):
+                await self._close_chat_turn_ws(runtime)
+                return {
+                    "ok": True,
+                    "status": "recovery_cancelled",
+                    "thread_id": thread_id,
+                    "output": "Stopped checking this turn.",
+                }
+            return await self._collect_chat_turn_ws(runtime)
         except Exception as exc:
             await self._close_chat_turn_ws(runtime)
             return {
@@ -1381,37 +1362,87 @@ class CodexClient:
                 "output": f"[recovery error] {exc}",
             }
 
+    def _publish_interactions(self, runtime: dict[str, Any]) -> None:
+        callback = runtime.get("event_callback")
+        if callback:
+            callback(
+                {
+                    "type": "interactions",
+                    "requests": copy.deepcopy(
+                        list(runtime.get("pending_requests", {}).values())
+                    ),
+                }
+            )
+
+    def _handle_turn_interaction(
+        self, runtime: dict[str, Any], message: dict[str, Any]
+    ) -> bool:
+        method = message.get("method")
+        params = message.get("params") or {}
+        thread_id = params.get("threadId")
+        if thread_id and runtime.get("thread_id") and thread_id != runtime["thread_id"]:
+            return False
+        requests = runtime.setdefault("pending_requests", {})
+        if self._is_user_response_request_message(message):
+            approval = self._approval_from_message(message)
+            request_id = approval["id"]
+            if request_id not in requests:
+                approval["response_state"] = "pending"
+                requests[request_id] = approval
+                runtime["approvals"].append(approval)
+                self._publish_interactions(runtime)
+            return True
+        if method == "serverRequest/resolved":
+            requests.pop(params.get("requestId"), None)
+            self._publish_interactions(runtime)
+            return True
+        if method == "thread/status/changed":
+            runtime["thread_status"] = params.get("status")
+            if runtime.get("event_callback"):
+                runtime["event_callback"](
+                    {"type": "thread_status", "status": copy.deepcopy(params.get("status"))}
+                )
+        if method == "turn/started":
+            turn = params.get("turn") or {}
+            if turn.get("id"):
+                runtime["turn_id"] = turn["id"]
+        if method == "turn/completed":
+            turn_id = (params.get("turn") or {}).get("id")
+            if not runtime.get("turn_id") or not turn_id or turn_id == runtime["turn_id"]:
+                runtime["completed_turn"] = params.get("turn") or {}
+
+            for request_id, request in list(requests.items()):
+                # MCP elicitations without a turn association have their own lifetime.
+                if request.get("params", {}).get("turnId") == turn_id and turn_id:
+                    requests.pop(request_id)
+            self._publish_interactions(runtime)
+        return False
+
     async def _respond_chat_turn_ws(
         self, runtime: dict[str, Any], approval: dict[str, Any], decision: str
     ) -> dict[str, Any]:
-        websocket = runtime.get("websocket")
-        if not websocket:
-            return {"ok": False, "output": "Approval connection was not found."}
-        result = self._approval_response_result(approval, decision)
+        requests = runtime.get("pending_requests", {})
+        request_id = approval.get("id")
+        current = requests.get(request_id)
+        if current is None:
+            return {"ok": True, "status": "request_resolved"}
+        if current.get("response_state") != "pending":
+            return {"ok": True, "status": "duplicate_approval_response"}
+        result = self._approval_response_result(current, decision)
+        current["response_state"] = "sending"
+        self._publish_interactions(runtime)
         try:
-            await websocket.send(
-                json.dumps(
-                    {"id": approval.get("id"), "result": result}, ensure_ascii=False
-                )
+            await runtime["websocket"].send(
+                json.dumps({"id": request_id, "result": result}, ensure_ascii=False)
             )
-            runtime.pop("approval", None)
-            return await self._collect_chat_turn_ws(runtime)
-        except Exception as exc:
+            if requests.get(request_id) is current:
+                current["response_state"] = "sent"
+                self._publish_interactions(runtime)
+            return {"ok": True, "status": "response_sent"}
+        except Exception:
+            # A failed write can be ambiguous; close rather than risk duplicate replies.
             await self._close_chat_turn_ws(runtime)
-            output_parts = runtime.get("output_parts") or self._empty_output_parts()
-            output = self._fallback_output_text(output_parts)
-            if output:
-                output = f"{output}\n\n[send/receive error] {exc}"
-            else:
-                output = f"[send/receive error] {exc}"
-            output_parts.append_block("error", output)
-            return {
-                "ok": False,
-                "thread_id": runtime.get("thread_id"),
-                "output": self._output_parts_snapshot(output_parts)["output"] or output,
-                "output_parts": self._output_parts_snapshot(output_parts),
-                "approvals": runtime.get("approvals") or [],
-            }
+            raise
 
     async def _send_turn_steer_ws(
         self,
@@ -1514,20 +1545,117 @@ class CodexClient:
         )
         return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
 
+    def _dispatch_turn_message(
+        self, runtime: dict[str, Any], message: dict[str, Any]
+    ) -> None:
+        """Dispatch every non-RPC reply identically during setup and an active turn."""
+        if runtime.get("closing"):
+            return
+        output_parts = runtime["output_parts"]
+        callback = runtime.get("output_callback")
+        control_action = self._pop_control_request_action(runtime, message.get("id"))
+        if control_action is not None:
+            if "error" in message:
+                error_text = message["error"].get("message") or json.dumps(
+                    message["error"], ensure_ascii=False
+                )
+                if control_action == "turn/interrupt":
+                    runtime["interrupt_error"] = error_text
+                output_parts.append_block("error", error_text)
+                if callback:
+                    callback(self._output_parts_snapshot(output_parts))
+            return
+        if (
+            message.get("method") == "item/tool/call"
+            and message.get("id") is not None
+            and runtime.get("dynamic_tool_handler")
+        ):
+            if runtime.get("closing") or "completed_turn" in runtime:
+                return
+            tool_queue = runtime.get("tool_queue")
+            tool_task = runtime.get("tool_task")
+            if tool_queue is None or tool_task is None or tool_task.done():
+                tool_queue = runtime["tool_queue"] = asyncio.Queue()
+                runtime["tool_task"] = asyncio.create_task(
+                    self._run_dynamic_tools(runtime, tool_queue)
+                )
+            tool_queue.put_nowait((message["id"], message.get("params") or {}))
+            return
+        if self._handle_turn_interaction(runtime, message):
+            return
+        changed = self._update_output_parts(
+            message,
+            output_parts,
+            runtime["approvals"],
+            runtime.setdefault("stream_items", {}),
+        )
+        if changed and callback:
+            callback(self._output_parts_snapshot(output_parts))
+
+    async def _run_dynamic_tools(
+        self, runtime: dict[str, Any], tool_queue: asyncio.Queue
+    ) -> None:
+        """Keep tools serial without holding up the WebSocket receiver."""
+        try:
+            while True:
+                request_id, params = await tool_queue.get()
+                if runtime.get("closing") or "completed_turn" in runtime:
+                    return
+                try:
+                    result = await asyncio.to_thread(
+                        runtime["dynamic_tool_handler"], params
+                    )
+                except Exception as exc:
+                    result = {
+                        "success": False,
+                        "contentItems": [
+                            {"type": "inputText", "text": f"canvas_tool_error: {exc}"}
+                        ],
+                    }
+                if runtime.get("closing") or "completed_turn" in runtime:
+                    return
+                await runtime["websocket"].send(
+                    json.dumps({"id": request_id, "result": result}, ensure_ascii=False)
+                )
+        except Exception as exc:
+            # A transport failure in this task must also end the receiver.
+            runtime["output_parts"].append_block("error", f"[tool response error] {exc}")
+            if runtime.get("output_callback"):
+                runtime["output_callback"](
+                    self._output_parts_snapshot(runtime["output_parts"])
+                )
+            await self._close_chat_turn_ws(runtime)
+
     async def _collect_chat_turn_ws(self, runtime: dict[str, Any]) -> dict[str, Any]:
         websocket = runtime["websocket"]
         thread_id = runtime.get("thread_id")
         output_parts = runtime["output_parts"]
-        stream_items = runtime.setdefault("stream_items", {})
         approvals = runtime["approvals"]
-        output_callback = runtime.get("output_callback")
         loop = asyncio.get_running_loop()
         last_activity = loop.time()
+        quiet = False
         while True:
+            if "completed_turn" in runtime:
+                turn = runtime["completed_turn"]
+                await self._close_chat_turn_ws(runtime)
+                snapshot = self._output_parts_snapshot(output_parts)
+                return {
+                    "ok": turn.get("status") != "failed",
+                    "thread_id": thread_id,
+                    "turn_id": runtime.get("turn_id"),
+                    "output": snapshot["output"],
+                    "output_parts": snapshot,
+                    "approvals": approvals,
+                }
             inactive_for = loop.time() - last_activity
-            if inactive_for >= self.TURN_INACTIVITY_TIMEOUT_SECONDS:
-                break
-            remaining = max(0.1, self.TURN_INACTIVITY_TIMEOUT_SECONDS - inactive_for)
+            if inactive_for >= self.TURN_QUIET_NOTICE_SECONDS and not quiet:
+                quiet = True
+                if runtime.get("event_callback"):
+                    runtime["event_callback"]({"type": "activity", "quiet": True})
+            remaining = (
+                max(0.1, self.TURN_QUIET_NOTICE_SECONDS - inactive_for)
+                if not quiet else 30.0
+            )
             try:
                 raw_message = await asyncio.wait_for(
                     websocket.recv(), timeout=min(30.0, remaining)
@@ -1536,102 +1664,21 @@ class CodexClient:
                 continue
 
             last_activity = loop.time()
+            if quiet and runtime.get("event_callback"):
+                runtime["event_callback"]({"type": "activity", "quiet": False})
+            quiet = False
             message = json.loads(raw_message)
-            control_action = self._pop_control_request_action(
-                runtime, message.get("id")
-            )
-            if control_action is not None:
-                if "error" in message:
-                    error_text = message["error"].get("message") or json.dumps(
-                        message["error"], ensure_ascii=False
-                    )
-                    if control_action == "turn/interrupt":
-                        runtime["interrupt_error"] = error_text
-                    output_parts.append_block(
-                        "error",
-                        error_text,
-                    )
-                    if output_callback:
-                        output_callback(self._output_parts_snapshot(output_parts))
-                continue
-            method = message.get("method")
-            params = message.get("params") or {}
-            if (
-                method == "item/tool/call"
-                and message.get("id") is not None
-                and runtime.get("dynamic_tool_handler")
-            ):
-                handler = runtime["dynamic_tool_handler"]
-                try:
-                    tool_result = await asyncio.to_thread(handler, params)
-                except Exception as exc:
-                    tool_result = {
-                        "success": False,
-                        "contentItems": [
-                            {"type": "inputText", "text": f"canvas_tool_error: {exc}"}
-                        ],
-                    }
-                await websocket.send(
-                    json.dumps(
-                        {"id": message.get("id"), "result": tool_result},
-                        ensure_ascii=False,
-                    )
-                )
-                continue
-            if self._is_user_response_request_message(message):
-                approval = self._approval_from_message(message)
-                approvals.append(approval)
-                runtime["approval"] = approval
-                return self._approval_result(runtime)
-
-            changed = self._update_output_parts(
-                message, output_parts, approvals, stream_items
-            )
-            if changed:
-                if output_callback:
-                    output_callback(self._output_parts_snapshot(output_parts))
-            if method == "turn/completed" and params.get("threadId") == thread_id:
-                await self._close_chat_turn_ws(runtime)
-                snapshot = self._output_parts_snapshot(output_parts)
-                return {
-                    "ok": True,
-                    "thread_id": thread_id,
-                    "turn_id": runtime.get("turn_id"),
-                    "output": snapshot["output"],
-                    "output_parts": snapshot,
-                    "approvals": approvals,
-                }
-        await self._close_chat_turn_ws(runtime)
-        output_parts.append_block(
-            "error",
-            "Codex turn did not receive activity for 180 seconds.",
-        )
-        snapshot = self._output_parts_snapshot(output_parts)
-        return {
-            "ok": False,
-            "thread_id": thread_id,
-            "turn_id": runtime.get("turn_id"),
-            "output": snapshot["output"],
-            "output_parts": snapshot,
-            "approvals": approvals,
-        }
-
-    def _approval_result(self, runtime: dict[str, Any]) -> dict[str, Any]:
-        runtime.pop("output_callback", None)
-        output_parts = runtime.get("output_parts") or self._empty_output_parts()
-        snapshot = self._output_parts_snapshot(output_parts)
-        return {
-            "ok": False,
-            "status": "approval",
-            "thread_id": runtime.get("thread_id"),
-            "output": snapshot["output"],
-            "output_parts": snapshot,
-            "approval": runtime.get("approval"),
-            "approvals": runtime.get("approvals") or [],
-            "runtime": runtime,
-        }
+            self._dispatch_turn_message(runtime, message)
 
     async def _close_chat_turn_ws(self, runtime: dict[str, Any]) -> None:
+        runtime["closing"] = True
+        tool_task = runtime.pop("tool_task", None)
+        runtime.pop("tool_queue", None)
+        if tool_task is not None and tool_task is not asyncio.current_task():
+            tool_task.cancel()
+            await asyncio.gather(tool_task, return_exceptions=True)
+        runtime.setdefault("pending_requests", {}).clear()
+        self._publish_interactions(runtime)
         websocket = runtime.pop("websocket", None)
         runtime.pop("loop", None)
         if websocket:
@@ -2227,6 +2274,8 @@ class CodexClient:
     ) -> list[dict[str, str]]:
         if len(questions) != 1:
             return []
+        if questions[0].get("isOther") or questions[0].get("isSecret"):
+            return []
         options = questions[0].get("options")
         if not isinstance(options, list):
             return []
@@ -2243,8 +2292,8 @@ class CodexClient:
             try:
                 value = json.loads(decision.split(":", 1)[1])
             except (TypeError, ValueError, json.JSONDecodeError):
-                return {}
-            return value if isinstance(value, dict) else {}
+                return {"answers": {}}
+            return {"answers": value if isinstance(value, dict) else {}}
 
         questions = approval.get("questions")
         if not isinstance(questions, list):
@@ -2262,7 +2311,7 @@ class CodexClient:
                 continue
             label = self._tool_request_user_input_selected_label(question, decision)
             response[question_id] = {"answers": [label] if label else []}
-        return response
+        return {"answers": response}
 
     def _tool_request_user_input_selected_label(
         self, question: dict[str, Any], decision: str
@@ -2482,7 +2531,7 @@ class CodexClient:
         output: list[str] | OutputState,
         approvals: list[dict[str, Any]],
         output_callback: OutputCallback | None = None,
-        approval_handler: Any | None = None,
+        message_handler: Any | None = None,
         stream_items: dict[str, dict[str, str]] | None = None,
     ) -> Any:
         request_id = str(uuid.uuid4())
@@ -2495,15 +2544,12 @@ class CodexClient:
         while True:
             message = json.loads(
                 await asyncio.wait_for(
-                    websocket.recv(), timeout=max(self.timeout, 30.0)
+                    websocket.recv(),
+                    timeout=None if message_handler else max(self.timeout, 30.0),
                 )
             )
-            if (
-                approval_handler
-                and self._is_user_response_request_message(message)
-                and message.get("id") != request_id
-            ):
-                await approval_handler(message)
+            if message_handler and message.get("id") != request_id:
+                await message_handler(message)
                 continue
             if isinstance(output, CodexTurnOutput):
                 changed = self._update_output_parts(

@@ -140,3 +140,22 @@ This exercises the real draft append bridge without connecting to App Server.
 Open a fresh page with `?bridge=off` to simulate a missing bridge: insertion
 should retain the pending prompt and offer retry. Enable the bridge and retry;
 verify exactly one insertion and that the pending controls disappear.
+
+## Live Codex Interactions
+
+The turn worker keeps receiving while questions or approvals are displayed.
+Requests are tracked by JSON-RPC ID; sending an answer does not start another
+receiver. Startup RPC waits and active turns use the same message dispatcher,
+including cancellation replies. Dynamic tools run serially in a separate task;
+closing the connection discards queued calls and prevents late replies. An
+already-running synchronous editor operation is allowed to finish rather than
+being forcibly terminated. `serverRequest/resolved`, turn completion, and connection closure clear
+applicable controls. `isBlocking` describes whether Codex waits for an answer,
+not whether the client should stop receiving. Question answers use the App Server
+`{ "answers": { "question-id": { "answers": ["value"] } } }` response shape.
+
+After 180 seconds without messages, the UI reports the quiet period and keeps
+listening. Transport failures and explicit cancellation are handled separately.
+`tests/test_live_interactions.py` covers concurrent questions, response races,
+quiet periods, draft preservation, and a loopback WebSocket peer; its transport
+tests require permission to bind a local port and do not call a model.

@@ -807,12 +807,11 @@ def project_selector(
 
 
 def approval_key(approval: dict, fallback: str = "") -> str:
+    request_id = approval.get("id")
+    if request_id is not None:
+        return f"{type(request_id).__name__}:{request_id}"
     return str(
-        approval.get("id")
-        or approval.get("approval_id")
-        or approval.get("detail")
-        or approval
-        or fallback
+        approval.get("approval_id") or approval.get("detail") or approval or fallback
     )
 
 
@@ -1983,11 +1982,9 @@ def render_pending_action_recovery_button(
         if result:
             handle_pending_action_recovery_result(client, chat, pending, result)
             return
-        if pending.get("approval"):
-            render_inline_approval(client, chat, pending)
-            return
         if pending.get("output_parts"):
             render_codex_stream_output(pending["output_parts"])
+        render_pending_requests(client, chat, pending)
         st.caption("Checking this turn for a pending action...")
         if st.button(
             "Stop checking",
@@ -2130,7 +2127,7 @@ def chat_history_panel(
         and pending.get("status") in polling_statuses
     ):
         drain_pending_turn_events(pending)
-        if pending.get("result") or pending.get("approval"):
+        if pending.get("result"):
             render_chat_history_panel_contents(client, project, chat)
             return
         polling_chat_history_panel(client, project, chat)
@@ -2180,7 +2177,7 @@ def render_canvas_live_turn(
         and pending.get("status") in polling_statuses
     ):
         drain_pending_turn_events(pending)
-        if not pending.get("result") and not pending.get("approval"):
+        if not pending.get("result"):
             polling_canvas_live_turn(client, project, chat)
             return
     render_pending_turn(client, project, chat)
@@ -2227,11 +2224,9 @@ def render_pending_turn(
         if result:
             handle_turn_result(chat, pending, result)
             return
-        if pending.get("approval"):
-            render_inline_approval(client, chat, pending)
-            return
         if pending.get("output_parts"):
             render_codex_stream_output(pending["output_parts"])
+        render_pending_requests(client, chat, pending)
         render_pending_turn_wait_indicator(client, pending)
 
     if pending.get("delivery_confirmed"):
@@ -2248,6 +2243,20 @@ def pending_turn_wait_message(pending: dict) -> str:
     editor_sync = pending.get("editor_sync")
     if isinstance(editor_sync, dict) and editor_sync.get("status") == "started":
         return "Syncing editor..."
+    requests = pending.get("requests", [])
+    if any(
+        request.get("response_state") == "pending"
+        and request.get("params", {}).get("isBlocking", True)
+        for request in requests
+    ):
+        return "Waiting for your response..."
+    thread_status = pending.get("thread_status") or {}
+    if isinstance(thread_status, dict) and set(
+        thread_status.get("activeFlags", [])
+    ) & {"waitingOnApproval", "waitingOnUserInput"}:
+        return "Codex reports that it is waiting for user input."
+    if pending.get("quiet"):
+        return "No recent updates from Codex. Still listening; you can cancel."
     status = str(pending.get("status") or TURN_RUN_RUNNING)
     if status == TURN_RUN_STARTING:
         return "Starting turn..."
@@ -2303,6 +2312,14 @@ def render_pending_turn_wait_indicator(client: CodexClient, pending: dict) -> No
                 help="Request cancellation of the current response.",
                 width="content",
             )
+        elif runtime and runtime.get("websocket"):
+            if st.button(
+                "Stop waiting",
+                key=f"stop-starting-turn-{pending.get('run_id')}",
+                help="Close this connection. A turn already accepted by Codex may continue.",
+            ):
+                runtime["cancel_requested"] = True
+                client.close_chat_turn(runtime)
     if interrupt_error:
         st.error(f"Cancellation request failed: {interrupt_error}")
     if cancel_clicked:
@@ -2402,6 +2419,7 @@ def start_turn_run_worker(
                 thread_overrides=pending.get("thread_overrides"),
                 turn_overrides=pending.get("turn_overrides"),
                 approval_policy=pending.get("approval_policy"),
+                event_callback=event_queue.put,
                 output_callback=output_callback,
                 runtime_callback=runtime_callback,
                 dynamic_tool_handler=(
@@ -2460,6 +2478,7 @@ def start_pending_action_recovery_worker(
             result = client.recover_chat_turn(
                 project.path,
                 str(chat.thread_id or ""),
+                event_callback=event_queue.put,
                 output_callback=output_callback,
                 runtime_callback=runtime_callback,
                 dynamic_tool_handler=(
@@ -2500,8 +2519,6 @@ def set_user_turn_delivery_status(
 
 
 def drain_pending_turn_events(pending: dict) -> None:
-    if pending.get("approval"):
-        return
     event_queue = pending.get("worker_queue")
     if not event_queue:
         return
@@ -2527,7 +2544,21 @@ def drain_pending_turn_events(pending: dict) -> None:
             pending["editor_sync"] = {
                 key: value for key, value in event.items() if key != "type"
             }
+        elif event_type == "interactions":
+            pending["requests"] = event.get("requests", [])
+        elif event_type == "thread_status":
+            pending["thread_status"] = event.get("status")
+        elif event_type == "activity":
+            pending["quiet"] = bool(event.get("quiet"))
+        elif event_type == "response_result":
+            key = event["key"]
+            pending.setdefault("responses_in_flight", set()).discard(key)
+            if st.session_state.get("approval_action_in_progress") == key:
+                st.session_state.approval_action_in_progress = ""
+            if not event["result"].get("ok"):
+                pending["response_error"] = event["result"].get("output", "Response failed.")
         elif event_type == "result":
+            pending["requests"] = []
             pending["result"] = event.get("result")
 
 
@@ -2790,11 +2821,20 @@ def cancel_interrupt_draft_if_pending(chat_id: str | None) -> None:
     st.session_state.pending_interrupt_draft = None
 
 
+def render_pending_requests(client: CodexClient, chat: ChatSession, pending: dict) -> None:
+    if pending.get("response_error"):
+        st.error(pending["response_error"])
+    for request in pending.get("requests", []):
+        render_inline_approval(client, chat, pending, approval=request, show_output=False)
+
+
 def render_inline_approval(
     client: CodexClient,
     chat: ChatSession,
     pending: dict,
     pending_state_key: str = "pending_turn",
+    approval: dict | None = None,
+    show_output: bool = True,
 ) -> None:
     output_placeholder = st.empty()
 
@@ -2807,15 +2847,18 @@ def render_inline_approval(
     existing_parts = normalize_codex_output_parts(
         pending.get("output_parts"), str(pending.get("output") or "")
     )
-    if any(existing_parts.values()):
+    if show_output and any(existing_parts.values()):
         with output_placeholder.container():
             render_codex_stream_output(existing_parts)
 
-    approval = pending["approval"]
+    approval = approval if approval is not None else pending["approval"]
     key = approval_key(approval)
     queued_action = st.session_state.approval_action_queued
-    in_progress = st.session_state.approval_action_in_progress == key or (
-        isinstance(queued_action, dict) and queued_action.get("key") == key
+    in_progress = (
+        approval.get("response_state") in {"sending", "sent"}
+        or key in pending.get("responses_in_flight", set())
+        or st.session_state.approval_action_in_progress == key
+        or (isinstance(queued_action, dict) and queued_action.get("key") == key)
     )
     title = (
         approval.get("title")
@@ -2824,6 +2867,10 @@ def render_inline_approval(
     )
     st.markdown(f"**{title}**")
     render_approval_detail(approval)
+    if approval.get("response_state") == "sent":
+        st.caption("Response sent. Waiting for confirmation...")
+    elif approval.get("params", {}).get("isBlocking") is False:
+        st.caption("You can answer while Codex continues working.")
     response_options = approval.get("options")
     if approval.get("kind") == "tool_user_input_request" and isinstance(
         approval.get("questions"), list
@@ -3007,42 +3054,26 @@ def start_approval_response_worker(
     approval: dict,
     decision: str,
 ) -> None:
-    cleanup_pending_turn_worker(pending)
-    event_queue: queue.Queue = queue.Queue()
-    cancel_event = threading.Event()
-    worker_id = str(uuid.uuid4())
-    pending["worker_id"] = worker_id
-    pending["worker_queue"] = event_queue
-    pending["worker_cancel_event"] = cancel_event
-    pending["worker_started_at"] = time.time()
-    pending["status"] = TURN_RUN_RESPONDING_APPROVAL
-    pending.pop("approval", None)
-
-    def output_callback(output_parts: dict[str, Any]) -> None:
-        event_queue.put({"type": "output", "output_parts": output_parts})
+    event_queue = pending["worker_queue"]
+    key = approval_key(approval)
+    in_flight = pending.setdefault("responses_in_flight", set())
+    if key in in_flight:
+        return
+    in_flight.add(key)
+    runtime = pending["runtime"]
 
     def run_response() -> None:
         try:
-            if cancel_event.is_set():
-                result = {"ok": False, "output": "Approval response was cancelled."}
-            else:
-                result = client.respond_chat_turn(
-                    pending["runtime"],
-                    approval,
-                    decision,
-                    output_callback=output_callback,
-                )
+            result = client.respond_chat_turn(runtime, approval, decision)
         except Exception as exc:
-            result = {"ok": False, "output": f"[send/receive error] {exc}"}
-        event_queue.put({"type": "result", "result": result})
+            result = {"ok": False, "output": f"[response error] {exc}"}
+        event_queue.put({"type": "response_result", "key": key, "result": result})
 
-    worker = threading.Thread(
+    threading.Thread(
         target=run_response,
-        name=f"codex-approval-{chat.id}-{worker_id[:8]}",
+        name=f"codex-response-{chat.id}",
         daemon=True,
-    )
-    st.session_state.setdefault("turn_worker_registry", {})[worker_id] = worker
-    worker.start()
+    ).start()
 
 
 def ui_test_result(pending: dict, approval: dict, decision: str) -> dict[str, Any]:
@@ -3115,14 +3146,17 @@ def render_tool_user_input_request(
                     key=f"tool-user-input-{key}-{question_id}",
                     disabled=in_progress,
                 )
-                if selected == "Other":
-                    value = st.text_input(
-                        "Other",
+                # Forms don't rerun when the radio changes; keep the custom
+                # field mounted so it can be filled before the first submission.
+                other_value = ""
+                if is_other:
+                    other_value = st.text_input(
+                        "Other response (select Other above)",
                         key=f"tool-user-input-other-{key}-{question_id}",
+                        type="password" if question.get("isSecret") else "default",
                         disabled=in_progress,
                     )
-                else:
-                    value = selected
+                value = other_value if is_other and selected == "Other" else selected
             else:
                 value = st.text_input(
                     prompt,
@@ -4573,7 +4607,7 @@ def chat_composer(
     if not project:
         st.caption("Select a project and enter a message before sending.")
     elif recovery_in_progress:
-        if pending.get("approval"):
+        if pending.get("requests"):
             st.caption("Respond to the pending action before sending a message.")
         else:
             st.caption(
