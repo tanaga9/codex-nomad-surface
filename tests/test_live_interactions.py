@@ -64,6 +64,27 @@ def runtime(ws, events):
             "approvals": [], "event_callback": events.append}
 
 
+def test_async_agent_questions_do_not_stop_receiving_or_create_rpc_responses():
+    async def run():
+        client, ws, events = CodexClient("ws://test"), Socket(), []
+        rt = runtime(ws, events)
+        questions = [{"title": "Audience?", "options": ["Team", "Public"]}]
+        ws.push({"method": "item/started", "params": {
+            "threadId": "thread", "turnId": "turn", "item": {
+                "type": "agentMessage", "id": "async", "phase": "commentary",
+                "delivery": "async", "questions": questions, "text": "",
+            }}})
+        ws.push({"method": "item/agentMessage/delta", "params": {
+            "threadId": "thread", "turnId": "turn", "itemId": "progress", "delta": "Working"}})
+        ws.push(completed())
+        result = await asyncio.wait_for(client._collect_chat_turn_ws(rt), 1)
+        assert result["ok"] and "Working" in result["output"]
+        assert result["output_parts"]["segments"][0]["metadata"]["questions"] == questions
+        assert not rt["pending_requests"] and not ws.sent
+        assert ws.closed
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("blocking", [False, True])
 def test_questions_do_not_stop_progress_or_completion(blocking):
     async def run():

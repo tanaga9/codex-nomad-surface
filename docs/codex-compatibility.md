@@ -31,9 +31,9 @@ verification, and explicit non-adoption decisions. Product scope remains in
 | Reviewed upstream release | Codex CLI 0.159.2, released 2026-09-29 |
 | Local CLI / generated API schemas | 0.159.2 |
 | Connected App Server version | 0.159.2, confirmed by WebSocket initialization |
-| Reviewed repository revision | `f02c805` |
-| Scope | Upgrade verification: runtime versions, model catalog and default-model execution, verbosity schemas, and loaded-thread verbosity behavior. Earlier broad App Server review: `beb3a8d`. Not an exhaustive desktop or CLI feature audit. |
-| Verification | No application code changed or automated tests rerun. Prior code verification: 79 focused tests and 10 subtests passed. Live and isolated protocol checks are recorded below. |
+| Reviewed repository revision | Working-tree changes based on `11ac969` |
+| Scope | Asynchronous agent-message question metadata, answer controls, and ordinary chat-draft composition. Earlier upgrade review: `f02c805`; broad App Server review: `beb3a8d`. Not an exhaustive desktop or CLI feature audit. |
+| Verification | 121 focused tests and 10 subtests passed, including question-only history, stable question controls through completion, recovery deduplication, acknowledged insertion, concurrent receiving, and a loopback WebSocket peer. A local Streamlit 1.63.0 browser fixture preserved focused, uncommitted text across completion and received the composed answer. Async question payloads were fixtures; actual model emission and reply interpretation remain unverified. |
 
 Sources:
 
@@ -41,6 +41,24 @@ Sources:
 - [App Server documentation](https://learn.chatgpt.com/docs/app-server)
 - [Configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 - Local CLI-generated JSON schemas for 0.159.2.
+- [Streamlit widget identity](https://docs.streamlit.io/develop/concepts/architecture/widget-behavior)
+  and [1.63.0 expander API](https://docs.streamlit.io/1.63.0/develop/api-reference/layout/st.expander).
+
+The generated schema exposes `agentMessage.delivery: "async"` and questions
+with a `title` and nullable string-array `options`. These are preserved in live output
+and history when supplied by the server, including messages with empty text.
+Each question has suggested-choice and free-text controls; no choice is selected
+automatically. Answer drafts survive a turn finishing within the browser session.
+Question panels and inputs keep their identities and precede growing message
+output so completion does not remount an input still being edited.
+Confirmed insertion disables repeat preparation for that question set.
+
+The reviewed documentation and schema do not establish a dedicated async-answer
+RPC or question response ID. The controls append ordinary user text to the main
+chat draft using its existing acknowledged insertion bridge. The user reviews
+and sends it through the existing `turn/start` or active-turn `turn/steer` path.
+Receiving continues; these output items do not create a blocking JSON-RPC
+request. This does not claim protocol-level resolution of asynchronous questions.
 
 Verbosity is sent only through `thread/start.config.model_verbosity`.
 Before a new chat starts, the UI allows `low`, `medium`, or `high`;
@@ -86,7 +104,7 @@ ordering those bounded lists should use. Other product non-goals remain in
 | Item | Classification / next step |
 | --- | --- |
 | Continued-chat verbosity changes | Observed API limitation on loaded 0.159.2 threads: resume config does not update the active verbosity. Offer this control only at creation; reconsider when a supported live override is verified. |
-| Asynchronous `agentMessage.questions` | Compatibility check: present in the local schema, but not rendered as answer controls. Verify the display and reply contract before implementation. |
+| Asynchronous `agentMessage.questions` reply semantics | Display and ordinary-draft composition implemented and fixture-tested. Actual model emission and interpretation of the follow-up have not been live-tested; verify a dedicated reply contract if upstream documents one. |
 | Bearer-authenticated WebSocket connections | Conditional capability gap: the client does not supply an authorization header. Needed when connecting to an authenticated listener. |
 | Permission profiles and automatic approval review controls | Optional UI feature: API support exists, but selection controls are not implemented. This is not an explicit non-adoption decision. |
 | Summary history items | Unverified behavior: `thread/turns/list` omits `itemsView` and receives the default summary view. Check whether it retains the information needed by the existing history UI. |

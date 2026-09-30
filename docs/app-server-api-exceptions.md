@@ -81,6 +81,12 @@ transport fallback.
 | `EX-008` | File Path picker candidates              | Reads project file paths through bounded local filesystem scanning.                               | Keeps the browser candidate list small while helping users reference project files from the composer. | Prefer an App Server project-file listing API if one becomes available with equivalent performance and auth.   |
 | `EX-009` | Uploaded chat image temp files           | Saves browser-uploaded chat images to temporary local files and passes their paths as App Server `local_images`. | App Server image input expects host-local paths, while Streamlit receives browser uploads as bytes.    | Prefer direct App Server upload or attachment support if it becomes available.                                |
 
+Asynchronous agent-message answer controls also use `EX-005` and its acknowledged
+delivery component to append ordinary follow-up text to the unsent draft.
+Their input values and receipt state are session-local. No dedicated async-answer
+RPC or response ID is established by the reviewed 0.159.2 schema/documentation;
+submission uses the normal App Server turn path after user confirmation.
+
 `EX-012` — Project Prompt Templates: reads project-owned `ops/prompts/*.md`
 files and keeps unfinished input values in session-local composer state.
 Local picker entries retain neighbouring message identities to preserve their

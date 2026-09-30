@@ -79,6 +79,7 @@ from codex_nomad_surface.codex_client import (
     ConnectionStatus,
 )
 from codex_nomad_surface.mcp_elicitation import enum_options, form_content, form_schema
+from codex_nomad_surface.async_question_ui import render_async_questions
 from codex_nomad_surface.http_gate import (
     FileContentMiddleware,
     auth_required,
@@ -1486,9 +1487,9 @@ def normalize_codex_output_segments(value: object) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         text = str(item.get("text") or "").strip()
-        if not text:
-            continue
         metadata = item.get("metadata")
+        if not text and not (isinstance(metadata, dict) and metadata.get("questions")):
+            continue
         segments.append(
             {
                 "kind": str(item.get("kind") or "unknown").strip() or "unknown",
@@ -1780,8 +1781,14 @@ def render_progress_operation_segments(operation_segments: list[dict[str, Any]])
     )
 
 
-def render_codex_stream_output(parts: dict[str, Any]) -> None:
+def render_codex_stream_output(
+    parts: dict[str, Any], chat: ChatSession | None = None, *, question_scope: str = ""
+) -> None:
     normalized = normalize_codex_output_parts(parts)
+    # Keep question controls before growing output so their container stays in
+    # place when the turn finishes and the same message is rendered as history.
+    if chat:
+        render_async_questions(normalized, question_scope or chat.thread_id or chat.id)
     final_answer_started = bool(normalized["output"])
     render_codex_output_auxiliary(
         normalized, expanded_until_final_answer=not final_answer_started
@@ -1800,6 +1807,10 @@ def render_chat(
 ) -> None:
     if not chat:
         return
+    pending = st.session_state.get("pending_turn")
+    if isinstance(pending, dict) and pending.get("chat_id") == chat.id and pending.get("recovery_only"):
+        # Use one output snapshot for both history and the recovery controls.
+        drain_pending_turn_events(pending)
     skill_defs = load_available_skill_defs(
         client.base_url, project.path if project else ""
     )
@@ -1922,6 +1933,21 @@ def render_chat(
                     message.metadata.get("codex_output"), content
                 )
                 content = output_parts["output"]
+                pending = st.session_state.get("pending_turn")
+                live_item_ids = set()
+                if isinstance(pending, dict) and pending.get("chat_id") == chat.id:
+                    live_item_ids = {
+                        segment.get("item_id")
+                        for segment in (pending.get("output_parts") or {}).get("segments", [])
+                        if segment.get("metadata", {}).get("questions")
+                    }
+                render_async_questions(
+                    {**output_parts, "segments": [
+                        segment for segment in output_parts["segments"]
+                        if segment.get("item_id") not in live_item_ids
+                    ]},
+                    chat.thread_id or chat.id,
+                )
             if message.role == "assistant" and codex_output_has_auxiliary(output_parts):
                 progress_only = codex_output_is_progress_only(output_parts)
                 render_codex_output_auxiliary(
@@ -1979,13 +2005,14 @@ def render_pending_action_recovery_button(
     if isinstance(pending, dict) and pending.get("chat_id") == chat.id:
         if not pending.get("recovery_only"):
             return
-        drain_pending_turn_events(pending)
         result = pending.pop("result", None)
         if result:
             handle_pending_action_recovery_result(client, chat, pending, result)
             return
         if pending.get("output_parts"):
-            render_codex_stream_output(pending["output_parts"])
+            render_codex_stream_output(
+                pending["output_parts"], chat, question_scope=pending.get("thread_id") or "",
+            )
         render_pending_requests(client, chat, pending)
         st.caption("Checking this turn for a pending action...")
         if st.button(
@@ -2227,7 +2254,9 @@ def render_pending_turn(
             handle_turn_result(chat, pending, result)
             return
         if pending.get("output_parts"):
-            render_codex_stream_output(pending["output_parts"])
+            render_codex_stream_output(
+                pending["output_parts"], chat, question_scope=pending.get("thread_id") or "",
+            )
         render_pending_requests(client, chat, pending)
         render_pending_turn_wait_indicator(client, pending)
 
@@ -2844,14 +2873,18 @@ def render_inline_approval(
         pending["output_parts"] = normalize_codex_output_parts(output_parts)
         pending["output"] = pending["output_parts"]["output"]
         with output_placeholder.container():
-            render_codex_stream_output(pending["output_parts"])
+            render_codex_stream_output(
+                pending["output_parts"], chat, question_scope=pending.get("thread_id") or "",
+            )
 
     existing_parts = normalize_codex_output_parts(
         pending.get("output_parts"), str(pending.get("output") or "")
     )
     if show_output and any(existing_parts.values()):
         with output_placeholder.container():
-            render_codex_stream_output(existing_parts)
+            render_codex_stream_output(
+                existing_parts, chat, question_scope=pending.get("thread_id") or "",
+            )
 
     approval = approval if approval is not None else pending["approval"]
     key = approval_key(approval)

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from codex_nomad_surface.mcp_elicitation import form_schema, validate_content
+from codex_nomad_surface.async_questions import agent_message_metadata
 
 
 def _client_title(name: str) -> str:
@@ -175,7 +176,8 @@ class CodexTurnOutput:
         final_answer = self.text_for_kind("final_answer")
         return {
             "segments": [
-                segment.to_dict() for segment in self.segments if segment.text.strip()
+                segment.to_dict() for segment in self.segments
+                if segment.text.strip() or segment.metadata.get("questions")
             ],
             "output": final_answer,
             "commentary": self.text_for_kind("commentary"),
@@ -246,7 +248,7 @@ class CodexClient:
         approvals: list[dict[str, Any]],
         output_callback: OutputCallback | None = None,
         message_handler: Any | None = None,
-        stream_items: dict[str, dict[str, str]] | None = None,
+        stream_items: dict[str, dict[str, Any]] | None = None,
     ) -> Any:
         result = await self._rpc_call(
             websocket,
@@ -1809,7 +1811,9 @@ class CodexClient:
 
         return None
 
-    def _update_output_parts_from_item(self, item: Any, parts: OutputState) -> bool:
+    def _update_output_parts_from_item(
+        self, item: Any, parts: OutputState, thread_id: str = ""
+    ) -> bool:
         if not isinstance(item, dict):
             return False
 
@@ -1817,10 +1821,11 @@ class CodexClient:
         item_id = str(item.get("id") or "")
         if item_type == "agentMessage":
             text = str(item.get("text") or "")
-            if text:
+            metadata = agent_message_metadata(item, thread_id)
+            if text or metadata.get("questions"):
                 phase = str(item.get("phase") or "")
                 kind = "commentary" if phase == "commentary" else "final_answer"
-                parts.set_segment(kind, text, item_id, phase)
+                parts.set_segment(kind, text, item_id, phase, metadata)
                 return True
         if item_type == "plan":
             text = str(item.get("text") or "")
@@ -2379,15 +2384,16 @@ class CodexClient:
         message: dict[str, Any],
         parts: OutputState,
         approvals: list[dict[str, Any]],
-        stream_items: dict[str, dict[str, str]] | None = None,
+        stream_items: dict[str, dict[str, Any]] | None = None,
     ) -> bool:
         method = message.get("method")
         params = message.get("params") or {}
+        thread_id = str(params.get("threadId") or "") if isinstance(params, dict) else ""
         if method == "item/started":
             item = params.get("item") if isinstance(params, dict) else None
-            if self._update_stream_item(item, parts, stream_items):
+            if self._update_stream_item(item, parts, stream_items, thread_id):
                 return True
-            return self._update_output_parts_from_item(item, parts)
+            return self._update_output_parts_from_item(item, parts, thread_id)
         if method == "item/agentMessage/delta":
             return self._append_agent_message_delta(params, parts, stream_items)
         if method == "item/plan/delta":
@@ -2414,9 +2420,9 @@ class CodexClient:
             return True
         if method == "item/completed":
             item = params.get("item") if isinstance(params, dict) else None
-            if self._update_stream_item(item, parts, stream_items):
+            if self._update_stream_item(item, parts, stream_items, thread_id):
                 return True
-            return self._update_output_parts_from_item(item, parts)
+            return self._update_output_parts_from_item(item, parts, thread_id)
         if method == "error":
             parts.append_block("error", f"[error] {params.get('message') or params}")
             return True
@@ -2483,7 +2489,8 @@ class CodexClient:
         self,
         item: Any,
         parts: OutputState,
-        stream_items: dict[str, dict[str, str]] | None,
+        stream_items: dict[str, dict[str, Any]] | None,
+        thread_id: str = "",
     ) -> bool:
         if not isinstance(item, dict) or stream_items is None:
             return False
@@ -2503,15 +2510,18 @@ class CodexClient:
         phase = str(item.get("phase") or "")
         if phase:
             stream_item["phase"] = phase
+        metadata = stream_item.setdefault("metadata", {})
+        metadata.update(agent_message_metadata(item, thread_id))
         if "text" in item:
             stream_item["text"] = str(item.get("text") or "")
+        if "text" in item or metadata.get("questions"):
             kind = (
                 "commentary"
                 if stream_item.get("phase") == "commentary"
                 else "final_answer"
             )
             parts.set_segment(
-                kind, stream_item["text"], item_id, stream_item.get("phase", "")
+                kind, stream_item["text"], item_id, stream_item.get("phase", ""), metadata
             )
         return True
 
@@ -2519,7 +2529,7 @@ class CodexClient:
         self,
         params: Any,
         parts: OutputState,
-        stream_items: dict[str, dict[str, str]] | None,
+        stream_items: dict[str, dict[str, Any]] | None,
     ) -> bool:
         if not isinstance(params, dict):
             return False
@@ -2543,7 +2553,9 @@ class CodexClient:
         kind = (
             "commentary" if stream_item.get("phase") == "commentary" else "final_answer"
         )
-        parts.append_delta(kind, delta, item_id, stream_item.get("phase", ""))
+        parts.append_delta(
+            kind, delta, item_id, stream_item.get("phase", ""), stream_item.get("metadata")
+        )
         return True
 
     async def _rpc_call(
@@ -2555,7 +2567,7 @@ class CodexClient:
         approvals: list[dict[str, Any]],
         output_callback: OutputCallback | None = None,
         message_handler: Any | None = None,
-        stream_items: dict[str, dict[str, str]] | None = None,
+        stream_items: dict[str, dict[str, Any]] | None = None,
     ) -> Any:
         request_id = str(uuid.uuid4())
         await websocket.send(

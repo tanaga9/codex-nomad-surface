@@ -151,8 +151,27 @@ closing the connection discards queued calls and prevents late replies. An
 already-running synchronous editor operation is allowed to finish rather than
 being forcibly terminated. `serverRequest/resolved`, turn completion, and connection closure clear
 applicable controls. `isBlocking` describes whether Codex waits for an answer,
-not whether the client should stop receiving. Question answers use the App Server
+not whether the client should stop receiving. `item/tool/requestUserInput` answers
+use the App Server
 `{ "answers": { "question-id": { "answers": ["value"] } } }` response shape.
+
+Asynchronous `agentMessage.questions` are output metadata, not JSON-RPC requests.
+Their controls prepare ordinary follow-up text in the main chat draft without
+pausing reception or automatically sending it. Per-item session state preserves
+answers and pending insertion across live-to-history rendering. The shared
+append bridge acknowledges insertion and avoids repeating the same operation.
+`tests/test_async_questions.py` exercises these controls with schema-shaped
+fixtures; actual model emission and async reply interpretation are not verified.
+
+For the browser check, run:
+
+```bash
+.venv/bin/python -m streamlit run tests/browser/async_question_app.py --server.address 127.0.0.1
+```
+
+Start the completion timer, type an answer, and keep focus in the question input
+until completion. Confirm the text remains, then add the answers to the draft
+and send to verify local receipt. This fixture never connects to Codex.
 
 After 180 seconds without messages, the UI reports the quiet period and keeps
 listening. Transport failures and explicit cancellation are handled separately.

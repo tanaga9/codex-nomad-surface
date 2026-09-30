@@ -42,6 +42,7 @@ def render_template_delivery(metadata: dict, *, disabled: bool = False) -> None:
         on_ack_change=lambda: None,
     )
     if acknowledge_delivery(state, result.ack):
+        state["delivered_token"] = pending["token"]
         st.rerun()
     with st.expander("Pending prompt"):
         st.code(pending["text"], language="markdown", wrap_lines=True)
