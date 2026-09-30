@@ -156,6 +156,7 @@ CHAT_INPUT_IMAGE_MIME_TYPES = {
 CHAT_INPUT_IMAGE_MAX_MB = 20
 CHAT_INPUT_IMAGE_TEMP_DIR = Path(tempfile.gettempdir()) / "codex-nomad-surface-uploads"
 RECENT_THREAD_LIMIT = 6
+CODEX_VERBOSITY_OPTIONS = ("low", "medium", "high")
 UI_TEST_DELAY_SECONDS = 2.0
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 NEW_PROJECT_KEY = "__new_project__"
@@ -3993,7 +3994,6 @@ def build_turn_overrides(controls: dict[str, str]) -> dict[str, Any]:
         "model": "model",
         "reasoning_effort": "effort",
         "reasoning_summary": "summary",
-        "verbosity": "verbosity",
     }
     for source, target in mapping.items():
         value = controls.get(source, "").strip()
@@ -4022,7 +4022,11 @@ def build_thread_overrides(controls: dict[str, str]) -> dict[str, Any]:
 
 
 def build_start_thread_overrides(controls: dict[str, str]) -> dict[str, Any]:
-    return build_thread_overrides(controls)
+    overrides = build_thread_overrides(controls)
+    verbosity = controls.get("verbosity", "").strip()
+    if verbosity in CODEX_VERBOSITY_OPTIONS:
+        overrides["config"] = {"model_verbosity": verbosity}
+    return overrides
 
 
 def build_continuation_thread_overrides(controls: dict[str, str]) -> dict[str, Any]:
@@ -5694,13 +5698,20 @@ def render_codex_run_overrides(
             or "Codex default",
             disabled=disabled,
         )
-        verbosity = st.text_input(
-            "Verbosity",
-            value=controls.get("verbosity", ""),
-            key=f"{key_prefix}_verbosity",
-            placeholder=config_string(config, "model_verbosity") or "Codex default",
-            disabled=disabled,
-        )
+        verbosity = ""
+        if not chat.thread_id:
+            verbosity = st.selectbox(
+                "Verbosity",
+                CODEX_VERBOSITY_OPTIONS,
+                index=optional_selectbox_index(
+                    list(CODEX_VERBOSITY_OPTIONS), controls.get("verbosity", "")
+                ),
+                key=f"{key_prefix}_verbosity",
+                placeholder=config_string(config, "model_verbosity") or "Codex default",
+                help="Set when this chat starts. To change it later, start a new chat.",
+                disabled=disabled,
+            )
+            verbosity = str(verbosity or "")
         approval_policy = st.text_input(
             "Approval policy",
             value=controls.get("approval_policy", ""),
