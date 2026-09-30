@@ -19,6 +19,15 @@ Use `git diff --cached` for staged-review or commit-message requests. Use
 `git diff` for current unstaged edits. If both exist, clearly distinguish them.
 Do not stage, unstage, revert, or commit unless explicitly asked.
 
+## Codex Compatibility Reviews
+
+Read `docs/codex-compatibility.md` before checking for Codex specification drift.
+Use its reviewed version and scope as the starting point, preserve intentional
+non-adoption decisions, and revisit open checks. Update the checkpoint after a
+review or live-use verification, keeping documentation review, automated tests,
+and actual App Server use distinct. Record newly confirmed non-adoption decisions
+there rather than repeatedly reporting them as missing features.
+
 ## Bundled Skills
 
 - Keep Skills that inspect or modify this repository in `.agents/skills/`.

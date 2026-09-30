@@ -4,6 +4,9 @@ This ledger tracks implementations that provide functionality by reading local
 state, calling external APIs directly, or using other indirect mechanisms
 instead of a current Codex App Server API.
 
+Review checkpoints and intentional non-adoption decisions are tracked in
+[codex-compatibility.md](codex-compatibility.md).
+
 ## Policy
 
 - Prefer current Codex App Server APIs directly.

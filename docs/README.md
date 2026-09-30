@@ -15,6 +15,10 @@ This directory is organized by document role rather than by feature chronology.
     external APIs, or indirect mechanisms instead of current Codex App Server
     APIs.
 
+- [codex-compatibility.md](codex-compatibility.md)
+  - Latest Codex specification and live-use checkpoints, intentional
+    non-adoption decisions, and open compatibility checks. Read before audits.
+
 - [development.md](development.md)
   - Local development notes, including repo-local `.env` usage, Streamlit
     launch tips, test commands, and UI Test mode.
