@@ -88,7 +88,7 @@ class CodexClientApprovalTests(unittest.TestCase):
         )
         self.assertEqual(
             self.client._approval_response_result(approval, "reject"),
-            {"action": "decline"},
+            {"action": "decline", "content": None},
         )
 
     def test_mcp_elicitation_updates_output_parts(self) -> None:
@@ -129,7 +129,7 @@ class CodexClientApprovalTests(unittest.TestCase):
         self.assertEqual(approval["id"], "approval-1")
         self.assertEqual(approval["kind"], "approval_request")
 
-    def test_permissions_approval_can_be_scoped_to_thread(self) -> None:
+    def test_permissions_approval_can_be_scoped_to_session(self) -> None:
         approval = self.client._approval_from_message(
             {
                 "method": "item/permissions/requestApproval",
@@ -151,7 +151,7 @@ class CodexClientApprovalTests(unittest.TestCase):
             self.client._approval_response_result(approval, "approveForThread"),
             {
                 "permissions": {"network": {"domains": {"example.com": "allow"}}},
-                "scope": "thread",
+                "scope": "session",
             },
         )
 

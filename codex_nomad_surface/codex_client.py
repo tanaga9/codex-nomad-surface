@@ -8,6 +8,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from codex_nomad_surface.mcp_elicitation import form_schema, validate_content
+
 
 def _client_title(name: str) -> str:
     return name.replace("-", " ").replace("_", " ").title()
@@ -763,7 +765,21 @@ class CodexClient:
             try:
                 response = json.loads(decision.split(":", 1)[1])
             except (TypeError, ValueError, json.JSONDecodeError):
+                if self._is_mcp_elicitation_method(method):
+                    raise ValueError("Invalid MCP elicitation response.")
                 return {}
+            if self._is_mcp_elicitation_method(method):
+                if not isinstance(response, dict) or response.get("action") not in {
+                    "accept", "decline", "cancel"
+                }:
+                    raise ValueError("Invalid MCP elicitation response.")
+                action = response["action"]
+                content = response.get("content") if action == "accept" else None
+                if action == "accept" and params.get("mode") in {"form", "openai/form"}:
+                    validate_content(form_schema(params.get("requestedSchema")), content)
+                if params.get("mode") == "url":
+                    content = None
+                return {"action": action, "content": content}
             return response if isinstance(response, dict) else {}
         if method in {
             "item/commandExecution/requestApproval",
@@ -785,15 +801,22 @@ class CodexClient:
                 if decision.startswith("permissionScope:"):
                     scope = decision.split(":", 1)[1]
                 else:
-                    scope = "thread" if decision == "approveForThread" else "turn"
+                    scope = "session" if decision == "approveForThread" else "turn"
                 return {"permissions": permissions or {}, "scope": scope}
             return {"permissions": {}, "scope": "turn"}
         if method in {"execCommandApproval", "applyPatchApproval"}:
             return {"decision": "approved" if approved else "denied"}
         if self._is_mcp_elicitation_method(method):
             if approved:
+                if params.get("mode") == "url":
+                    return {"action": "accept", "content": None}
+                if params.get("mode") in {"form", "openai/form"}:
+                    validate_content(form_schema(params.get("requestedSchema")), {})
                 return {"action": "accept", "content": {}}
-            return {"action": "decline"}
+            return {
+                "action": "cancel" if decision == "cancel" else "decline",
+                "content": None,
+            }
         if self._is_tool_request_user_input_method(method):
             return self._tool_request_user_input_response(approval, decision)
         if approval.get("kind") == "generic_user_response_request":

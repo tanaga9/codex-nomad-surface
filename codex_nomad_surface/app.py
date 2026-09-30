@@ -78,6 +78,7 @@ from codex_nomad_surface.codex_client import (
     CodexThreadMessages,
     ConnectionStatus,
 )
+from codex_nomad_surface.mcp_elicitation import enum_options, form_content, form_schema
 from codex_nomad_surface.http_gate import (
     FileContentMiddleware,
     auth_required,
@@ -2871,6 +2872,12 @@ def render_inline_approval(
         st.caption("Response sent. Waiting for confirmation...")
     elif approval.get("params", {}).get("isBlocking") is False:
         st.caption("You can answer while Codex continues working.")
+    if client._is_mcp_elicitation_method(str(approval.get("method") or "")):
+        if render_mcp_elicitation_request(
+            client, chat, pending, approval, key, in_progress,
+            update_stream, pending_state_key,
+        ):
+            return
     response_options = approval.get("options")
     if approval.get("kind") == "tool_user_input_request" and isinstance(
         approval.get("questions"), list
@@ -2915,7 +2922,7 @@ def render_inline_approval(
         allow_for_thread = False
         if approval.get("method") == "item/permissions/requestApproval":
             allow_for_thread = st.checkbox(
-                "Allow in this thread",
+                "Allow for this session",
                 key=f"inline-approval-thread-scope-{key}",
                 disabled=in_progress,
             )
@@ -3107,6 +3114,109 @@ def ui_test_response_label(decision: str) -> str:
     if decision in {"reject", "decline"}:
         return "rejected"
     return decision
+
+
+def render_mcp_elicitation_request(
+    client: CodexClient,
+    chat: ChatSession,
+    pending: dict,
+    approval: dict,
+    key: str,
+    in_progress: bool,
+    update_stream: Any,
+    pending_state_key: str = "pending_turn",
+) -> bool:
+    params = approval.get("params", {})
+    mode = params.get("mode")
+    if mode not in {"form", "openai/form", "url"}:
+        return False
+    schema = None
+    can_accept = True
+    if mode == "url":
+        url = str(params.get("url") or "")
+        try:
+            parsed = urlparse(url)
+            can_accept = parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+        except ValueError:
+            can_accept = False
+        if can_accept:
+            st.link_button("Open requested link", url)
+        else:
+            st.error("The requested link is invalid.")
+    else:
+        try:
+            schema = form_schema(params.get("requestedSchema"))
+        except ValueError as exc:
+            st.error(str(exc))
+            can_accept = False
+
+    with st.form(f"mcp-elicitation-{key}"):
+        values: dict[str, Any] = {}
+        if schema is not None:
+            required = schema.get("required", [])
+            for name, field in schema["properties"].items():
+                label = str(field.get("title") or name)
+                if name in required:
+                    label += " (required)"
+                widget_key = f"mcp-elicitation-{key}-{name}"
+                help_text = field.get("description")
+                default = field.get("default")
+                kind = field["type"]
+                choices = enum_options(
+                    field.get("items", {}) if kind == "array" else field
+                )
+                if choices:
+                    options = [value for value, _ in choices]
+                    titles = dict(choices)
+                    if kind == "array":
+                        defaults = default if isinstance(default, list) else []
+                        values[name] = st.multiselect(
+                            label, options,
+                            default=[value for value in defaults if value in options],
+                            format_func=titles.get, key=widget_key,
+                            help=help_text, disabled=in_progress,
+                        )
+                    else:
+                        values[name] = st.selectbox(
+                            label, options,
+                            index=options.index(default) if default in options else None,
+                            format_func=titles.get, key=widget_key,
+                            help=help_text, disabled=in_progress,
+                        )
+                elif kind == "boolean":
+                    values[name] = st.selectbox(
+                        label, [True, False],
+                        index=[True, False].index(default) if isinstance(default, bool) else None,
+                        format_func=lambda value: "Yes" if value else "No",
+                        key=widget_key, help=help_text, disabled=in_progress,
+                    )
+                else:
+                    values[name] = st.text_input(
+                        label, value=str(default) if default is not None else "",
+                        key=widget_key, help=help_text, disabled=in_progress,
+                    )
+        accept = st.form_submit_button(
+            "Send response" if mode != "url" else "Confirm completed",
+            disabled=in_progress or not can_accept,
+        )
+        decline = st.form_submit_button("Decline", disabled=in_progress)
+        cancel = st.form_submit_button("Cancel", disabled=in_progress)
+    if accept:
+        try:
+            content = form_content(schema, values) if schema is not None else None
+        except ValueError as exc:
+            st.error(str(exc))
+            return True
+        decision = f"responseJson:{compact_json({'action': 'accept', 'content': content})}"
+    elif decline or cancel:
+        decision = "cancel" if cancel else "reject"
+    else:
+        return True
+    queue_approval_action(key, decision)
+    process_queued_approval_action(
+        client, chat, pending, approval, key, update_stream, pending_state_key
+    )
+    return True
 
 
 def render_tool_user_input_request(
