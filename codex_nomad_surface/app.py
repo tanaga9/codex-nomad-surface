@@ -80,6 +80,8 @@ from codex_nomad_surface.codex_client import (
 )
 from codex_nomad_surface.mcp_elicitation import enum_options, form_content, form_schema
 from codex_nomad_surface.async_question_ui import render_async_questions
+from codex_nomad_surface.async_questions import repeats_question_controls
+from codex_nomad_surface.output_panels import turn_expander
 from codex_nomad_surface.http_gate import (
     FileContentMiddleware,
     auth_required,
@@ -1725,7 +1727,8 @@ def prompt_with_local_image_references(
 
 
 def render_codex_output_auxiliary(
-    parts: dict[str, Any], expanded_until_final_answer: bool = False
+    parts: dict[str, Any], expanded_until_final_answer: bool = False,
+    *, panel_scope: str = "", active: bool | None = None,
 ) -> None:
     segments = [
         segment for segment in parts.get("segments", []) if isinstance(segment, dict)
@@ -1737,7 +1740,11 @@ def render_codex_output_auxiliary(
         and str(segment.get("text") or "").strip()
     ]
     if progress_segments:
-        with st.expander("Progress notes", expanded=expanded_until_final_answer):
+        item_id = str(progress_segments[0].get("item_id") or "")
+        with turn_expander(
+            "Progress notes", f"progress-notes-{panel_scope}-{item_id}", active,
+            initially_open=expanded_until_final_answer,
+        ):
             commentary_segments = [
                 segment
                 for segment in progress_segments
@@ -1785,16 +1792,30 @@ def render_codex_stream_output(
     parts: dict[str, Any], chat: ChatSession | None = None, *, question_scope: str = ""
 ) -> None:
     normalized = normalize_codex_output_parts(parts)
-    # Keep question controls before growing output so their container stays in
-    # place when the turn finishes and the same message is rendered as history.
-    if chat:
-        render_async_questions(normalized, question_scope or chat.thread_id or chat.id)
-    final_answer_started = bool(normalized["output"])
-    render_codex_output_auxiliary(
-        normalized, expanded_until_final_answer=not final_answer_started
-    )
-    if final_answer_started:
-        render_assistant_markdown(normalized["output"])
+    # Reserve one slot for progress and other auxiliary output, even when empty.
+    # New output then cannot move or remount a question input still being edited.
+    auxiliary = st.container()
+    rendered = render_async_questions(
+        normalized, question_scope or chat.thread_id or chat.id, active=True,
+    ) if chat else set()
+    display_parts = question_display_parts(normalized, rendered)
+    with auxiliary:
+        render_codex_output_auxiliary(
+            display_parts, panel_scope=chat.id if chat else question_scope, active=True,
+        )
+    if display_parts["output"]:
+        render_assistant_markdown(display_parts["output"])
+
+
+def question_display_parts(parts: dict[str, Any], rendered: set[str]) -> dict[str, Any]:
+    # Do not alter the stored message. Omit text only after its form rendered
+    # successfully and only when that entire text is repeated by the controls.
+    return normalize_codex_output_parts({"segments": [
+        {**segment, "text": ""}
+        if segment.get("item_id") in rendered and repeats_question_controls(segment)
+        else segment
+        for segment in parts["segments"]
+    ]})
 
 
 def render_chat(
@@ -1941,32 +1962,46 @@ def render_chat(
                         for segment in (pending.get("output_parts") or {}).get("segments", [])
                         if segment.get("metadata", {}).get("questions")
                     }
-                render_async_questions(
-                    {**output_parts, "segments": [
+                question_parts = {
+                    **output_parts,
+                    "segments": [
                         segment for segment in output_parts["segments"]
                         if segment.get("item_id") not in live_item_ids
-                    ]},
-                    chat.thread_id or chat.id,
+                    ],
+                }
+                active = True if live_item_ids.intersection(
+                    segment.get("item_id") for segment in output_parts["segments"]
+                ) else (False if content or message.metadata.get("turn_status") else None)
+                # Match the live output's reserved auxiliary slot so Questions
+                # stays below progress without moving when the turn completes.
+                auxiliary = st.container()
+                rendered = render_async_questions(
+                    question_parts, chat.thread_id or chat.id, active=active,
                 )
-            if message.role == "assistant" and codex_output_has_auxiliary(output_parts):
-                progress_only = codex_output_is_progress_only(output_parts)
-                render_codex_output_auxiliary(
-                    output_parts,
-                    expanded_until_final_answer=progress_only,
-                )
-                if progress_only:
-                    st.info(
-                        "Live progress updates stopped when the browser reloaded. "
-                        "Check this turn for a pending action, or refresh it after "
-                        "the turn finishes."
-                    )
-                    if index == latest_progress_only_index:
-                        render_pending_action_recovery_button(
-                            client,
-                            project,
-                            chat,
-                            message_key=f"{chat.id}-{index}",
+                display_parts = question_display_parts(output_parts, rendered)
+                content = display_parts["output"]
+                with auxiliary:
+                    if codex_output_has_auxiliary(output_parts):
+                        progress_only = active is not False and codex_output_is_progress_only(output_parts)
+                        render_codex_output_auxiliary(
+                            display_parts,
+                            expanded_until_final_answer=progress_only,
+                            panel_scope=f"{chat.id}-history-{message.metadata.get('server_turn_id') or index}",
+                            active=active,
                         )
+                        if progress_only:
+                            st.info(
+                                "Live progress updates stopped when the browser reloaded. "
+                                "Check this turn for a pending action, or refresh it after "
+                                "the turn finishes."
+                            )
+                            if index == latest_progress_only_index:
+                                render_pending_action_recovery_button(
+                                    client,
+                                    project,
+                                    chat,
+                                    message_key=f"{chat.id}-{index}",
+                                )
             if content:
                 if message.role == "user":
                     render_user_turn_message(
@@ -3416,7 +3451,7 @@ def handle_turn_result(
     )
     if any(output_parts.values()):
         response_text = output_parts["output"]
-        metadata = {"codex_output": output_parts}
+        metadata = {"codex_output": output_parts, "turn_status": pending["status"]}
     else:
         response_text = "The response was empty."
         metadata = {}

@@ -169,9 +169,16 @@ For the browser check, run:
 .venv/bin/python -m streamlit run tests/browser/async_question_app.py --server.address 127.0.0.1
 ```
 
+Show questions and confirm they appear below the existing progress notes.
+The fixture includes phase-less async question text: its form must remain
+visible while Progress notes stays open. Simulate a steer acknowledgement and
+confirm panel state is preserved, including a manually closed progress panel.
 Start the completion timer, type an answer, and keep focus in the question input
-until completion. Confirm the text remains, then add the answers to the draft
-and send to verify local receipt. This fixture never connects to Codex.
+until completion adds auxiliary output. Both panels should close. Reopen them,
+confirm the answer remains, then add it to the draft. Questions should close
+after confirmed insertion and allow reopening. Confirm blank lines separate
+questions and answers, then send to verify local receipt. This fixture never
+connects to Codex.
 
 After 180 seconds without messages, the UI reports the quiet period and keeps
 listening. Transport failures and explicit cancellation are handled separately.

@@ -12,7 +12,8 @@ from codex_nomad_surface.ui_components import inject_chat_input_bridge
 app.init_state()
 st.title("Async question draft integration check")
 st.caption(
-    "Start the timer, type an answer, and keep focus in its input until the turn "
+    "Show questions after progress appears. Start the timer, type an answer, "
+    "and keep focus in its input until the turn "
     "finishes. The text should remain. Then add the answers to the draft and send "
     "to verify the received text. Reload to repeat. No Codex connection is used."
 )
@@ -25,16 +26,31 @@ if "question_chat" not in st.session_state:
         "chat_id": chat.id, "thread_id": chat.thread_id, "run_id": "run",
         "text": chat.messages[0].content, "status": "running",
         "output_parts": {"segments": [{
-            "kind": "commentary", "text": "", "item_id": "questions",
-            "metadata": {"questions": [
-                {"title": "Audience?", "options": ["Team", "Public"]},
-                {"title": "Deadline?", "options": None},
-            ]},
+            "kind": "commentary", "text": "Working on your request.",
+            "item_id": "progress",
         }]},
     }
 chat = st.session_state.question_chat
+pending = st.session_state.pending_turn
+questions_shown = bool(pending and any(
+    segment.get("item_id") == "questions"
+    for segment in pending["output_parts"]["segments"]
+))
+if st.button("Show questions", disabled=not pending or questions_shown):
+    pending["output_parts"]["segments"].append({
+        "kind": "final_answer", "item_id": "questions",
+        "text": "Audience?\n\n- Team\n- Public\n\nDeadline?",
+        "metadata": {"delivery": "async", "questions": [
+            {"title": "Audience?", "options": ["Team", "Public"]},
+            {"title": "Deadline?", "options": None},
+        ]},
+    })
 if st.button("Finish turn in 8 seconds", disabled=not st.session_state.pending_turn):
     st.session_state.deadline = time.monotonic() + 8
+if st.button("Simulate steer acknowledgement", disabled=not pending):
+    chat.add_message("user", "A simulated answer was sent.", {
+        "kind": "interrupt_draft", "status": "steered", "run_id": "run", "draft_id": "draft",
+    })
 inject_chat_input_bridge()
 
 
@@ -45,6 +61,9 @@ def panel():
         parts = pending["output_parts"]
         pending["result"] = {"ok": True, "turn_id": "turn", "output_parts": {
             "segments": [*parts["segments"], {
+                "kind": "reasoning_summary", "item_id": "reasoning",
+                "text": "Additional output appeared at completion.",
+            }, {
                 "kind": "final_answer", "item_id": "answer", "text": "Turn completed.",
             }],
         }}

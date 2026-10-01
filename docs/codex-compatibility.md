@@ -27,13 +27,13 @@ verification, and explicit non-adoption decisions. Product scope remains in
 
 | Field | Checkpoint |
 | --- | --- |
-| Review date | 2026-09-30 |
+| Review date | 2026-10-01 |
 | Reviewed upstream release | Codex CLI 0.159.2, released 2026-09-29 |
 | Local CLI / generated API schemas | 0.159.2 |
 | Connected App Server version | 0.159.2, confirmed by WebSocket initialization |
-| Reviewed repository revision | Working-tree changes based on `11ac969` |
-| Scope | Asynchronous agent-message question metadata, answer controls, and ordinary chat-draft composition. Earlier upgrade review: `f02c805`; broad App Server review: `beb3a8d`. Not an exhaustive desktop or CLI feature audit. |
-| Verification | 121 focused tests and 10 subtests passed, including question-only history, stable question controls through completion, recovery deduplication, acknowledged insertion, concurrent receiving, and a loopback WebSocket peer. A local Streamlit 1.63.0 browser fixture preserved focused, uncommitted text across completion and received the composed answer. Async question payloads were fixtures; actual model emission and reply interpretation remain unverified. |
+| Reviewed repository revision | Working-tree changes based on `799b3e2` |
+| Scope | Asynchronous question presentation, turn-aware panel state, and conservative duplicate-text suppression. Metadata and composition review: `799b3e2`; upgrade review: `f02c805`; broad App Server review: `beb3a8d`. Not an exhaustive desktop or CLI feature audit. |
+| Verification | 136 focused tests and 10 subtests passed, including question-only history, stable question controls, recovery deduplication, acknowledged insertion, concurrent receiving, and a loopback WebSocket peer. Local Streamlit 1.63.0 browser checks cover phase-less question text, manual panel state across simulated steer acknowledgements, completion, retained answers, and question-panel closure after confirmed draft insertion. Async payloads and steer acknowledgements were fixtures; actual model emission and reply interpretation remain unverified. |
 
 Sources:
 
@@ -49,9 +49,16 @@ with a `title` and nullable string-array `options`. These are preserved in live 
 and history when supplied by the server, including messages with empty text.
 Each question has suggested-choice and free-text controls; no choice is selected
 automatically. Answer drafts survive a turn finishing within the browser session.
-Question panels and inputs keep their identities and precede growing message
-output so completion does not remount an input still being edited.
-Confirmed insertion disables repeat preparation for that question set.
+Question panels follow progress notes and precede the final answer. A reserved
+container holds auxiliary output in both live and history views, keeping question
+inputs in place when output grows or the turn completes.
+Progress remains open during a live turn unless manually closed. Progress and
+question panels close once at completion and can be reopened. Body text is
+omitted only after the matching form renders and the entire text repeats its
+question titles and options; extra prose and unmatched text remain visible.
+Confirmed insertion closes its question panel once and disables repeat
+preparation for that question set. Draft text separates questions and answers
+with blank lines.
 
 The reviewed documentation and schema do not establish a dedicated async-answer
 RPC or question response ID. The controls append ordinary user text to the main

@@ -43,6 +43,30 @@ def answers_prompt(questions: list[dict[str, Any]], answers: list[str]) -> str:
     ):
         raise ValueError("Answer each question before adding to the draft.")
     return "Answers to your questions:\n\n" + "\n\n".join(
-        f"{index}. {question['title']}\n{answer.strip()}"
+        f"{index}. {question['title']}\n\n{answer.strip()}"
         for index, (question, answer) in enumerate(zip(questions, answers), 1)
     )
+
+
+def repeats_question_controls(segment: dict[str, Any]) -> bool:
+    """Match only an entire plain question/option listing, never partial text."""
+    questions = normalize_questions(segment.get("metadata", {}).get("questions"))
+    if not questions:
+        return False
+    lines = [line.strip() for line in str(segment.get("text") or "").splitlines() if line.strip()]
+    expected = []
+    for question in questions:
+        expected.append(question["title"].strip())
+        expected.extend(option.strip() for option in question["options"])
+    # Only option bullets are ignored. Extra prose or differently formatted
+    # questions must remain visible alongside the controls.
+    option_indices = set()
+    offset = 0
+    for question in questions:
+        option_indices.update(range(offset + 1, offset + 1 + len(question["options"])))
+        offset += 1 + len(question["options"])
+    actual = [
+        line[2:].strip() if index in option_indices and line[:2] in {"- ", "* ", "+ "} else line
+        for index, line in enumerate(lines)
+    ]
+    return actual == expected
