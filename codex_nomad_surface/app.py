@@ -1777,9 +1777,7 @@ def render_progress_operation_segments(operation_segments: list[dict[str, Any]])
         for segment in operation_segments
         if str(segment.get("text") or "").strip()
     ]
-    if len(lines) <= 1:
-        for line in lines:
-            st.markdown(line)
+    if not lines:
         return
     items = "".join(f"<li>{html.escape(line)}</li>" for line in lines)
     st.markdown(
