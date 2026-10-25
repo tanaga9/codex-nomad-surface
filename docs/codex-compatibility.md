@@ -27,24 +27,51 @@ verification, and explicit non-adoption decisions. Product scope remains in
 
 | Field | Checkpoint |
 | --- | --- |
-| Review date | 2026-10-01 |
-| Reviewed upstream release | Codex CLI 0.159.2, released 2026-09-29 |
-| Local CLI / generated API schemas | 0.159.2 |
-| Connected App Server version | 0.159.2, confirmed by WebSocket initialization |
-| Reviewed repository revision | Working-tree changes based on `799b3e2` |
-| Scope | Asynchronous question presentation, turn-aware panel state, and conservative duplicate-text suppression. Metadata and composition review: `799b3e2`; upgrade review: `f02c805`; broad App Server review: `beb3a8d`. Not an exhaustive desktop or CLI feature audit. |
-| Verification | 136 focused tests and 10 subtests passed, including question-only history, stable question controls, recovery deduplication, acknowledged insertion, concurrent receiving, and a loopback WebSocket peer. Local Streamlit 1.63.0 browser checks cover phase-less question text, manual panel state across simulated steer acknowledgements, completion, retained answers, and question-panel closure after confirmed draft insertion. Async payloads and steer acknowledgements were fixtures; actual model emission and reply interpretation remain unverified. |
+| Review date | 2026-10-25 |
+| Reviewed upstream release | Codex CLI 0.164.0, released 2026-10-23; release-summary review only, not an exhaustive release diff |
+| Local CLI / generated API schemas | 0.164.0, confirmed after the user upgraded; selected schemas compared with 0.162.1 |
+| Connected App Server version | Unknown for this review; no connection made. Last live-use verification remains 0.159.2 below. |
+| Reviewed repository revision | `974bd4b` |
+| Scope | Current App Server documentation and local generated schemas for history views, turn inputs, server requests, filesystem access, and output items; existing async-question, interaction, and runtime-control tests. Earlier UI review: `799b3e2`; broad App Server review: `beb3a8d`. |
+| Verification | 118 focused tests and 10 subtests passed (`test_codex_client`, `test_live_interactions`, `test_async_questions`, `test_run_overrides`). Includes fixtures and a loopback WebSocket peer; no actual 0.164.0 server/model turn or browser check. |
 
 Sources:
 
 - [Official changelog](https://learn.chatgpt.com/docs/changelog)
 - [App Server documentation](https://learn.chatgpt.com/docs/app-server)
 - [Configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
-- Local CLI-generated JSON schemas for 0.159.2.
+- Local CLI-generated JSON schemas for 0.164.0 and selected comparisons with 0.162.1.
 - [Streamlit widget identity](https://docs.streamlit.io/develop/concepts/architecture/widget-behavior)
   and [1.63.0 expander API](https://docs.streamlit.io/1.63.0/develop/api-reference/layout/st.expander).
 
-The generated schema exposes `agentMessage.delivery: "async"` and questions
+### Current Findings
+
+- No required wire-contract migration was identified in the inspected paths.
+  This is a scoped assessment, not a complete compatibility guarantee.
+- `thread/turns/list` still defaults to `itemsView: "summary"`; the client
+  omits this parameter. Verify summary fidelity for the existing history UI,
+  then explicitly request `full` if complete item data is needed. Keep the
+  current bounded turn pagination.
+- `fs/readFile` and `fs/readDirectory` are documented and present in the local
+  schema. Reassess `EX-004` and `EX-008` against these direct APIs before
+  extending host-local file access; equivalent authentication, size limits,
+  and bounded traversal still need validation.
+- The 0.164.0 schema adds a durable `fileId` alternative to inline `result`
+  for `imageGeneration` items, plus optional input-image provenance. The
+  client has no dedicated rendering for this item type. Generated-image
+  display remains a capability gap, rather than a regression in an existing
+  image-generation renderer.
+- `partial_answer` is documented and present in the schema. The client retains
+  its phase but groups it with answer text. Verify the intended live panel
+  behavior; turn completion must remain driven by turn events.
+- Authenticated WebSocket support and permission-profile controls remain open.
+  CLI presets and inline command menus do not by themselves require replacing
+  project Prompt Templates or the existing runtime controls.
+
+### Retained Implementation Context
+
+The earlier 0.159.2 review and the current generated schema expose
+`agentMessage.delivery: "async"` and questions
 with a `title` and nullable string-array `options`. These are preserved in live output
 and history when supplied by the server, including messages with empty text.
 Each question has suggested-choice and free-text controls; no choice is selected
@@ -115,3 +142,6 @@ ordering those bounded lists should use. Other product non-goals remain in
 | Bearer-authenticated WebSocket connections | Conditional capability gap: the client does not supply an authorization header. Needed when connecting to an authenticated listener. |
 | Permission profiles and automatic approval review controls | Optional UI feature: API support exists, but selection controls are not implemented. This is not an explicit non-adoption decision. |
 | Summary history items | Unverified behavior: `thread/turns/list` omits `itemsView` and receives the default summary view. Check whether it retains the information needed by the existing history UI. |
+| Direct filesystem APIs | Reassess `EX-004` and `EX-008` using `fs/readFile` and `fs/readDirectory`; validate auth, payload limits, and bounded enumeration before migrating. |
+| Generated-image items | 0.164.0 supports inline `result` or durable `fileId`; dedicated display and attachment retrieval are not implemented or live-verified. |
+| Partial answers | Phase is preserved but grouped with answer text; verify live presentation with `partial_answer` followed by further output. |
