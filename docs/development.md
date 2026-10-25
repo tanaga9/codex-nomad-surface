@@ -48,6 +48,12 @@ The macOS `run.command` and Windows `run.cmd` launchers run `build-components`
 before starting Streamlit. Pass `--skip-component-build` to bypass that build
 explicitly. Pass additional Streamlit arguments after `--`.
 
+Both launchers also check runtime dependencies against `pyproject.toml`
+and reinstall the editable project when requirements or installed versions
+differ. Satisfied ranges are kept; this does not upgrade every library to its
+latest release. A failed sync stops startup. Dependency installation uses the
+package build backend, which builds components even with `--skip-component-build`.
+
 Build a wheel and source distribution with
 `python3 scripts/dev.py build-package`. This command rebuilds all frontend
 components, removes stale Python build output, creates fresh distributions
@@ -108,10 +114,17 @@ UI Test state is kept separate from normal Codex chat state. Normal turns use
 
 ## Streamlit Upgrade Smoke Test
 
+The supported version is pinned in `pyproject.toml`. AppTest buffers edits to
+form widgets until form submission. Tests that seed Session State check
+server-known values; unsubmitted form drafts across reruns require a browser
+check. Keep that distinction when testing concurrent question and MCP forms.
+
 After updating Streamlit, verify these browser flows before release:
 
 - Confirm unauthenticated users cannot view the operation screen or file links.
 - In UI Test mode, exercise an approval and a multi-question user response.
+- With two question or MCP forms visible, type into the second form without
+  submitting it, resolve the first request, and confirm the second draft remains.
 - At a phone-sized viewport, append a Prompt Template, Skill, and file path to the
   native chat input, then send a message with an image attachment.
 - Drag a file over the page, exit through each viewport edge, and cancel

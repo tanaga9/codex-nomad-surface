@@ -25,6 +25,13 @@ while (( $# > 0 )); do
   esac
 done
 
+if [[ ! -x .venv/bin/python ]]; then
+  echo "The virtual environment is missing. Run python3 scripts/dev.py setup first." >&2
+  exit 1
+fi
+
+.venv/bin/python scripts/dev.py sync-dependencies
+
 if (( ! SKIP_COMPONENT_BUILD )); then
   .venv/bin/python scripts/dev.py build-components
 fi

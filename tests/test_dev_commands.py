@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import subprocess
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -14,6 +16,78 @@ assert SPEC is not None and SPEC.loader is not None
 dev = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dev
 SPEC.loader.exec_module(dev)
+
+
+@pytest.mark.parametrize(
+    ("recorded", "version", "should_install"),
+    [
+        (["streamlit==1.66.1"], "1.66.1", False),
+        (["streamlit==1.63.0"], "1.66.1", True),
+        (["streamlit==1.66.1"], "1.63.0", True),
+        (["streamlit==1.66.1", "removed-package>=1"], "1.66.1", True),
+        (["streamlit==1.66.1", 'pytest>=8; extra == "test"'], "1.66.1", False),
+    ],
+)
+def test_dependency_sync_checks_metadata_and_installed_versions(
+    tmp_path, monkeypatch, recorded, version, should_install,
+):
+    monkeypatch.setattr(dev, "ROOT", tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "surface"\nversion = "0.1.0"\n'
+        'dependencies = ["streamlit==1.66.1"]\n', encoding="utf-8",
+    )
+    monkeypatch.setattr(dev.metadata, "distribution", lambda name: SimpleNamespace(
+        version="0.1.0", requires=recorded,
+    ))
+    monkeypatch.setattr(dev.metadata, "version", lambda name: version)
+    commands = []
+    monkeypatch.setattr(dev, "_run", lambda command: commands.append(command))
+
+    dev.sync_dependencies()
+
+    assert commands == (
+        [[sys.executable, "-m", "pip", "install", "-e", "."]] if should_install else []
+    )
+
+
+def test_dependency_sync_installs_missing_package(tmp_path, monkeypatch):
+    monkeypatch.setattr(dev, "ROOT", tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "surface"\nversion = "0.1.0"\n'
+        'dependencies = ["missing-package>=1"]\n', encoding="utf-8",
+    )
+    monkeypatch.setattr(dev.metadata, "distribution", lambda name: SimpleNamespace(
+        version="0.1.0", requires=["missing-package>=1"],
+    ))
+    def missing(name):
+        raise dev.metadata.PackageNotFoundError(name)
+    monkeypatch.setattr(dev.metadata, "version", missing)
+    commands = []
+    monkeypatch.setattr(dev, "_run", lambda command: commands.append(command))
+
+    dev.sync_dependencies()
+
+    assert len(commands) == 1
+
+
+def test_macos_launcher_stops_after_failed_dependency_sync(tmp_path):
+    import shutil
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("macOS launcher requires zsh")
+    launcher = tmp_path / "run.command"
+    launcher.write_text((SCRIPT.parents[1] / "run.command").read_text())
+    python = tmp_path / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\necho "$*" >> calls.txt\nexit 7\n')
+    python.chmod(0o755)
+
+    result = subprocess.run([zsh, str(launcher)], capture_output=True, text=True)
+
+    assert result.returncode == 7
+    assert (tmp_path / "calls.txt").read_text().splitlines() == [
+        "scripts/dev.py sync-dependencies"
+    ]
 
 
 def test_registry_contains_surface_components() -> None:

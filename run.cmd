@@ -46,6 +46,10 @@ shift
 goto collect_streamlit_arguments
 
 :arguments_parsed
+".venv\Scripts\python.exe" scripts\dev.py sync-dependencies
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" goto dependency_sync_failed
+
 if "%SKIP_COMPONENT_BUILD%"=="1" goto run_streamlit
 
 ".venv\Scripts\python.exe" scripts\dev.py build-components
@@ -64,6 +68,14 @@ if not "%EXIT_CODE%"=="0" (
   pause
 )
 
+exit /b %EXIT_CODE%
+
+:dependency_sync_failed
+echo.
+echo Dependency synchronization exited with error code %EXIT_CODE%.
+echo Review the error above, then press any key to close this window.
+echo.
+pause
 exit /b %EXIT_CODE%
 
 :component_build_failed

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import fnmatch
+from importlib import metadata
 import os
 from pathlib import Path
 import re
@@ -362,10 +363,46 @@ def setup(components: tuple[Component, ...]) -> None:
     print("Development environment is ready.", flush=True)
 
 
+def sync_dependencies() -> None:
+    """Install the project when runtime requirements or installed versions drift."""
+    from packaging.requirements import Requirement
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    requirements = [Requirement(value) for value in project.get("dependencies", [])]
+
+    def active(requirement: Requirement) -> bool:
+        return requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+
+    expected = {str(requirement) for requirement in requirements if active(requirement)}
+    needs_install = False
+    try:
+        installed = metadata.distribution(project["name"])
+        recorded = [Requirement(value) for value in installed.requires or []]
+        needs_install = (
+            installed.version != project["version"]
+            or {str(requirement) for requirement in recorded if active(requirement)} != expected
+        )
+        for requirement in requirements:
+            if active(requirement) and (
+                requirement.url
+                or not requirement.specifier.contains(metadata.version(requirement.name))
+            ):
+                needs_install = True
+    except metadata.PackageNotFoundError:
+        needs_install = True
+
+    if needs_install:
+        print("Synchronizing Python dependencies with pyproject.toml...", flush=True)
+        _run([sys.executable, "-m", "pip", "install", "-e", "."])
+    else:
+        print("Python dependencies are already synchronized.", flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("setup", help="Prepare Python and all frontend components.")
+    subparsers.add_parser("sync-dependencies", help="Synchronize installed runtime dependencies.")
     subparsers.add_parser("build-components", help="Build every frontend component.")
     subparsers.add_parser(
         "build-package", help="Clean and build verified Python distributions."
@@ -383,6 +420,8 @@ def main() -> int:
         components = load_components()
         if args.command == "setup":
             setup(components)
+        elif args.command == "sync-dependencies":
+            sync_dependencies()
         elif args.command == "build-components":
             for component in components:
                 build_component(component)

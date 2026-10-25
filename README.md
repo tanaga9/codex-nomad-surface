@@ -92,9 +92,11 @@ distributions include the generated runtime assets, so installing from an
 sdist does not require Node.js. Standard builds from a source checkout require
 the development setup to have installed the frontend dependencies first.
 
-The macOS `run.command` and Windows `run.cmd` launchers rebuild all frontend
-components before starting the app. Skip that step only when explicitly
-requested:
+The macOS `run.command` and Windows `run.cmd` launchers synchronize Python
+runtime dependencies with `pyproject.toml` when needed, then rebuild all frontend
+components before starting the app. Installation failures stop startup. Installing
+the project also builds components, even when the explicit build step is skipped.
+Skip the explicit build step only when explicitly requested:
 
 macOS:
 

@@ -213,7 +213,7 @@ def test_invalid_url_can_be_declined_without_confirming(url):
     assert not at.button[1].disabled
 
 
-def test_other_form_draft_survives_resolving_a_request():
+def test_other_form_committed_draft_survives_resolving_a_request():
     source = '''
 import streamlit as st
 from codex_nomad_surface import app
@@ -234,7 +234,9 @@ if st.button("Resolve first"):
 app.render_pending_requests(client, None, {"requests": st.session_state.requests})
 '''
     at = AppTest.from_string(source).run()
-    at.text_input[1].input("Keep draft").run()
+    # AppTest cannot model a browser's unsubmitted form buffer across reruns.
+    at.session_state[at.text_input[1].key] = "Keep draft"
+    at.run()
     at.button[0].click().run()
     assert not at.exception and len(at.text_input) == 1
     assert at.text_input[0].value == "Keep draft"

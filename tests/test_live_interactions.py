@@ -223,7 +223,7 @@ def test_ui_drains_progress_and_resolutions_while_questions_are_visible(monkeypa
     assert not pending["requests"] and pending["result"]["ok"]
 
 
-def test_question_forms_keep_other_drafts_when_one_is_resolved():
+def test_question_forms_keep_committed_drafts_when_one_is_resolved():
     from streamlit.testing.v1 import AppTest
     # Real Streamlit widget state, without connecting to Codex.
     source = '''
@@ -247,7 +247,9 @@ st.caption("Progress continues")
     at = AppTest.from_string(source).run()
     assert not at.exception
     assert len(at.text_input) == 2
-    at.text_input[1].input("Keep this draft").run()
+    # AppTest buffers form edits until submit, matching browser semantics.
+    # Seed server-known state here; unsubmitted browser drafts need a browser check.
+    at.session_state[at.text_input[1].key] = "Keep this draft"
     at.run()
     assert at.text_input[1].value == "Keep this draft"
     at.button[0].click().run()
